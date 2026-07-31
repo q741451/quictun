@@ -101,7 +101,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: quictun-linux-x86_64
+          name: quictun_linux-x86_64
           path: dist/*
           if-no-files-found: error
 
@@ -183,7 +183,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: quictun-linux-arm64
+          name: quictun_linux-arm64
           path: dist/*
           if-no-files-found: error
 
