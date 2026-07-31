@@ -49,6 +49,17 @@ http_archive(
     sha256 = "d8a701123250e03b3c0865babdfc78540d66374db78f74aafd09bf08545c00bd",  # Last updated 2025-11-25
     strip_prefix = "gurl-94ff147fe0b96b4cca5d6d316b9af6210c0b8051",
     urls = ["https://github.com/google/gurl/archive/94ff147fe0b96b4cca5d6d316b9af6210c0b8051.tar.gz"],
+    # base/strings/utf_string_conversions.h has `static_assert(false, ...)`
+    # inside uninstantiated template functions (meant to reject literal
+    # arguments at the call site). That is non-dependent on the template
+    # parameter, which some compilers (observed with both clang-14 and
+    # clang-18 against libstdc++) reject outright at definition time rather
+    # than only when instantiated. Make the condition depend on the
+    # template parameter (still always false) so it is only evaluated on
+    # instantiation, matching the file's own intent.
+    patch_cmds = [
+        "sed -i 's/static_assert(false,/static_assert(N == static_cast<size_t>(-1),/' base/strings/utf_string_conversions.h",
+    ],
 )
 
 http_archive(

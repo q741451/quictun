@@ -1,0 +1,108 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # quictun links against BoringSSL/abseil/protobuf/googleurl via quiche's
+      # own Bazel setup, all built from source -- this is the single biggest
+      # cost in the job, so cache Bazel's repository + build output caches
+      # keyed on the lockfile and quictun's own sources. A hit here turns a
+      # ~20-30 min cold build into a couple of minutes.
+      - name: Cache Bazel
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel
+            ~/.cache/bazelisk
+          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', 'quiche/quictun/**') }}
+          restore-keys: |
+            bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}-
+            bazel-${{ runner.os }}-
+
+      # Ubuntu's default clang is too old for this quiche snapshot's vendored
+      # Chromium `base/` code (hits real compiler-conformance issues around
+      # C++20 constexpr and `typename` requirements well before quictun's own
+      # code is even reached). clang-18 is the version verified to work.
+      - name: Install clang-18
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 18
+
+      - name: Install bazelisk
+        run: |
+          curl -fsSL -o /usr/local/bin/bazelisk \
+            https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          chmod +x /usr/local/bin/bazelisk
+          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+
+      - name: Build quictun_client and quictun_server (static)
+        env:
+          CC: clang-18
+        run: |
+          set -e
+          bazel build -c opt \
+            --jobs=2 \
+            --linkopt=-static \
+            --@com_google_googleurl//build_config:system_icu=0 \
+            //quiche/quictun:quictun_client //quiche/quictun:quictun_server
+
+      - name: Stage artifacts
+        run: |
+          set -e
+          mkdir -p dist
+          cp bazel-bin/quiche/quictun/quictun_client dist/quictun-client-linux-x86_64
+          cp bazel-bin/quiche/quictun/quictun_server dist/quictun-server-linux-x86_64
+          chmod +x dist/*
+          # Fail loudly if a future change accidentally drops static linking.
+          for f in dist/*; do
+            file "$f"
+            file "$f" | grep -q "statically linked" || { echo "::error::$f is not statically linked"; exit 1; }
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quictun-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          cd release && sha256sum * > SHA256SUMS.txt
+          ls -la
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
