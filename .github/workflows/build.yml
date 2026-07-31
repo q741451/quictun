@@ -89,8 +89,8 @@ jobs:
         run: |
           set -e
           mkdir -p dist
-          cp bazel-bin/quiche/quictun/quictun_client dist/quictun-client-linux-x86_64
-          cp bazel-bin/quiche/quictun/quictun_server dist/quictun-server-linux-x86_64
+          cp bazel-bin/quiche/quictun/quictun_client dist/quictun_client-linux-x86_64
+          cp bazel-bin/quiche/quictun/quictun_server dist/quictun_server-linux-x86_64
           chmod +x dist/*
           # Fail loudly if a future change accidentally drops static linking.
           for f in dist/*; do
@@ -101,7 +101,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: quictun_linux-x86_64
+          name: quictun-linux-x86_64
           path: dist/*
           if-no-files-found: error
 
@@ -171,8 +171,8 @@ jobs:
                 --linkopt=-Wl,--gc-sections \
                 --@com_google_googleurl//build_config:system_icu=0 \
                 //quiche/quictun:quictun_client //quiche/quictun:quictun_server
-              cp bazel-bin/quiche/quictun/quictun_client dist/quictun-client-linux-arm64
-              cp bazel-bin/quiche/quictun/quictun_server dist/quictun-server-linux-arm64
+              cp bazel-bin/quiche/quictun/quictun_client dist/quictun_client-linux-arm64
+              cp bazel-bin/quiche/quictun/quictun_server dist/quictun_server-linux-arm64
               chmod +x dist/*
               for f in dist/*; do
                 file "$f"
@@ -183,7 +183,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: quictun_linux-arm64
+          name: quictun-linux-arm64
           path: dist/*
           if-no-files-found: error
 
