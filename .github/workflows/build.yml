@@ -45,9 +45,10 @@ jobs:
 
       - name: Install bazelisk
         run: |
-          curl -fsSL -o /usr/local/bin/bazelisk \
+          curl -fsSL -o /tmp/bazelisk \
             https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
-          chmod +x /usr/local/bin/bazelisk
+          chmod +x /tmp/bazelisk
+          sudo mv /tmp/bazelisk /usr/local/bin/bazelisk
           sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
 
       - name: Build quictun_client and quictun_server (static)
