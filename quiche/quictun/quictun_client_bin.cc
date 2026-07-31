@@ -30,6 +30,7 @@
 #include "quiche/quic/core/quic_versions.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
 #include "quiche/quic/tools/fake_proof_verifier.h"
+#include "quiche/quic/tools/quic_event_loop_tools.h"
 #include "quiche/quic/tools/web_transport_only_client.h"
 #include "quiche/quictun/quictun_auth.h"
 #include "quiche/quictun/tcp_util.h"
@@ -124,12 +125,26 @@ ManagedSession DialUntilConnected(quic::QuicEventLoop* event_loop,
         },
         /*subprotocols=*/{}, extra_headers);
     if (status.ok()) {
-      if (!options.quiet) {
-        QUICHE_LOG(INFO) << "connected to " << options.server_address;
+      // ConnectSync() only confirms the CONNECT stream was created, not
+      // that the server actually accepted the session (e.g. rejected a
+      // bad --key with 403) -- that's only known once OnSessionReady() or
+      // OnSessionClosed() fires, asynchronously. Wait for a definitive
+      // answer here rather than handing back a session whose readiness
+      // callers can't yet trust; see the comment at the ready() check in
+      // LocalListener::HandleAccepted for what went wrong before this.
+      bool settled = quic::ProcessEventsUntil(
+          event_loop, [&] { return visitor_ptr->ready() || visitor_ptr->closed(); });
+      if (settled && visitor_ptr->ready()) {
+        if (!options.quiet) {
+          QUICHE_LOG(INFO) << "connected to " << options.server_address;
+        }
+        return ManagedSession{std::move(client), visitor_ptr};
       }
-      return ManagedSession{std::move(client), visitor_ptr};
-    }
-    if (!options.quiet) {
+      if (!options.quiet) {
+        QUICHE_LOG(INFO) << (settled ? "session rejected by server"
+                                     : "timed out waiting for session");
+      }
+    } else if (!options.quiet) {
       QUICHE_LOG(INFO) << "re-connecting: " << status;
     }
     absl::SleepFor(absl::Seconds(1));
@@ -183,6 +198,24 @@ class LocalListener : public quic::QuicSocketEventListener {
     ManagedSession& mux = (*sessions_)[idx];
     if (mux.visitor->closed()) {
       mux = DialUntilConnected(event_loop_, options_);
+    }
+    if (!mux.visitor->ready()) {
+      // ConnectSync() only confirms the CONNECT stream was created, not
+      // that the server actually accepted the session (e.g. a bad --key
+      // gets a 403) -- that only happens asynchronously; closed() is what
+      // tracks a *fully established* session tearing down. In between,
+      // the underlying WebTransport session object is not guaranteed to
+      // still be alive: a rejection can tear it down via the CONNECT
+      // stream closing before OnSessionClosed() ever fires, at which
+      // point mux.visitor->session() is a dangling pointer that closed()
+      // hasn't caught up to yet. Touching it here was a real
+      // use-after-free (crash reported against a wrong --key). Just
+      // refuse the connection instead; the caller retries.
+      if (!options_.quiet) {
+        QUICHE_LOG(INFO) << "session not ready yet, dropping connection";
+      }
+      quic::socket_api::Close(fd);
+      return;
     }
     webtransport::Session* session = mux.visitor->session();
     if (!session->CanOpenNextOutgoingBidirectionalStream()) {
