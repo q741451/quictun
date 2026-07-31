@@ -56,8 +56,12 @@ jobs:
           CC: clang-18
         run: |
           set -e
+          nproc
+          # No --jobs override: the 2-core/1.9GB cap this was originally
+          # tuned for was a local dev-sandbox constraint, not a real limit
+          # of the GitHub-hosted runner. Let Bazel size parallelism off the
+          # runner's actual core count.
           bazel build -c opt \
-            --jobs=2 \
             --linkopt=-static \
             --@com_google_googleurl//build_config:system_icu=0 \
             //quiche/quictun:quictun_client //quiche/quictun:quictun_server
