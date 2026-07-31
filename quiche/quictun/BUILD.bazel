@@ -1,0 +1,124 @@
+# Copyright 2026 The Chromium Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+#
+# quictun: a QUIC-based TCP tunnel in the spirit of kcptun, built as a small
+# embedder on top of standalone QUICHE (see the top-level README's "Build and
+# run standalone QUICHE" section).
+
+licenses(["notice"])
+
+package(default_visibility = ["//visibility:private"])
+
+cc_library(
+    name = "quictun_auth",
+    hdrs = ["quictun_auth.h"],
+    deps = [
+        "@boringssl//:crypto",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "tcp_util",
+    srcs = ["tcp_util.cc"],
+    hdrs = ["tcp_util.h"],
+    deps = [
+        "//quiche:io_tool_support",
+        "//quiche:quiche_core",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "cert_util",
+    srcs = ["cert_util.cc"],
+    hdrs = ["cert_util.h"],
+    deps = [
+        "//quiche:quiche_core",
+        "@boringssl//:crypto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "tunnel_pump",
+    srcs = ["tunnel_pump.cc"],
+    hdrs = ["tunnel_pump.h"],
+    deps = [
+        "//quiche:io_tool_support",
+        "//quiche:quiche_core",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "session_visitors",
+    srcs = ["session_visitors.cc"],
+    hdrs = ["session_visitors.h"],
+    deps = [
+        ":tcp_util",
+        ":tunnel_pump",
+        "//quiche:io_tool_support",
+        "//quiche:quiche_core",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "quictun_backend",
+    srcs = ["quictun_backend.cc"],
+    hdrs = ["quictun_backend.h"],
+    deps = [
+        ":quictun_auth",
+        ":session_visitors",
+        "//quiche:io_tool_support",
+        "//quiche:quiche_core",
+    ],
+)
+
+cc_binary(
+    name = "quictun_client",
+    srcs = ["quictun_client_bin.cc"],
+    deps = [
+        ":quictun_auth",
+        ":session_visitors",
+        ":tcp_util",
+        ":tunnel_pump",
+        "//quiche:io_tool_support",
+        "//quiche:quiche_core",
+        "//quiche:quiche_tool_support",
+        "@com_google_absl//absl/log:globals",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/time",
+    ],
+)
+
+cc_binary(
+    name = "quictun_server",
+    srcs = ["quictun_server_bin.cc"],
+    deps = [
+        ":cert_util",
+        ":quictun_auth",
+        ":quictun_backend",
+        ":tcp_util",
+        "//quiche:io_tool_support",
+        "//quiche:quic_server_factory",
+        "//quiche:quic_toy_server",
+        "//quiche:quiche_core",
+        "//quiche:quiche_tool_support",
+        "@com_google_absl//absl/log:globals",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)

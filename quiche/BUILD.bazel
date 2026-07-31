@@ -123,6 +123,7 @@ cc_proto_library(
 
 cc_library(
     name = "quiche_core",
+    visibility = ["//visibility:public"],
     srcs = quiche_core_srcs + default_platform_impl_srcs,
     hdrs = quiche_core_hdrs + default_platform_impl_hdrs,
     includes = ["common/platform/default"],
@@ -194,6 +195,7 @@ cc_library(
 
 cc_library(
     name = "quiche_tool_support",
+    visibility = ["//visibility:public"],
     srcs = quiche_tool_support_srcs + default_platform_impl_tool_support_srcs,
     hdrs = quiche_tool_support_hdrs + default_platform_impl_tool_support_hdrs,
     includes = ["common/platform/default"],
@@ -281,6 +283,7 @@ cc_library(
 
 cc_library(
     name = "quic_toy_server",
+    visibility = ["//visibility:public"],
     srcs = [
         "quic/tools/quic_toy_server.cc",
     ],
@@ -298,6 +301,7 @@ cc_library(
 
 cc_library(
     name = "quic_server_factory",
+    visibility = ["//visibility:public"],
     srcs = [
         "quic/tools/quic_server_factory.cc",
     ],
@@ -354,6 +358,7 @@ test_suite_from_source_list(
 
 cc_library(
     name = "io_tool_support",
+    visibility = ["//visibility:public"],
     srcs = io_tool_support_srcs,
     hdrs = io_tool_support_hdrs,
     deps = [
