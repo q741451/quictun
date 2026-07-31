@@ -14,6 +14,13 @@ jobs:
     name: Build (x86_64)
     runs-on: ubuntu-latest
     steps:
+      # NOTE: this job's steps are the reference native-build sequence, run
+      # directly on the runner. build-arm64 below is a separate job because
+      # it runs the same build under QEMU emulation inside a container,
+      # which is drastically slower and only worth doing at release time --
+      # sharing steps between "run on host" and "run inside `docker run`"
+      # isn't practical with plain GitHub Actions YAML, hence the
+      # duplication instead of extracting a template.
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -61,8 +68,20 @@ jobs:
           # tuned for was a local dev-sandbox constraint, not a real limit
           # of the GitHub-hosted runner. Let Bazel size parallelism off the
           # runner's actual core count.
+          #
+          # -s (strip) + --gc-sections: quictun only uses a sliver of
+          # quiche's API (raw QUIC/WebTransport, no HTTP/1-2 serving, no
+          # QPACK compression dictionaries beyond what WebTransport itself
+          # needs, etc.), but static linking pulls in whole archive members
+          # from BoringSSL/abseil/protobuf/googleurl regardless. These two
+          # flags let the linker drop unreferenced functions/data and debug
+          # symbols; verified locally to cut both binaries by ~22%
+          # (quictun_client 6.7MB->5.25MB, quictun_server 7.6MB->5.94MB)
+          # with no functional change (full tunnel test still passes).
           bazel build -c opt \
             --linkopt=-static \
+            --linkopt=-s \
+            --linkopt=-Wl,--gc-sections \
             --@com_google_googleurl//build_config:system_icu=0 \
             //quiche/quictun:quictun_client //quiche/quictun:quictun_server
 
@@ -86,10 +105,95 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  build-arm64:
+    name: Build (arm64, QEMU)
+    runs-on: ubuntu-latest
+    # A full quiche+BoringSSL+abseil+protobuf build under user-mode QEMU
+    # emulation (every instruction emulated, not just cross-compiled) is
+    # drastically slower than native -- only worth paying for on an actual
+    # release, not on every push/PR. bazelisk has no 32-bit ARM build at
+    # all (only linux-amd64/linux-arm64), so this QEMU approach -- running
+    # a real Bazel natively inside an emulated container, no cross-toolchain
+    # config needed -- only covers arm64. armv7 would need an actual Bazel
+    # cc_toolchain cross-compiling from an amd64 host; not done yet.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Cache Bazel (arm64)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel-arm64
+            ~/.cache/bazelisk-arm64
+          key: bazel-arm64-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', 'quiche/quictun/**') }}
+          restore-keys: |
+            bazel-arm64-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock') }}-
+            bazel-arm64-
+
+      # Everything (build + staging) happens in one `docker run`: bazel-bin
+      # is a symlink into the Bazel cache, which is bind-mounted from a
+      # host path that only exists inside this container's mount
+      # namespace. Staging dist/ as a separate host-side step after the
+      # container exits would follow a dangling symlink.
+      - name: Build and stage (native inside arm64 container)
+        run: |
+          set -e
+          mkdir -p "$HOME/.cache/bazel-arm64" "$HOME/.cache/bazelisk-arm64" dist
+          docker run --rm --platform=linux/arm64 \
+            -v "${{ github.workspace }}":/work \
+            -v "$HOME/.cache/bazel-arm64":/root/.cache/bazel \
+            -v "$HOME/.cache/bazelisk-arm64":/root/.cache/bazelisk \
+            -w /work \
+            ubuntu:24.04 \
+            bash -c '
+              set -e
+              uname -m
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq curl ca-certificates file gnupg >/dev/null
+              curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
+              chmod +x /tmp/llvm.sh
+              /tmp/llvm.sh 18
+              curl -fsSL -o /usr/local/bin/bazel \
+                https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-arm64
+              chmod +x /usr/local/bin/bazel
+              CC=clang-18 bazel build -c opt \
+                --linkopt=-static \
+                --linkopt=-s \
+                --linkopt=-Wl,--gc-sections \
+                --@com_google_googleurl//build_config:system_icu=0 \
+                //quiche/quictun:quictun_client //quiche/quictun:quictun_server
+              cp bazel-bin/quiche/quictun/quictun_client dist/quictun-client-linux-arm64
+              cp bazel-bin/quiche/quictun/quictun_server dist/quictun-server-linux-arm64
+              chmod +x dist/*
+              for f in dist/*; do
+                file "$f"
+                file "$f" | grep -q "statically linked" || { echo "::error::$f is not statically linked"; exit 1; }
+              done
+            '
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quictun-linux-arm64
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: Create Release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ build, build-arm64 ]
+    # always() so a build-arm64 failure/timeout (new, less proven than the
+    # x86_64 job) doesn't block releasing the x86_64 binaries; it just won't
+    # have an arm64 artifact to attach that time.
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
