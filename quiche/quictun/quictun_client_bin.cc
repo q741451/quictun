@@ -6,6 +6,7 @@
 // analogous to `kcptun -l <local> -r <remote>` but with QUIC (via
 // google/quiche's WebTransport-over-HTTP/3) standing in for KCP+smux.
 
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
@@ -243,6 +244,15 @@ class LocalListener : public quic::QuicSocketEventListener {
 };
 
 int Main(int argc, char** argv) {
+  // quic::socket_api::Send() (tunnel_pump.cc's FlushPendingToSocket) is a
+  // bare ::send() with no MSG_NOSIGNAL, so writing to a local TCP socket
+  // whose peer already reset the connection -- routine under heavy
+  // concurrent traffic, where browsers cancel/close proxied downloads
+  // constantly -- delivers SIGPIPE. Left at its default disposition, that
+  // kills the whole process instantly with no log line and no crash
+  // report, which is exactly what an EPIPE from Send() should have become
+  // instead (CloseAll() on that one connection).
+  signal(SIGPIPE, SIG_IGN);
   // quiche defaults to only printing WARNING and above; without this, every
   // QUICHE_LOG(INFO) call in quictun (connection status, stream open/close,
   // the periodic RTT/bandwidth stats) is silently dropped. An explicit

@@ -7,6 +7,7 @@
 // `kcptun-server -l <listen> -t <target>` but with QUIC (via
 // google/quiche's WebTransport-over-HTTP/3) standing in for KCP+smux.
 
+#include <csignal>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -75,6 +76,11 @@ quic::QuicConfig BuildTunedQuicConfig() {
 }
 
 int Main(int argc, char** argv) {
+  // See the matching comment in quictun_client_bin.cc: TunnelPump's writes
+  // to the proxied TCP target socket can hit a reset connection under load,
+  // and an unhandled SIGPIPE from that would otherwise kill the whole
+  // server process instead of just closing that one stream.
+  signal(SIGPIPE, SIG_IGN);
   // See the matching comment in quictun_client_bin.cc.
   absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfo);
   quiche::QuicheSystemEventLoop system_event_loop("quictun-server");

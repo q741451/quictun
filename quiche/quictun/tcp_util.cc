@@ -22,13 +22,30 @@ namespace quictun {
 
 absl::StatusOr<quic::QuicSocketAddress> ResolveHostPort(
     absl::string_view host_port) {
-  size_t colon = host_port.find_last_of(':');
-  if (colon == absl::string_view::npos || colon == host_port.size() - 1) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("expected \"host:port\", got \"", host_port, "\""));
+  std::string host;
+  std::string port;
+  if (!host_port.empty() && host_port[0] == '[') {
+    // IPv6 literal: "[host]:port". The host itself contains colons, so it
+    // must be bracket-delimited to disambiguate from the port separator;
+    // getaddrinfo() rejects the brackets themselves, so strip them here
+    // rather than passing e.g. "[::]" through as the node argument.
+    size_t close = host_port.find(']');
+    if (close == absl::string_view::npos || close + 1 >= host_port.size() ||
+        host_port[close + 1] != ':' || close + 2 == host_port.size()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("expected \"[host]:port\", got \"", host_port, "\""));
+    }
+    host = std::string(host_port.substr(1, close - 1));
+    port = std::string(host_port.substr(close + 2));
+  } else {
+    size_t colon = host_port.find_last_of(':');
+    if (colon == absl::string_view::npos || colon == host_port.size() - 1) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("expected \"host:port\", got \"", host_port, "\""));
+    }
+    host = std::string(host_port.substr(0, colon));
+    port = std::string(host_port.substr(colon + 1));
   }
-  std::string host(host_port.substr(0, colon));
-  std::string port(host_port.substr(colon + 1));
   if (host.empty()) {
     host = "0.0.0.0";
   }
