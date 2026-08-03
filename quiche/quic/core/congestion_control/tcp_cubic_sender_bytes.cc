@@ -22,9 +22,16 @@ namespace {
 // Constants based on TCP defaults.
 const QuicByteCount kMaxBurstBytes = 3 * kDefaultTCPMSS;
 const float kRenoBeta = 0.7f;  // Reno backoff factor.
-// The minimum cwnd based on RFC 3782 (TCP NewReno) for cwnd reductions on a
-// fast retransmission.
-const QuicByteCount kDefaultMinimumCongestionWindow = 2 * kDefaultTCPMSS;
+// quictun: bumped from RFC 3782's 2*MSS. This is the floor every
+// multiplicative post-loss cut clamps to (line ~314) *and* what a real RTO
+// timeout collapses all the way down to (HandleRetransmissionTimeout()) --
+// on a path with policer-driven loss bursts rather than genuine bandwidth
+// scarcity, repeatedly falling back to a ~2.7KB window and having to
+// re-climb from there is the actual gap vs. a loss-tolerant scheme like
+// KCP, which never collapses this hard. 100*MSS (~135KB) keeps a multi-Mbps
+// worth of window alive through cuts/timeouts instead of restarting slow
+// start from near zero every time.
+const QuicByteCount kDefaultMinimumCongestionWindow = 100 * kDefaultTCPMSS;
 }  // namespace
 
 TcpCubicSenderBytes::TcpCubicSenderBytes(
@@ -34,11 +41,33 @@ TcpCubicSenderBytes::TcpCubicSenderBytes(
     : rtt_stats_(rtt_stats),
       stats_(stats),
       reno_(reno),
-      num_connections_(kDefaultNumConnections),
+      // quictun: bumped from kDefaultNumConnections (2), pushed further
+      // still (was 16). RenoBeta()/Beta() are (N-1+backoff)/N, so N=64
+      // drops the post-loss multiplicative cut to <0.5%, and
+      // CubicBytes::Alpha() = 0.9*N/(1+Beta) scales congestion-avoidance
+      // growth roughly linearly with N (~29x baseline here). At this point
+      // the flow barely reacts to loss at all -- deliberate, per an
+      // explicit "don't care about some loss, match what a loss-tolerant
+      // scheme like KCP gets on this path" request. This is close enough
+      // to loss-unresponsive that it risks the same ISP QoS reaction as
+      // BBR; if that happens the only way back is a *lower* N, not higher.
+      num_connections_(64),
       min4_mode_(false),
       last_cutback_exited_slowstart_(false),
-      slow_start_large_reduction_(false),
-      no_prr_(false),
+      // quictun: hardcoded on (independent of the kSSLR wire option, which
+      // only self-applies server-side when the client happens to request
+      // it). On a loss during slow start, this subtracts one MSS instead of
+      // the usual multiplicative Beta() cut -- directly targets slow start
+      // stalling out from a single early loss instead of continuing to ramp.
+      slow_start_large_reduction_(true),
+      // quictun: hardcoded on (kNPRR's effect, independent of the wire
+      // tag). Skips Proportional Rate Reduction's deliberate rate
+      // throttling while recovering from a loss and sends at the full
+      // (already-cut) cwnd instead -- PRR is what makes recovery smooth,
+      // but smooth also means slow to climb back out if losses keep
+      // recurring, which is exactly the "recovers, then stays throttled by
+      // recurring policer-driven loss" pattern the report describes.
+      no_prr_(true),
       cubic_(clock),
       num_acked_packets_(0),
       congestion_window_(initial_tcp_congestion_window * kDefaultTCPMSS),

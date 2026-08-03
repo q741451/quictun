@@ -39,7 +39,9 @@ const float kBetaLastMax = 0.85f;
 
 CubicBytes::CubicBytes(const QuicClock* clock)
     : clock_(clock),
-      num_connections_(kDefaultNumConnections),
+      // quictun: kept in sync with TcpCubicSenderBytes's own num_connections_
+      // default -- see the comment there for why 64.
+      num_connections_(64),
       epoch_(QuicTime::Zero()) {
   ResetCubicState();
 }

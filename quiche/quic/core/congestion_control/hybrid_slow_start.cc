@@ -10,16 +10,9 @@
 
 namespace quic {
 
-// Note(pwestin): the magic clamping numbers come from the original code in
-// tcp_cubic.c.
-const int64_t kHybridStartLowWindow = 16;
-// Number of delay samples for detecting the increase of delay.
-const uint32_t kHybridStartMinSamples = 8;
-// Exit slow start if the min rtt has increased by more than 1/8th.
-const int kHybridStartDelayFactorExp = 3;  // 2^3 = 8
-// The original paper specifies 2 and 8ms, but those have changed over time.
-const int64_t kHybridStartDelayMinThresholdUs = 4000;
-const int64_t kHybridStartDelayMaxThresholdUs = 16000;
+// quictun: the RTT-increase-detection constants that used to live here
+// (kHybridStartLowWindow etc.) were dropped along with the logic that read
+// them -- see the comment on ShouldExitSlowStart() below.
 
 HybridSlowStart::HybridSlowStart()
     : started_(false),
@@ -57,48 +50,20 @@ bool HybridSlowStart::IsEndOfRound(QuicPacketNumber ack) const {
   return !end_packet_number_.IsInitialized() || end_packet_number_ <= ack;
 }
 
-bool HybridSlowStart::ShouldExitSlowStart(QuicTime::Delta latest_rtt,
-                                          QuicTime::Delta min_rtt,
-                                          QuicPacketCount congestion_window) {
-  if (!started_) {
-    // Time to start the hybrid slow start.
-    StartReceiveRound(last_sent_packet_number_);
-  }
-  if (hystart_found_ != NOT_FOUND) {
-    return true;
-  }
-  // Second detection parameter - delay increase detection.
-  // Compare the minimum delay (current_min_rtt_) of the current
-  // burst of packets relative to the minimum delay during the session.
-  // Note: we only look at the first few(8) packets in each burst, since we
-  // only want to compare the lowest RTT of the burst relative to previous
-  // bursts.
-  rtt_sample_count_++;
-  if (rtt_sample_count_ <= kHybridStartMinSamples) {
-    if (current_min_rtt_.IsZero() || current_min_rtt_ > latest_rtt) {
-      current_min_rtt_ = latest_rtt;
-    }
-  }
-  // We only need to check this once per round.
-  if (rtt_sample_count_ == kHybridStartMinSamples) {
-    // Divide min_rtt by 8 to get a rtt increase threshold for exiting.
-    int64_t min_rtt_increase_threshold_us =
-        min_rtt.ToMicroseconds() >> kHybridStartDelayFactorExp;
-    // Ensure the rtt threshold is never less than 2ms or more than 16ms.
-    min_rtt_increase_threshold_us = std::min(min_rtt_increase_threshold_us,
-                                             kHybridStartDelayMaxThresholdUs);
-    QuicTime::Delta min_rtt_increase_threshold =
-        QuicTime::Delta::FromMicroseconds(std::max(
-            min_rtt_increase_threshold_us, kHybridStartDelayMinThresholdUs));
-
-    if (current_min_rtt_ > min_rtt + min_rtt_increase_threshold) {
-      hystart_found_ = DELAY;
-    }
-  }
-  // Exit from slow start if the cwnd is greater than 16 and
-  // increasing delay is found.
-  return congestion_window >= kHybridStartLowWindow &&
-         hystart_found_ != NOT_FOUND;
+bool HybridSlowStart::ShouldExitSlowStart(QuicTime::Delta /*latest_rtt*/,
+                                          QuicTime::Delta /*min_rtt*/,
+                                          QuicPacketCount /*congestion_window*/) {
+  // quictun: HyStart's RTT-increase heuristic (the logic this used to run,
+  // removed below) exits slow start -- switching from exponential to much
+  // slower congestion-avoidance growth -- on any RTT bump of >=1/8 min_rtt.
+  // On a path with a policer/shaper queue adding jitter well before it
+  // actually drops anything, this fires long before real capacity is
+  // reached, capping throughput far below what a scheme that only reacts
+  // to actual loss (like KCP) gets. Slow start still ends the normal way,
+  // via a real loss event in OnPacketLost() (which sets
+  // slowstart_threshold_ = congestion_window_ there) -- this only removes
+  // the *early*, RTT-based exit.
+  return false;
 }
 
 }  // namespace quic

@@ -10,6 +10,7 @@
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/io/quic_event_loop.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/quictun/tunnel_pump.h"
 #include "quiche/web_transport/web_transport.h"
 
 namespace quictun {
@@ -43,14 +44,21 @@ class ClientTunnelSessionVisitor : public webtransport::SessionVisitor {
 };
 
 // The server side owns one instance per accepted QUIC/WebTransport session;
-// every incoming bidirectional stream is a proxied TCP connection request,
-// which this visitor answers by dialing `target` and wiring up a
-// TunnelPump, mirroring kcptun server's handleMux().
+// every incoming bidirectional stream carries an 8-byte TunnelId header
+// (see tunnel_id.h) identifying which proxied TCP connection it belongs to.
+// A new id dials `target` and registers a fresh TunnelPump in `registry`
+// (shared across every session, not just this one -- autoexpire rotation
+// on the client re-homes a tunnel onto a brand new QUIC connection, which
+// shows up here as a stream on a completely different
+// ServerTunnelSessionVisitor instance); an id already in `registry` is a
+// rotation continuation, and just gets attached to its existing TunnelPump.
+// Mirrors kcptun server's handleMux(), plus the continuation logic.
 class ServerTunnelSessionVisitor : public webtransport::SessionVisitor {
  public:
   ServerTunnelSessionVisitor(webtransport::Session* session,
                              quic::QuicEventLoop* event_loop,
-                             quic::QuicSocketAddress target, bool quiet);
+                             quic::QuicSocketAddress target, bool quiet,
+                             TunnelRegistry* registry);
 
   void OnSessionReady() override;
   void OnSessionClosed(webtransport::SessionErrorCode error_code,
@@ -62,12 +70,11 @@ class ServerTunnelSessionVisitor : public webtransport::SessionVisitor {
   void OnCanCreateNewOutgoingUnidirectionalStream() override {}
 
  private:
-  void DialAndPump(webtransport::Stream* stream);
-
   webtransport::Session* session_;
   quic::QuicEventLoop* event_loop_;
   quic::QuicSocketAddress target_;
   bool quiet_;
+  TunnelRegistry* registry_;
 };
 
 }  // namespace quictun

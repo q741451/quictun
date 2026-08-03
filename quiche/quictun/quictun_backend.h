@@ -11,6 +11,7 @@
 #include "quiche/quic/platform/api/quic_socket_address.h"
 #include "quiche/quic/tools/quic_server.h"
 #include "quiche/quic/tools/quic_simple_server_backend.h"
+#include "quiche/quictun/tunnel_pump.h"
 #include "quiche/common/http/http_header_block.h"
 
 namespace quictun {
@@ -49,11 +50,19 @@ class QuictunBackend : public quic::QuicSimpleServerBackend {
       const quiche::HttpHeaderBlock& request_headers,
       quic::WebTransportSession* session) override;
 
+  // Destroys every TunnelPump that has finished, across every session.
+  // Must only be called from a point in the event loop that is provably not
+  // nested inside any TunnelPump/StreamAdapter callback -- see the class
+  // comment on TunnelPump. quictun_server_bin.cc's Main() calls this once
+  // per event-loop iteration, right after WaitForEvents() returns.
+  void SweepClosedTunnels() { registry_.SweepClosed(); }
+
  private:
   quic::QuicServer* server_ = nullptr;
   quic::QuicSocketAddress target_;
   std::string auth_token_;
   bool quiet_;
+  TunnelRegistry registry_;
 };
 
 }  // namespace quictun

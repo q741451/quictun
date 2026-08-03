@@ -53,7 +53,7 @@ QuictunBackend::WebTransportResponse QuictunBackend::ProcessWebTransportRequest(
 
   response.response_headers[":status"] = "200";
   response.visitor = std::make_unique<ServerTunnelSessionVisitor>(
-      session, server_->event_loop(), target_, quiet_);
+      session, server_->event_loop(), target_, quiet_, &registry_);
   return response;
 }
 

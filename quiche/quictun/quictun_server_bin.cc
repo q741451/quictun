@@ -129,7 +129,14 @@ int Main(int argc, char** argv) {
   }
   QUICHE_LOG(INFO) << "quictun-server listening on " << *listen_address
                    << ", forwarding to " << *target_address;
-  server.HandleEventsForever();
+  // Not HandleEventsForever(): SweepClosedTunnels() must run once per
+  // iteration, from a point that is provably not nested inside any
+  // TunnelPump/StreamAdapter callback -- see the class comment on
+  // TunnelPump for why that matters.
+  while (true) {
+    server.WaitForEvents();
+    backend.SweepClosedTunnels();
+  }
   return 0;
 }
 
