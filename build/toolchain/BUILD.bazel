@@ -73,6 +73,12 @@ cc_toolchain_config(
         # that happened to surface each one first.
         "-lstdc++",
         "-lm",
+        # 32-bit MIPS has no native 64-bit atomic instructions, so LLVM
+        # lowers 8-byte atomic load/store/RMW ops (e.g. absl's flags
+        # SequenceLock) to __atomic_load_8/__atomic_store_8 calls into
+        # libatomic. Harmless elsewhere: nothing is pulled from a static
+        # archive unless something actually references a symbol in it.
+        "-latomic",
     ],
     unfiltered_compile_flags = [
         "-no-canonical-prefixes",
@@ -180,6 +186,12 @@ cc_toolchain_config(
         # that happened to surface each one first.
         "-lstdc++",
         "-lm",
+        # 32-bit MIPS has no native 64-bit atomic instructions, so LLVM
+        # lowers 8-byte atomic load/store/RMW ops (e.g. absl's flags
+        # SequenceLock) to __atomic_load_8/__atomic_store_8 calls into
+        # libatomic. Harmless elsewhere: nothing is pulled from a static
+        # archive unless something actually references a symbol in it.
+        "-latomic",
     ],
     unfiltered_compile_flags = [
         "-no-canonical-prefixes",
@@ -283,6 +295,12 @@ cc_toolchain_config(
         # that happened to surface each one first.
         "-lstdc++",
         "-lm",
+        # 32-bit MIPS has no native 64-bit atomic instructions, so LLVM
+        # lowers 8-byte atomic load/store/RMW ops (e.g. absl's flags
+        # SequenceLock) to __atomic_load_8/__atomic_store_8 calls into
+        # libatomic. Harmless elsewhere: nothing is pulled from a static
+        # archive unless something actually references a symbol in it.
+        "-latomic",
     ],
     unfiltered_compile_flags = [
         "-no-canonical-prefixes",
