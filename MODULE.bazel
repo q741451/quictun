@@ -21,6 +21,22 @@ bazel_dep(name = "abseil-cpp", version = "20260107.0", repo_name = "com_google_a
 # Last updated 2025-05-29
 bazel_dep(name = "protobuf", version = "31.1", repo_name = "com_google_protobuf")
 
+# protobuf's own port_def.inc already excludes ARM32/powerpc64le/x86-Windows
+# from its [[clang::musttail]]-based fast-path parser (with upstream bug
+# references) because LLVM's tail-call elimination doesn't work there.
+# MIPS has the exact same failure (verified: clang-18 targeting
+# mipsel-linux-gnu, "failed to perform tail call elimination on a call
+# site marked musttail" compiling generated_message_tctable_lite.cc) but
+# isn't in upstream's exclusion list -- add it via patch, since
+# PROTOBUF_MUSTTAIL is guarded by "#ifdef ... #error already defined", so
+# it can't be worked around with a compiler -D flag.
+single_version_override(
+    module_name = "protobuf",
+    version = "31.1",
+    patches = ["//build/patches:protobuf-mips-musttail.patch"],
+    patch_strip = 1,
+)
+
 # Last updated 2026-05-22
 bazel_dep(name = "boringssl", version = "0.20260508.0")
 
