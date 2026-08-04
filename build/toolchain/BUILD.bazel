@@ -1,0 +1,108 @@
+# A hand-written Bazel cc_toolchain that cross-compiles to aarch64-linux-gnu
+# from an x86_64 host using clang's built-in multi-target support --
+# this is the same mechanism Chromium's own arm64 builds use (clang
+# -target=aarch64-linux-gnu against a target sysroot/cross-libc, compiled
+# straight to arm64 object code on the x86_64 build machine). No emulation
+# (QEMU or otherwise) is involved in the build itself.
+#
+# The cross-libc/headers and binutils come from Debian/Ubuntu's multiarch
+# cross packages (gcc-aarch64-linux-gnu, g++-aarch64-linux-gnu,
+# libc6-dev-arm64-cross, binutils-aarch64-linux-gnu), which install to the
+# well-known path /usr/aarch64-linux-gnu (and /usr/lib/gcc-cross/...).
+# clang autodetects that GCC cross-installation from --target= alone -- no
+# explicit --sysroot is passed. Passing --sysroot=/usr/aarch64-linux-gnu
+# here breaks the link: these packages' libc.so linker scripts embed
+# already-absolute paths (e.g. "/usr/aarch64-linux-gnu/lib/libc.so.6"), and
+# ld's --sysroot logic re-prepends the sysroot onto absolute paths found
+# inside linker scripts, producing a doubled, nonexistent path. Verified
+# locally: the exact recipe below (no --sysroot) produces a real aarch64
+# ELF binary; adding --sysroot reproduces the "cannot find ... inside ..."
+# ld failure.
+
+load("@bazel_tools//tools/cpp:unix_cc_toolchain_config.bzl", "cc_toolchain_config")
+
+package(default_visibility = ["//visibility:public"])
+
+platform(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+filegroup(name = "empty")
+
+cc_toolchain_config(
+    name = "aarch64_clang_config",
+    toolchain_identifier = "clang-aarch64-linux-gnu",
+    host_system_name = "x86_64-unknown-linux-gnu",
+    target_system_name = "aarch64-unknown-linux-gnu",
+    cpu = "aarch64",
+    target_libc = "glibc_unknown",
+    compiler = "clang",
+    abi_version = "clang",
+    abi_libc_version = "glibc_unknown",
+    tool_paths = {
+        "gcc": "/usr/bin/clang-18",
+        "ld": "/usr/bin/aarch64-linux-gnu-ld",
+        "ar": "/usr/bin/aarch64-linux-gnu-ar",
+        "cpp": "/usr/bin/aarch64-linux-gnu-cpp",
+        "gcov": "/bin/false",
+        "nm": "/usr/bin/aarch64-linux-gnu-nm",
+        "objdump": "/usr/bin/aarch64-linux-gnu-objdump",
+        "strip": "/usr/bin/aarch64-linux-gnu-strip",
+    },
+    compile_flags = [
+        "--target=aarch64-linux-gnu",
+    ],
+    link_flags = [
+        "--target=aarch64-linux-gnu",
+        "-fuse-ld=/usr/bin/aarch64-linux-gnu-ld",
+    ],
+    archive_flags = [],
+    unfiltered_compile_flags = [
+        "-no-canonical-prefixes",
+    ],
+    # These are the exact paths clang -v printed as its "#include <...>
+    # search" list when cross-compiling locally (clang's own resource-dir
+    # headers, plus the multiarch cross-libc's include dir; clang resolves
+    # the latter through the auto-detected GCC cross-installation, so it's
+    # not tied to that installation's version number, e.g. gcc-11 vs
+    # gcc-13 on a newer Ubuntu -- only the two fixed paths below matter).
+    cxx_builtin_include_directories = [
+        "/usr/lib/llvm-18/lib/clang/18/include",
+        "/usr/lib/clang/18/include",
+        "/usr/aarch64-linux-gnu/include",
+        "/usr/aarch64-linux-gnu/usr/include",
+    ],
+)
+
+cc_toolchain(
+    name = "aarch64_clang_toolchain",
+    toolchain_identifier = "clang-aarch64-linux-gnu",
+    toolchain_config = ":aarch64_clang_config",
+    all_files = ":empty",
+    ar_files = ":empty",
+    as_files = ":empty",
+    compiler_files = ":empty",
+    dwp_files = ":empty",
+    linker_files = ":empty",
+    objcopy_files = ":empty",
+    strip_files = ":empty",
+    supports_param_files = 0,
+)
+
+toolchain(
+    name = "aarch64_clang_cc_toolchain",
+    exec_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+    toolchain = ":aarch64_clang_toolchain",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)

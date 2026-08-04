@@ -7,6 +7,11 @@ module(name = "quiche")
 # Last updated 2025-09-09
 bazel_dep(name = "bazel_skylib", version = "1.8.1")
 
+# Needed directly (not just transitively) for @platforms//os and
+# @platforms//cpu constraint values used by the arm64 cross-toolchain
+# platform definition in build/toolchain/BUILD.bazel.
+bazel_dep(name = "platforms", version = "1.1.0")
+
 # Last updated 2026-02-04
 bazel_dep(name = "rules_cc", version = "0.2.9")
 
@@ -57,3 +62,9 @@ http_archive(
     strip_prefix = "anonymous-tokens-e31089547b3d14a8a441bb58df086b171ebc915e",
     urls = ["https://github.com/google/anonymous-tokens/archive/e31089547b3d14a8a441bb58df086b171ebc915e.tar.gz"],
 )
+
+# Cross-compiling cc_toolchain for aarch64-linux-gnu, built on the same
+# clang-18 used natively for x86_64. See build/toolchain/BUILD.bazel for
+# why this is real cross-compilation (clang -target=, Debian/Ubuntu's
+# multiarch cross-libc) and not QEMU emulation.
+register_toolchains("//build/toolchain:aarch64_clang_cc_toolchain")

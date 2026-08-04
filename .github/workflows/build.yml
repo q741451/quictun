@@ -94,79 +94,74 @@ jobs:
           if-no-files-found: error
 
   build-arm64:
-    name: Build (arm64, QEMU)
+    name: Build (arm64, cross-compiled)
     runs-on: ubuntu-latest
-    # A full BoringSSL+abseil+protobuf+quiche build under user-mode QEMU
-    # emulation (every instruction emulated, not cross-compiled) is much
-    # slower than native. bazelisk has no cross-compiling story here either
-    # (no arm64 cc_toolchain configured in this repo), so instead of a real
-    # Bazel cross-compile, this runs a real Bazel natively inside an
-    # emulated arm64 container -- local_config_cc autodetects the (emulated)
-    # native clang, and BoringSSL's asm sources self-select by target arch
-    # via preprocessor guards, so no toolchain/config changes are needed
-    # versus the x86_64 job above.
-    timeout-minutes: 360
+    # Real cross-compilation, same as Chromium's actual arm64 build: clang
+    # supports multiple targets out of the box (--target=aarch64-linux-gnu),
+    # so this produces arm64 object code directly on the x86_64 runner --
+    # no arm64 instruction ever executes during the build, and there is no
+    # QEMU/emulation anywhere in this job. See build/toolchain/BUILD.bazel
+    # for the cc_toolchain definition and //build/toolchain:linux_arm64 for
+    # the target platform selected below via --platforms.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Cache Bazel (arm64)
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/bazel-arm64
-            ~/.cache/bazelisk-arm64
-          key: bazel-arm64-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc') }}
+            ~/.cache/bazelisk
+          key: bazel-arm64-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel') }}
           restore-keys: |
             bazel-arm64-
 
-      # Everything (build + staging) happens in one `docker run`: bazel-bin
-      # is a symlink into the Bazel cache, which is bind-mounted from a
-      # host path that only exists inside this container's mount
-      # namespace. Staging dist/ as a separate host-side step after the
-      # container exits would follow a dangling symlink.
-      - name: Build and stage (native inside arm64 container)
+      # Same clang-18 as the x86_64 job (it natively supports emitting
+      # aarch64 code via -target=), plus Debian/Ubuntu's multiarch aarch64
+      # cross-libc/binutils packages that build/toolchain/BUILD.bazel's
+      # cc_toolchain points at.
+      - name: Install clang-18 and aarch64 cross toolchain
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 18
+          sudo apt-get install -y -qq \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libc6-dev-arm64-cross binutils-aarch64-linux-gnu
+
+      - name: Install bazelisk
+        run: |
+          curl -fsSL -o /tmp/bazelisk \
+            https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          chmod +x /tmp/bazelisk
+          sudo mv /tmp/bazelisk /usr/local/bin/bazelisk
+          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+
+      - name: Build
         run: |
           set -e
-          mkdir -p "$HOME/.cache/bazel-arm64" "$HOME/.cache/bazelisk-arm64" dist
-          docker run --rm --platform=linux/arm64 \
-            -v "${{ github.workspace }}":/work \
-            -v "$HOME/.cache/bazel-arm64":/root/.cache/bazel \
-            -v "$HOME/.cache/bazelisk-arm64":/root/.cache/bazelisk \
-            -w /work \
-            -e "TARGETS=$TARGETS" \
-            ubuntu:24.04 \
-            bash -c '
-              set -e
-              uname -m
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update -qq
-              apt-get install -y -qq curl ca-certificates file gnupg lsb-release software-properties-common >/dev/null
-              curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
-              chmod +x /tmp/llvm.sh
-              /tmp/llvm.sh 18
-              curl -fsSL -o /usr/local/bin/bazel \
-                https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-arm64
-              chmod +x /usr/local/bin/bazel
-              CC=clang-18 bazel build -c opt \
-                --linkopt=-static \
-                --linkopt=-s \
-                $TARGETS
-              for t in $TARGETS; do
-                name=${t#//quiche:}
-                cp "bazel-bin/quiche/$name" "dist/${name}-linux-arm64"
-              done
-              chmod +x dist/*
-              for f in dist/*; do
-                file "$f"
-                file "$f" | grep -q "statically linked" || { echo "::error::$f is not statically linked"; exit 1; }
-              done
-            '
+          nproc
+          bazel build -c opt \
+            --platforms=//build/toolchain:linux_arm64 \
+            --linkopt=-static \
+            --linkopt=-s \
+            $TARGETS
+
+      - name: Stage artifacts
+        run: |
+          set -e
+          mkdir -p dist
+          for t in $TARGETS; do
+            name=${t#//quiche:}
+            cp "bazel-bin/quiche/$name" "dist/${name}-linux-arm64"
+          done
+          chmod +x dist/*
+          for f in dist/*; do
+            file "$f"
+            file "$f" | grep -q "ARM aarch64" || { echo "::error::$f is not an aarch64 binary"; exit 1; }
+            file "$f" | grep -q "statically linked" || { echo "::error::$f is not statically linked"; exit 1; }
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
