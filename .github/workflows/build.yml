@@ -1,0 +1,176 @@
+name: Build
+
+on:
+  push:
+    branches: [ quictun ]
+  pull_request:
+    branches: [ quictun ]
+  workflow_dispatch:
+
+# Binaries built on every run. These are QUICHE's own tools (this branch is
+# a vendored QUICHE snapshot, no quictun-specific application code yet).
+env:
+  TARGETS: >-
+    //quiche:quic_client
+    //quiche:quic_server
+    //quiche:masque_client
+    //quiche:masque_server
+
+jobs:
+  build:
+    name: Build (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # BoringSSL/abseil/protobuf/googleurl are all built from source via
+      # quiche's own Bazel setup -- that's the single biggest cost in this
+      # job, so cache Bazel's repository + build output caches keyed on the
+      # lockfile and .bazelrc. A hit here turns a ~20-30 min cold build
+      # into a couple of minutes.
+      - name: Cache Bazel
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel
+            ~/.cache/bazelisk
+          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc') }}
+          restore-keys: |
+            bazel-${{ runner.os }}-
+
+      # Ubuntu's default clang is too old for this quiche snapshot's
+      # vendored Chromium base/ code (hits real compiler-conformance
+      # issues around C++20/23 constexpr and `typename` requirements).
+      # clang-18 is the version verified to work.
+      - name: Install clang-18
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 18
+
+      - name: Install bazelisk
+        run: |
+          curl -fsSL -o /tmp/bazelisk \
+            https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          chmod +x /tmp/bazelisk
+          sudo mv /tmp/bazelisk /usr/local/bin/bazelisk
+          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+
+      - name: Build
+        env:
+          CC: clang-18
+        run: |
+          set -e
+          nproc
+          # .bazelrc already carries the Chromium-aligned default flags
+          # (OPENSSL_SMALL, fno-rtti/exceptions, hidden visibility,
+          # function/data sections, bundled ICU, etc). Only add what's
+          # specific to this CI artifact: static linking + stripped size.
+          bazel build -c opt \
+            --linkopt=-static \
+            --linkopt=-s \
+            $TARGETS
+
+      - name: Stage artifacts
+        run: |
+          set -e
+          mkdir -p dist
+          for t in $TARGETS; do
+            name=${t#//quiche:}
+            cp "bazel-bin/quiche/$name" "dist/${name}-linux-x86_64"
+          done
+          chmod +x dist/*
+          for f in dist/*; do
+            file "$f"
+            file "$f" | grep -q "statically linked" || { echo "::error::$f is not statically linked"; exit 1; }
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quiche-tools-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  build-arm64:
+    name: Build (arm64, QEMU)
+    runs-on: ubuntu-latest
+    # A full BoringSSL+abseil+protobuf+quiche build under user-mode QEMU
+    # emulation (every instruction emulated, not cross-compiled) is much
+    # slower than native. bazelisk has no cross-compiling story here either
+    # (no arm64 cc_toolchain configured in this repo), so instead of a real
+    # Bazel cross-compile, this runs a real Bazel natively inside an
+    # emulated arm64 container -- local_config_cc autodetects the (emulated)
+    # native clang, and BoringSSL's asm sources self-select by target arch
+    # via preprocessor guards, so no toolchain/config changes are needed
+    # versus the x86_64 job above.
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Cache Bazel (arm64)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel-arm64
+            ~/.cache/bazelisk-arm64
+          key: bazel-arm64-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc') }}
+          restore-keys: |
+            bazel-arm64-
+
+      # Everything (build + staging) happens in one `docker run`: bazel-bin
+      # is a symlink into the Bazel cache, which is bind-mounted from a
+      # host path that only exists inside this container's mount
+      # namespace. Staging dist/ as a separate host-side step after the
+      # container exits would follow a dangling symlink.
+      - name: Build and stage (native inside arm64 container)
+        run: |
+          set -e
+          mkdir -p "$HOME/.cache/bazel-arm64" "$HOME/.cache/bazelisk-arm64" dist
+          docker run --rm --platform=linux/arm64 \
+            -v "${{ github.workspace }}":/work \
+            -v "$HOME/.cache/bazel-arm64":/root/.cache/bazel \
+            -v "$HOME/.cache/bazelisk-arm64":/root/.cache/bazelisk \
+            -w /work \
+            -e "TARGETS=$TARGETS" \
+            ubuntu:24.04 \
+            bash -c '
+              set -e
+              uname -m
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq curl ca-certificates file gnupg lsb-release software-properties-common >/dev/null
+              curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
+              chmod +x /tmp/llvm.sh
+              /tmp/llvm.sh 18
+              curl -fsSL -o /usr/local/bin/bazel \
+                https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-arm64
+              chmod +x /usr/local/bin/bazel
+              CC=clang-18 bazel build -c opt \
+                --linkopt=-static \
+                --linkopt=-s \
+                $TARGETS
+              for t in $TARGETS; do
+                name=${t#//quiche:}
+                cp "bazel-bin/quiche/$name" "dist/${name}-linux-arm64"
+              done
+              chmod +x dist/*
+              for f in dist/*; do
+                file "$f"
+                file "$f" | grep -q "statically linked" || { echo "::error::$f is not statically linked"; exit 1; }
+              done
+            '
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quiche-tools-linux-arm64
+          path: dist/*
+          if-no-files-found: error

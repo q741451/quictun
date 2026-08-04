@@ -1,8 +1,9 @@
 # Automatically detect host platform to pick config
 common --enable_platform_specific_config
 
-build --cxxopt=-std=c++20
-build --cxxopt=-fno-rtti
+# Chromium builds at C++23 (use_cxx23=true as of chromium/src
+# build/config/c++/c++.gni), not C++20.
+build --cxxopt=-std=c++23
 build --cxxopt=-Wno-nullability-completeness
 build --cxxopt=-Wno-deprecated-declarations
 
@@ -12,5 +13,45 @@ build --define absl=1
 # Don't fail on converting "0xff" to char
 build --copt=-Wno-narrowing
 
-# There is no system ICU on non-Linux platforms
-build:macos --@com_google_googleurl//build_config:system_icu=0
+# --- Match Chromium's default compiler config (build/config/compiler/BUILD.gn
+# + build/config/BUILDCONFIG.gn's default_compiler_configs), which is what
+# BoringSSL and QUICHE are actually built with inside Chromium. ---
+
+# no_rtti / no_exceptions: part of default_compiler_configs on every
+# platform, unless a sanitizer build re-enables RTTI.
+build --cxxopt=-fno-rtti
+build --cxxopt=-fno-exceptions
+
+# BoringSSL's own component_config in Chromium's
+# third_party/boringssl/BUILD.gn always defines OPENSSL_SMALL on the
+# library (smaller precomputed tables in things like RSA/DH, some CPU cost
+# in exchange). Applied globally here since only BoringSSL's own sources
+# check this macro, so it's inert everywhere else.
+build --copt=-DOPENSSL_SMALL
+
+# The rest are is_posix / is_linux defaults from default_compiler_configs;
+# this project only targets Linux (x86_64 and arm64), so apply unconditionally.
+
+# crbug.com/32204
+build --copt=-fno-strict-aliasing
+
+# Position-independent code (is_linux/is_chromeos/is_android/is_fuchsia).
+build --copt=-fPIC
+build --linkopt=-fPIC
+
+# Hidden visibility by default (build/config/gcc:symbol_visibility_hidden),
+# applied to all is_posix targets.
+build --copt=-fvisibility=hidden
+build --cxxopt=-fvisibility-inlines-hidden
+
+# Put each function/global in its own section so unused ones can be
+# dropped at link time (common_optimize_on_cflags + --gc-sections).
+build --copt=-ffunction-sections
+build --copt=-fdata-sections
+build --copt=-fno-unique-section-names
+build --linkopt=-Wl,--gc-sections
+
+# Chromium never uses the host's system ICU -- it always bundles its own,
+# on every platform, not just macOS. Match that instead of depending on
+# libicu-dev being installed on the build host.
+build --@com_google_googleurl//build_config:system_icu=0
