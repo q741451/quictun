@@ -61,6 +61,17 @@ cc_toolchain_config(
         "-fuse-ld=/usr/bin/aarch64-linux-gnu-ld",
     ],
     archive_flags = [],
+    link_libs = [
+        # Bazel invokes the same "gcc" tool_path (plain clang, not
+        # clang++) for both compiling and linking, and clang does not
+        # reliably auto-add libstdc++ for every cross target in that mode
+        # (verified: 32-bit ARM linking failed with "undefined reference
+        # to std::__throw_out_of_range_fmt" -- a real libstdc++ symbol --
+        # until this was added explicitly). Add it explicitly everywhere
+        # rather than relying on per-target luck about which libstdc++
+        # symbols a given translation unit happens to pull in.
+        "-lstdc++",
+    ],
     unfiltered_compile_flags = [
         "-no-canonical-prefixes",
     ],
@@ -104,5 +115,206 @@ toolchain(
         "@platforms//cpu:aarch64",
     ],
     toolchain = ":aarch64_clang_toolchain",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+
+# --- armv7 (armhf) ---
+#
+# Same recipe as aarch64 above: clang -target=arm-linux-gnueabihf, cross
+# packages gcc-arm-linux-gnueabihf/g++-arm-linux-gnueabihf/
+# libc6-dev-armhf-cross/binutils-arm-linux-gnueabihf, no --sysroot (verified
+# locally the same way). This packaging generation uses the older plain
+# multiarch layout (/usr/include/<triple> effectively reached via
+# /usr/arm-linux-gnueabihf/include, plus shared /usr/include and
+# /usr/local/include for arch-generic headers) rather than aarch64's
+# pseudo-sysroot-under-/usr/<triple> layout -- the exact search list is
+# what clang -v printed locally, not a guess.
+
+platform(
+    name = "linux_armv7",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:armv7",
+    ],
+)
+
+cc_toolchain_config(
+    name = "armv7_clang_config",
+    toolchain_identifier = "clang-arm-linux-gnueabihf",
+    host_system_name = "x86_64-unknown-linux-gnu",
+    target_system_name = "arm-unknown-linux-gnueabihf",
+    cpu = "armv7",
+    target_libc = "glibc_unknown",
+    compiler = "clang",
+    abi_version = "clang",
+    abi_libc_version = "glibc_unknown",
+    tool_paths = {
+        "gcc": "/usr/bin/clang-18",
+        "ld": "/usr/bin/arm-linux-gnueabihf-ld",
+        "ar": "/usr/bin/arm-linux-gnueabihf-ar",
+        "cpp": "/usr/bin/arm-linux-gnueabihf-cpp",
+        "gcov": "/bin/false",
+        "nm": "/usr/bin/arm-linux-gnueabihf-nm",
+        "objdump": "/usr/bin/arm-linux-gnueabihf-objdump",
+        "strip": "/usr/bin/arm-linux-gnueabihf-strip",
+    },
+    compile_flags = [
+        "--target=arm-linux-gnueabihf",
+    ],
+    link_flags = [
+        "--target=arm-linux-gnueabihf",
+        "-fuse-ld=/usr/bin/arm-linux-gnueabihf-ld",
+    ],
+    archive_flags = [],
+    link_libs = [
+        # Bazel invokes the same "gcc" tool_path (plain clang, not
+        # clang++) for both compiling and linking, and clang does not
+        # reliably auto-add libstdc++ for every cross target in that mode
+        # (verified: 32-bit ARM linking failed with "undefined reference
+        # to std::__throw_out_of_range_fmt" -- a real libstdc++ symbol --
+        # until this was added explicitly). Add it explicitly everywhere
+        # rather than relying on per-target luck about which libstdc++
+        # symbols a given translation unit happens to pull in.
+        "-lstdc++",
+    ],
+    unfiltered_compile_flags = [
+        "-no-canonical-prefixes",
+    ],
+    cxx_builtin_include_directories = [
+        "/usr/lib/llvm-18/lib/clang/18/include",
+        "/usr/lib/clang/18/include",
+        "/usr/local/include",
+        "/usr/arm-linux-gnueabihf/include",
+        "/usr/include",
+    ],
+)
+
+cc_toolchain(
+    name = "armv7_clang_toolchain",
+    toolchain_identifier = "clang-arm-linux-gnueabihf",
+    toolchain_config = ":armv7_clang_config",
+    all_files = ":empty",
+    ar_files = ":empty",
+    as_files = ":empty",
+    compiler_files = ":empty",
+    dwp_files = ":empty",
+    linker_files = ":empty",
+    objcopy_files = ":empty",
+    strip_files = ":empty",
+    supports_param_files = 0,
+)
+
+toolchain(
+    name = "armv7_clang_cc_toolchain",
+    exec_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:armv7",
+    ],
+    toolchain = ":armv7_clang_toolchain",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+
+# --- mipsel (little-endian MIPS) ---
+#
+# Same recipe again: clang -target=mipsel-linux-gnu, cross packages
+# gcc-mipsel-linux-gnu/g++-mipsel-linux-gnu/libc6-dev-mipsel-cross/
+# binutils-mipsel-linux-gnu, no --sysroot.
+#
+# Deliberately not building for big-endian "mips": quiche's own README
+# states "QUICHE is only supported on little-endian platforms". That's not
+# a build-break concern, it's a correctness one -- code that assumes
+# little-endian (wire-format parsing, hashing, etc.) can silently produce
+# wrong results on big-endian rather than fail to compile. mipsel is
+# little-endian, so it's fine; big-endian mips is not attempted here.
+
+platform(
+    name = "linux_mipsel",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:mips32",
+    ],
+)
+
+cc_toolchain_config(
+    name = "mipsel_clang_config",
+    toolchain_identifier = "clang-mipsel-linux-gnu",
+    host_system_name = "x86_64-unknown-linux-gnu",
+    target_system_name = "mipsel-unknown-linux-gnu",
+    cpu = "mipsel",
+    target_libc = "glibc_unknown",
+    compiler = "clang",
+    abi_version = "clang",
+    abi_libc_version = "glibc_unknown",
+    tool_paths = {
+        "gcc": "/usr/bin/clang-18",
+        "ld": "/usr/bin/mipsel-linux-gnu-ld",
+        "ar": "/usr/bin/mipsel-linux-gnu-ar",
+        "cpp": "/usr/bin/mipsel-linux-gnu-cpp",
+        "gcov": "/bin/false",
+        "nm": "/usr/bin/mipsel-linux-gnu-nm",
+        "objdump": "/usr/bin/mipsel-linux-gnu-objdump",
+        "strip": "/usr/bin/mipsel-linux-gnu-strip",
+    },
+    compile_flags = [
+        "--target=mipsel-linux-gnu",
+    ],
+    link_flags = [
+        "--target=mipsel-linux-gnu",
+        "-fuse-ld=/usr/bin/mipsel-linux-gnu-ld",
+    ],
+    archive_flags = [],
+    link_libs = [
+        # Bazel invokes the same "gcc" tool_path (plain clang, not
+        # clang++) for both compiling and linking, and clang does not
+        # reliably auto-add libstdc++ for every cross target in that mode
+        # (verified: 32-bit ARM linking failed with "undefined reference
+        # to std::__throw_out_of_range_fmt" -- a real libstdc++ symbol --
+        # until this was added explicitly). Add it explicitly everywhere
+        # rather than relying on per-target luck about which libstdc++
+        # symbols a given translation unit happens to pull in.
+        "-lstdc++",
+    ],
+    unfiltered_compile_flags = [
+        "-no-canonical-prefixes",
+    ],
+    cxx_builtin_include_directories = [
+        "/usr/lib/llvm-18/lib/clang/18/include",
+        "/usr/lib/clang/18/include",
+        "/usr/local/include",
+        "/usr/mipsel-linux-gnu/include",
+        "/usr/include",
+    ],
+)
+
+cc_toolchain(
+    name = "mipsel_clang_toolchain",
+    toolchain_identifier = "clang-mipsel-linux-gnu",
+    toolchain_config = ":mipsel_clang_config",
+    all_files = ":empty",
+    ar_files = ":empty",
+    as_files = ":empty",
+    compiler_files = ":empty",
+    dwp_files = ":empty",
+    linker_files = ":empty",
+    objcopy_files = ":empty",
+    strip_files = ":empty",
+    supports_param_files = 0,
+)
+
+toolchain(
+    name = "mipsel_clang_cc_toolchain",
+    exec_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:mips32",
+    ],
+    toolchain = ":mipsel_clang_toolchain",
     toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
 )

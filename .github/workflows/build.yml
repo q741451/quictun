@@ -93,42 +93,62 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  build-arm64:
-    name: Build (arm64, cross-compiled)
+  build-cross:
+    name: Build (${{ matrix.name }}, cross-compiled)
     runs-on: ubuntu-latest
     # Real cross-compilation, same as Chromium's actual arm64 build: clang
-    # supports multiple targets out of the box (--target=aarch64-linux-gnu),
-    # so this produces arm64 object code directly on the x86_64 runner --
-    # no arm64 instruction ever executes during the build, and there is no
-    # QEMU/emulation anywhere in this job. See build/toolchain/BUILD.bazel
-    # for the cc_toolchain definition and //build/toolchain:linux_arm64 for
-    # the target platform selected below via --platforms.
+    # supports multiple targets out of the box (--target=...), so this
+    # produces target object code directly on the x86_64 runner -- the
+    # target architecture's instructions never execute during the build,
+    # and there is no QEMU/emulation anywhere in this job. See
+    # build/toolchain/BUILD.bazel for the cc_toolchain definitions and
+    # //build/toolchain:linux_* for the platforms selected below via
+    # --platforms.
+    #
+    # Plain big-endian mips is deliberately not in this matrix: quiche's
+    # own README states it only supports little-endian platforms, and
+    # that's a correctness concern (silently wrong crypto/wire-format
+    # handling), not just a build-break one. mipsel (little-endian) is.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: arm64
+            platform: linux_arm64
+            packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu
+            file_match: "ARM aarch64"
+          - name: armv7
+            platform: linux_armv7
+            packages: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf libc6-dev-armhf-cross binutils-arm-linux-gnueabihf
+            file_match: "ARM,"
+          - name: mipsel
+            platform: linux_mipsel
+            packages: gcc-mipsel-linux-gnu g++-mipsel-linux-gnu libc6-dev-mipsel-cross binutils-mipsel-linux-gnu
+            file_match: "MIPS,"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Cache Bazel (arm64)
+      - name: Cache Bazel (${{ matrix.name }})
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cache/bazel-arm64
+            ~/.cache/bazel-${{ matrix.name }}
             ~/.cache/bazelisk
-          key: bazel-arm64-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel') }}
+          key: bazel-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel') }}
           restore-keys: |
-            bazel-arm64-
+            bazel-${{ matrix.name }}-
 
-      # Same clang-18 as the x86_64 job (it natively supports emitting
-      # aarch64 code via -target=), plus Debian/Ubuntu's multiarch aarch64
+      # Same clang-18 as the x86_64 job (it natively supports emitting code
+      # for other targets via -target=), plus Debian/Ubuntu's multiarch
       # cross-libc/binutils packages that build/toolchain/BUILD.bazel's
-      # cc_toolchain points at.
-      - name: Install clang-18 and aarch64 cross toolchain
+      # cc_toolchain for this architecture points at.
+      - name: Install clang-18 and ${{ matrix.name }} cross toolchain
         run: |
           curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 18
-          sudo apt-get install -y -qq \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            libc6-dev-arm64-cross binutils-aarch64-linux-gnu
+          sudo apt-get install -y -qq ${{ matrix.packages }}
 
       - name: Install bazelisk
         run: |
@@ -143,7 +163,7 @@ jobs:
           set -e
           nproc
           bazel build -c opt \
-            --platforms=//build/toolchain:linux_arm64 \
+            --platforms=//build/toolchain:${{ matrix.platform }} \
             --linkopt=-static \
             --linkopt=-s \
             $TARGETS
@@ -154,18 +174,18 @@ jobs:
           mkdir -p dist
           for t in $TARGETS; do
             name=${t#//quiche:}
-            cp "bazel-bin/quiche/$name" "dist/${name}-linux-arm64"
+            cp "bazel-bin/quiche/$name" "dist/${name}-linux-${{ matrix.name }}"
           done
           chmod +x dist/*
           for f in dist/*; do
             file "$f"
-            file "$f" | grep -q "ARM aarch64" || { echo "::error::$f is not an aarch64 binary"; exit 1; }
+            file "$f" | grep -q '${{ matrix.file_match }}' || { echo "::error::$f is not a ${{ matrix.name }} binary"; exit 1; }
             file "$f" | grep -q "statically linked" || { echo "::error::$f is not statically linked"; exit 1; }
           done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: quiche-tools-linux-arm64
+          name: quiche-tools-linux-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
