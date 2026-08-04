@@ -62,15 +62,17 @@ cc_toolchain_config(
     ],
     archive_flags = [],
     link_libs = [
-        # Bazel invokes the same "gcc" tool_path (plain clang, not
-        # clang++) for both compiling and linking, and clang does not
-        # reliably auto-add libstdc++ for every cross target in that mode
-        # (verified: 32-bit ARM linking failed with "undefined reference
-        # to std::__throw_out_of_range_fmt" -- a real libstdc++ symbol --
-        # until this was added explicitly). Add it explicitly everywhere
-        # rather than relying on per-target luck about which libstdc++
-        # symbols a given translation unit happens to pull in.
+        # Bazel's default Unix cc_toolchain template (this one) links via
+        # explicit link_libs rather than clang's own implicit driver-spec
+        # auto-linking, so nothing here is optional. Found the hard way,
+        # on real CI, one at a time: -lstdc++ missing produced "undefined
+        # reference to std::__throw_out_of_range_fmt" (32-bit ARM); -lm
+        # missing produced "undefined reference to floor" from libstdc++'s
+        # own hash-table rehash policy (also 32-bit ARM, once -lstdc++ was
+        # fixed). Both apply to every architecture here, not just the one
+        # that happened to surface each one first.
         "-lstdc++",
+        "-lm",
     ],
     unfiltered_compile_flags = [
         "-no-canonical-prefixes",
@@ -167,15 +169,17 @@ cc_toolchain_config(
     ],
     archive_flags = [],
     link_libs = [
-        # Bazel invokes the same "gcc" tool_path (plain clang, not
-        # clang++) for both compiling and linking, and clang does not
-        # reliably auto-add libstdc++ for every cross target in that mode
-        # (verified: 32-bit ARM linking failed with "undefined reference
-        # to std::__throw_out_of_range_fmt" -- a real libstdc++ symbol --
-        # until this was added explicitly). Add it explicitly everywhere
-        # rather than relying on per-target luck about which libstdc++
-        # symbols a given translation unit happens to pull in.
+        # Bazel's default Unix cc_toolchain template (this one) links via
+        # explicit link_libs rather than clang's own implicit driver-spec
+        # auto-linking, so nothing here is optional. Found the hard way,
+        # on real CI, one at a time: -lstdc++ missing produced "undefined
+        # reference to std::__throw_out_of_range_fmt" (32-bit ARM); -lm
+        # missing produced "undefined reference to floor" from libstdc++'s
+        # own hash-table rehash policy (also 32-bit ARM, once -lstdc++ was
+        # fixed). Both apply to every architecture here, not just the one
+        # that happened to surface each one first.
         "-lstdc++",
+        "-lm",
     ],
     unfiltered_compile_flags = [
         "-no-canonical-prefixes",
@@ -268,15 +272,17 @@ cc_toolchain_config(
     ],
     archive_flags = [],
     link_libs = [
-        # Bazel invokes the same "gcc" tool_path (plain clang, not
-        # clang++) for both compiling and linking, and clang does not
-        # reliably auto-add libstdc++ for every cross target in that mode
-        # (verified: 32-bit ARM linking failed with "undefined reference
-        # to std::__throw_out_of_range_fmt" -- a real libstdc++ symbol --
-        # until this was added explicitly). Add it explicitly everywhere
-        # rather than relying on per-target luck about which libstdc++
-        # symbols a given translation unit happens to pull in.
+        # Bazel's default Unix cc_toolchain template (this one) links via
+        # explicit link_libs rather than clang's own implicit driver-spec
+        # auto-linking, so nothing here is optional. Found the hard way,
+        # on real CI, one at a time: -lstdc++ missing produced "undefined
+        # reference to std::__throw_out_of_range_fmt" (32-bit ARM); -lm
+        # missing produced "undefined reference to floor" from libstdc++'s
+        # own hash-table rehash policy (also 32-bit ARM, once -lstdc++ was
+        # fixed). Both apply to every architecture here, not just the one
+        # that happened to surface each one first.
         "-lstdc++",
+        "-lm",
     ],
     unfiltered_compile_flags = [
         "-no-canonical-prefixes",
