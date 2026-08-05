@@ -105,10 +105,10 @@ jobs:
     # //build/toolchain:linux_* for the platforms selected below via
     # --platforms.
     #
-    # mips/mipsel was tried and dropped: see build/toolchain/BUILD.bazel's
-    # "mipsel: tried, dropped" comment for why (not a flags problem --
-    # Ubuntu's mipsel cross-libc caps out at a GCC 10 libstdc++ that
-    # doesn't support a C++20 constexpr std::vector this codebase uses).
+    # Plain big-endian mips is deliberately not in this matrix: quiche's
+    # own README states it only supports little-endian platforms, and
+    # that's a correctness concern (silently wrong crypto/wire-format
+    # handling), not just a build-break one. mipsel (little-endian) is.
     strategy:
       fail-fast: false
       matrix:
@@ -121,6 +121,10 @@ jobs:
             platform: linux_armv7
             packages: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf libc6-dev-armhf-cross binutils-arm-linux-gnueabihf
             file_match: "ARM,"
+          - name: mipsel
+            platform: linux_mipsel
+            packages: gcc-mipsel-linux-gnu g++-mipsel-linux-gnu libc6-dev-mipsel-cross binutils-mipsel-linux-gnu
+            file_match: "MIPS,"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

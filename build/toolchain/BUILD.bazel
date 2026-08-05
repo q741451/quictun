@@ -73,6 +73,12 @@ cc_toolchain_config(
         # that happened to surface each one first.
         "-lstdc++",
         "-lm",
+        # 32-bit MIPS has no native 64-bit atomic instructions, so LLVM
+        # lowers 8-byte atomic load/store/RMW ops (e.g. absl's flags
+        # SequenceLock) to __atomic_load_8/__atomic_store_8 calls into
+        # libatomic. Harmless elsewhere: nothing is pulled from a static
+        # archive unless something actually references a symbol in it.
+        "-latomic",
     ],
     unfiltered_compile_flags = [
         "-no-canonical-prefixes",
@@ -180,6 +186,12 @@ cc_toolchain_config(
         # that happened to surface each one first.
         "-lstdc++",
         "-lm",
+        # 32-bit MIPS has no native 64-bit atomic instructions, so LLVM
+        # lowers 8-byte atomic load/store/RMW ops (e.g. absl's flags
+        # SequenceLock) to __atomic_load_8/__atomic_store_8 calls into
+        # libatomic. Harmless elsewhere: nothing is pulled from a static
+        # archive unless something actually references a symbol in it.
+        "-latomic",
     ],
     unfiltered_compile_flags = [
         "-no-canonical-prefixes",
@@ -222,20 +234,111 @@ toolchain(
     toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
 )
 
-# --- mipsel: tried, dropped ---
+# --- mipsel (little-endian MIPS) ---
 #
-# A mipsel-linux-gnu cc_toolchain (same recipe as above, same package
-# pattern: gcc-mipsel-linux-gnu/libc6-dev-mipsel-cross/etc) got as far as
-# fixing three real link errors (-lstdc++, -lm, -latomic -- see git
-# history) before hitting a wall that isn't a toolchain-flag problem:
-# quiche/quic/core/quic_config.cc declares
-# "static constexpr QuicTagVector no_options;", a constexpr empty
-# std::vector (a C++20 "constexpr containers" feature). Ubuntu's mipsel
-# cross-libc caps out at GCC 10 (no GCC 11+ package exists for mipsel at
-# all -- `apt-cache madison gcc-mipsel-linux-gnu` shows only 10.2.0-1),
-# and GCC 10's libstdc++ doesn't implement constexpr std::vector.
-# aarch64/armv7's cross packages ship GCC 11, which does, so they don't
-# hit this. Fixing it for real would mean building a newer libstdc++ (or
-# clang's libc++) from source for mipsel -- out of proportion to mipsel's
-# relevance today (V8/Chromium dropped MIPS support back in 2019, and
-# Debian is dropping mipsel too), so dropped instead of pursued further.
+# Same recipe again: clang -target=mipsel-linux-gnu, cross packages
+# gcc-mipsel-linux-gnu/g++-mipsel-linux-gnu/libc6-dev-mipsel-cross/
+# binutils-mipsel-linux-gnu, no --sysroot.
+#
+# Deliberately not building for big-endian "mips": quiche's own README
+# states "QUICHE is only supported on little-endian platforms". That's not
+# a build-break concern, it's a correctness one -- code that assumes
+# little-endian (wire-format parsing, hashing, etc.) can silently produce
+# wrong results on big-endian rather than fail to compile. mipsel is
+# little-endian, so it's fine; big-endian mips is not attempted here.
+
+platform(
+    name = "linux_mipsel",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:mips32",
+    ],
+)
+
+cc_toolchain_config(
+    name = "mipsel_clang_config",
+    toolchain_identifier = "clang-mipsel-linux-gnu",
+    host_system_name = "x86_64-unknown-linux-gnu",
+    target_system_name = "mipsel-unknown-linux-gnu",
+    cpu = "mipsel",
+    target_libc = "glibc_unknown",
+    compiler = "clang",
+    abi_version = "clang",
+    abi_libc_version = "glibc_unknown",
+    tool_paths = {
+        "gcc": "/usr/bin/clang-18",
+        "ld": "/usr/bin/mipsel-linux-gnu-ld",
+        "ar": "/usr/bin/mipsel-linux-gnu-ar",
+        "cpp": "/usr/bin/mipsel-linux-gnu-cpp",
+        "gcov": "/bin/false",
+        "nm": "/usr/bin/mipsel-linux-gnu-nm",
+        "objdump": "/usr/bin/mipsel-linux-gnu-objdump",
+        "strip": "/usr/bin/mipsel-linux-gnu-strip",
+    },
+    compile_flags = [
+        "--target=mipsel-linux-gnu",
+    ],
+    link_flags = [
+        "--target=mipsel-linux-gnu",
+        "-fuse-ld=/usr/bin/mipsel-linux-gnu-ld",
+    ],
+    archive_flags = [],
+    link_libs = [
+        # Bazel's default Unix cc_toolchain template (this one) links via
+        # explicit link_libs rather than clang's own implicit driver-spec
+        # auto-linking, so nothing here is optional. Found the hard way,
+        # on real CI, one at a time: -lstdc++ missing produced "undefined
+        # reference to std::__throw_out_of_range_fmt" (32-bit ARM); -lm
+        # missing produced "undefined reference to floor" from libstdc++'s
+        # own hash-table rehash policy (also 32-bit ARM, once -lstdc++ was
+        # fixed). Both apply to every architecture here, not just the one
+        # that happened to surface each one first.
+        "-lstdc++",
+        "-lm",
+        # 32-bit MIPS has no native 64-bit atomic instructions, so LLVM
+        # lowers 8-byte atomic load/store/RMW ops (e.g. absl's flags
+        # SequenceLock) to __atomic_load_8/__atomic_store_8 calls into
+        # libatomic. Harmless elsewhere: nothing is pulled from a static
+        # archive unless something actually references a symbol in it.
+        "-latomic",
+    ],
+    unfiltered_compile_flags = [
+        "-no-canonical-prefixes",
+    ],
+    cxx_builtin_include_directories = [
+        "/usr/lib/llvm-18/lib/clang/18/include",
+        "/usr/lib/clang/18/include",
+        "/usr/local/include",
+        "/usr/mipsel-linux-gnu/include",
+        "/usr/include",
+    ],
+)
+
+cc_toolchain(
+    name = "mipsel_clang_toolchain",
+    toolchain_identifier = "clang-mipsel-linux-gnu",
+    toolchain_config = ":mipsel_clang_config",
+    all_files = ":empty",
+    ar_files = ":empty",
+    as_files = ":empty",
+    compiler_files = ":empty",
+    dwp_files = ":empty",
+    linker_files = ":empty",
+    objcopy_files = ":empty",
+    strip_files = ":empty",
+    supports_param_files = 0,
+)
+
+toolchain(
+    name = "mipsel_clang_cc_toolchain",
+    exec_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:mips32",
+    ],
+    toolchain = ":mipsel_clang_toolchain",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
