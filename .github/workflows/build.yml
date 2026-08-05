@@ -60,19 +60,32 @@ jobs:
       # Bazel's own repository/output caches below: a hit here skips
       # several minutes of `ninja` building libc++/libc++abi/libunwind
       # from source.
+      # Every cross-compile job (arm64/armv7/mipsel) also needs a full x64
+      # toolchain, not just its target arch's: Bazel builds a handful of
+      # build-time tool dependencies (protoc and its transitive deps, e.g.
+      # abseil "[for tool]" targets) for the *exec* platform, which is the
+      # x64 GitHub runner itself, regardless of --platforms=. Confirmed by
+      # a real CI failure (all three cross jobs failed identically with
+      # "cstdint file not found" while compiling absl "[for tool]" targets
+      # against -isystem /opt/libcxx-x64/..., because that directory simply
+      # didn't exist yet on those runners).
       - name: Cache toolchain (${{ matrix.name }})
         uses: actions/cache@v4
         with:
           path: |
             /opt/chromium-clang
+            /opt/libcxx-x64
             /opt/libcxx-${{ matrix.name == 'x86_64' && 'x64' || matrix.name }}
           key: toolchain-${{ matrix.name }}-${{ hashFiles('build/toolchain/setup_toolchain.sh') }}
 
       - name: Set up pinned toolchain (${{ matrix.name }})
         run: |
           set -e
+          bash build/toolchain/setup_toolchain.sh x64
           ARCH=${{ matrix.name == 'x86_64' && 'x64' || matrix.name }}
-          bash build/toolchain/setup_toolchain.sh "$ARCH"
+          if [ "$ARCH" != "x64" ]; then
+            bash build/toolchain/setup_toolchain.sh "$ARCH"
+          fi
 
       # BoringSSL/abseil/protobuf/googleurl are all built from source via
       # quiche's own Bazel setup -- that's the single biggest cost in this
