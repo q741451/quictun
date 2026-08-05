@@ -19,6 +19,8 @@ load(
     "io_tests_srcs",
     "io_tool_support_hdrs",
     "io_tool_support_srcs",
+    "linux_only_hdrs",
+    "linux_only_srcs",
     "masque_private_tokens_hdrs",
     "masque_private_tokens_srcs",
     "masque_support_hdrs",
@@ -123,8 +125,17 @@ cc_proto_library(
 
 cc_library(
     name = "quiche_core",
-    srcs = quiche_core_srcs + default_platform_impl_srcs,
-    hdrs = quiche_core_hdrs + default_platform_impl_hdrs,
+    # quic_syscall_wrapper is normally grouped under io_tool_support_srcs/hdrs,
+    # but linux_only_srcs (quic_linux_socket_utils.cc) needs it too, so it's
+    # promoted here and filtered out of io_tool_support below to avoid
+    # compiling it into two separate cc_library archives (duplicate-symbol
+    # link errors for binaries that depend on both).
+    srcs = quiche_core_srcs + default_platform_impl_srcs + linux_only_srcs + [
+        "quic/core/quic_syscall_wrapper.cc",
+    ],
+    hdrs = quiche_core_hdrs + default_platform_impl_hdrs + linux_only_hdrs + [
+        "quic/core/quic_syscall_wrapper.h",
+    ],
     includes = ["common/platform/default"],
     deps = [
         ":quiche_flags_list",
@@ -352,8 +363,10 @@ test_suite_from_source_list(
 
 cc_library(
     name = "io_tool_support",
-    srcs = io_tool_support_srcs,
-    hdrs = io_tool_support_hdrs,
+    # quic_syscall_wrapper is compiled into :quiche_core instead; see the
+    # comment on that target.
+    srcs = [s for s in io_tool_support_srcs if s != "quic/core/quic_syscall_wrapper.cc"],
+    hdrs = [h for h in io_tool_support_hdrs if h != "quic/core/quic_syscall_wrapper.h"],
     deps = [
         ":quiche_core",
         ":quiche_tool_support",
@@ -615,6 +628,79 @@ cc_binary(
         ":quiche_core",
         ":quiche_tool_support",
         "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "quictun_common",
+    srcs = [
+        "quic/tools/quictun_accepted_tcp_socket.cc",
+        "quic/tools/quictun_certificate.cc",
+        "quic/tools/quictun_client_connection.cc",
+        "quic/tools/quictun_client_driver.cc",
+        "quic/tools/quictun_connection_factory.cc",
+        "quic/tools/quictun_flags.cc",
+        "quic/tools/quictun_server_connection.cc",
+        "quic/tools/quictun_server_driver.cc",
+        "quic/tools/quictun_session.cc",
+        "quic/tools/quictun_socket_util.cc",
+        "quic/tools/quictun_tunnel.cc",
+        # Plain quic/tools/*.{h,cc} files not pulled into any existing
+        # aggregate (quiche_core/quiche_tool_support/io_tool_support), same
+        # as e.g. quic_toy_client.cc isn't -- added explicitly here.
+        "quic/tools/fake_proof_verifier.h",
+        "quic/tools/simple_ticket_crypter.cc",
+        "quic/tools/simple_ticket_crypter.h",
+    ],
+    hdrs = [
+        "quic/tools/quictun_accepted_tcp_socket.h",
+        "quic/tools/quictun_certificate.h",
+        "quic/tools/quictun_client_connection.h",
+        "quic/tools/quictun_client_driver.h",
+        "quic/tools/quictun_connection_factory.h",
+        "quic/tools/quictun_flags.h",
+        "quic/tools/quictun_server_connection.h",
+        "quic/tools/quictun_server_driver.h",
+        "quic/tools/quictun_session.h",
+        "quic/tools/quictun_socket_util.h",
+        "quic/tools/quictun_tunnel.h",
+    ],
+    deps = [
+        ":io_tool_support",
+        ":quiche_core",
+        ":quiche_tool_support",
+        "@boringssl//:crypto",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_binary(
+    name = "quictun_server",
+    srcs = ["quic/tools/quictun_server_bin.cc"],
+    deps = [
+        ":io_tool_support",
+        ":quictun_common",
+        ":quiche_core",
+        ":quiche_tool_support",
+        "@com_google_absl//absl/status",
+    ],
+)
+
+cc_binary(
+    name = "quictun_client",
+    srcs = ["quic/tools/quictun_client_bin.cc"],
+    deps = [
+        ":io_tool_support",
+        ":quictun_common",
+        ":quiche_core",
+        ":quiche_tool_support",
+        "@com_google_absl//absl/status",
     ],
 )
 

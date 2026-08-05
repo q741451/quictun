@@ -27,6 +27,57 @@ To contribute to QUICHE, follow instructions at
 
 QUICHE is only supported on little-endian platforms.
 
+## quictun: TCP-over-QUIC tunnel
+
+This `quictun` branch/fork adds `quictun_server` and `quictun_client`: a pair
+of binaries that tunnel raw TCP connections over raw QUIC (transport only --
+no HTTP/3, no MASQUE). Each TCP connection gets its own dedicated QUIC
+connection and its own dedicated UDP socket -- no connection multiplexing.
+
+```
+./quictun_server --listen=[::]:4433 --target=127.0.0.1:12948 --key='a real shared secret'
+./quictun_client --local=[::]:12948 --remote=<server-ip>:4433 --key='a real shared secret'
+```
+
+`quictun_server` listens for QUIC connections on `--listen` and, for each
+one, opens a TCP connection to `--target` and pumps bytes bidirectionally.
+`quictun_client` listens for TCP connections on `--local` and, for each one,
+opens a new QUIC connection to `--remote` and pumps bytes bidirectionally.
+Both `--listen`/`--local` accept IPv6 wildcard addresses (`[::]`) and also
+accept IPv4 traffic on the same socket (dual-stack).
+
+The server auto-generates a self-signed TLS certificate in memory on every
+start (no files on disk); the client never validates it. The real
+authentication is `--key` (required, must match on both ends), checked as an
+application-layer preamble at the start of every tunnel.
+
+Flags common to both binaries:
+
+*   `--key` (required): shared secret; the two endpoints must match.
+*   `--zero_rtt` (default `true`): attempt 0-RTT resumption for QUIC
+    connections made after the first, within one client process's lifetime.
+    This tool doesn't defend against 0-RTT replay -- only rely on it on
+    trusted/low-risk paths.
+*   `--congestion_control` (default `cubic`): `cubic`, `bbr`, `bbr2`, or
+    `bbr3`, applied independently to that endpoint's own send direction.
+*   `--so_txtime` (default `false`): use SO_TXTIME (Linux packet pacing
+    offload) on the UDP send path; falls back silently if unsupported.
+*   `--idle_timeout_seconds` (default `60`) and
+    `--initial_stream_flow_control_window_kb` (default `512`): tuning knobs
+    for idle connections and per-tunnel throughput on high-bandwidth-delay-
+    product paths.
+
+`quictun_server`-only: `--listen` (default `[::]:4433`), `--target`
+(required). `quictun_client`-only: `--local` (default `[::]:12948`),
+`--remote` (required). Run either binary with `--helpfull` for the full flag
+list.
+
+This fork's CI builds and releases only `quictun_client`/`quictun_server` by
+default. The rest of this section documents QUICHE's own upstream example
+tools, which remain in the tree and buildable on demand (e.g.
+`bazel build //quiche:quic_client`) but are not part of this fork's default
+build/release output.
+
 ## Build and run standalone QUICHE
 
 QUICHE has binaries that can run on Linux platforms.

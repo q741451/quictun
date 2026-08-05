@@ -7,14 +7,15 @@ on:
     branches: [ quictun ]
   workflow_dispatch:
 
-# Binaries built on every run. These are QUICHE's own tools (this branch is
-# a vendored QUICHE snapshot, no quictun-specific application code yet).
+# Binaries built and released on every run: just the quictun TCP-over-QUIC
+# tunnel tool itself. QUICHE's own upstream example tools (quic_client,
+# quic_server, masque_client, masque_server) remain in the tree and buildable
+# on demand (e.g. `bazel build //quiche:quic_client`) for reference/debugging,
+# but are no longer part of this fork's default build/release output.
 env:
   TARGETS: >-
-    //quiche:quic_client
-    //quiche:quic_server
-    //quiche:masque_client
-    //quiche:masque_server
+    //quiche:quictun_client
+    //quiche:quictun_server
 
 jobs:
   build:
@@ -159,6 +160,6 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: quiche-tools-linux-${{ matrix.name }}
+          name: quictun-linux-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
