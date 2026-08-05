@@ -36,20 +36,43 @@ case "$ARCH" in
     ;;
   arm64)
     TRIPLE=aarch64-unknown-linux-gnu
-    GLIBC_PKGS="libc6-dev-arm64-cross libc6-arm64-cross linux-libc-dev-arm64-cross"
+    # gcc-aarch64-linux-gnu/g++-aarch64-linux-gnu are installed too, even
+    # though the real build below never uses their compiler or runtime
+    # (--rtlib=compiler-rt/-stdlib=libc++ do that instead): clang's
+    # cross-glibc discovery is keyed off finding a
+    # /usr/lib/gcc-cross/<triple>/<ver>/ directory at all before it will
+    # derive the sibling /usr/<triple>/lib glibc path from it, even though
+    # the actual libc6-dev-*-cross package below installs there regardless
+    # of whether any gcc-cross package exists. Passing --sysroot=
+    # explicitly instead of relying on this is not an option: these
+    # packages' libc.so linker scripts embed already-absolute paths, and
+    # ld's --sysroot logic re-prepends the sysroot onto absolute paths
+    # found inside linker scripts, producing a doubled, nonexistent path
+    # (verified locally, reproduced on demand by hiding/restoring
+    # /usr/lib/gcc-cross/aarch64-linux-gnu).
+    GLIBC_PKGS="libc6-dev-arm64-cross libc6-arm64-cross linux-libc-dev-arm64-cross gcc-aarch64-linux-gnu g++-aarch64-linux-gnu"
     ;;
   armv7)
     TRIPLE=armv7-unknown-linux-gnueabihf
-    GLIBC_PKGS="libc6-dev-armhf-cross libc6-armhf-cross linux-libc-dev-armhf-cross"
+    # See arm64's comment above -- same reasoning.
+    GLIBC_PKGS="libc6-dev-armhf-cross libc6-armhf-cross linux-libc-dev-armhf-cross gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf"
     ;;
   mipsel)
     TRIPLE=mipsel-unknown-linux-gnu
     # Chromium's clang package ships no compiler-rt/crtbegin for MIPS at
     # all (Chromium/V8 dropped MIPS support in 2019), so this is the one
     # target that still needs a real GCC's runtime pieces (crtbeginS.o,
-    # libgcc.a, libatomic.a) -- pinned to the same snapshot as everything
-    # else, rather than left as a live `apt install` version.
-    GLIBC_PKGS="libc6-dev-mipsel-cross libc6-mipsel-cross linux-libc-dev-mipsel-cross libgcc-10-dev-mipsel-cross"
+    # libgcc.a, libatomic.a) for the actual final build too, not just for
+    # clang's cross-glibc discovery like arm64/armv7 above -- pinned to
+    # the same snapshot as everything else, rather than left as a live
+    # `apt install` version. Pulls in GCC 12 (gcc-mipsel-linux-gnu's
+    # current default at this snapshot), which is new enough to be
+    # unrelated to the GCC-10-vs-GCC-12 mipsel breakage this whole
+    # rewrite started from -- that was specifically about GCC's bundled
+    # libstdc++ version, and this GCC is never used as a C++ standard
+    # library here regardless of its own version (libc++ is, same as
+    # every other architecture).
+    GLIBC_PKGS="libc6-dev-mipsel-cross libc6-mipsel-cross linux-libc-dev-mipsel-cross gcc-mipsel-linux-gnu g++-mipsel-linux-gnu"
     ;;
   *)
     echo "Usage: $0 <x64|arm64|armv7|mipsel>" >&2
@@ -106,9 +129,12 @@ if [ ! -e "$LIBCXX_OUT/lib/libc++.a" ]; then
 
   EXTRA_LINKER_FLAGS=""
   if [ "$ARCH" = "mipsel" ]; then
-    # Old GCC10-generation crt objects (mipsel has no Chromium compiler-rt,
-    # see above) lack a modern .note.GNU-stack marking; ld.lld's stricter
-    # default rejects them without this.
+    # The mipsel gcc-cross package's crt objects (mipsel has no Chromium
+    # compiler-rt, see above) lack a modern .note.GNU-stack marking;
+    # ld.lld's stricter default rejects them without this. Harmless if a
+    # future package update happens to fix that upstream: this just makes
+    # the stack executable, which only matters for objects that actually
+    # require it.
     EXTRA_LINKER_FLAGS="-Wl,-z,execstack"
   fi
 

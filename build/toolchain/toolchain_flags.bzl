@@ -16,9 +16,9 @@ def libcxx_link_flags(arch, mips_runtime = False):
     ]
     if mips_runtime:
         # No Chromium compiler-rt for MIPS; fall back to the pinned
-        # libgcc-10-dev-mipsel-cross package's runtime instead, and allow
-        # its (GCC10-generation) crt objects' executable-stack requirement
-        # that a modern default-strict ld.lld otherwise rejects.
+        # gcc-mipsel-linux-gnu package's runtime instead, and allow its
+        # crt objects' executable-stack requirement that a modern
+        # default-strict ld.lld otherwise rejects.
         flags += ["--rtlib=libgcc", "--unwindlib=libgcc", "-Wl,-z,execstack"]
     else:
         flags += ["--rtlib=compiler-rt", "--unwindlib=libunwind"]
