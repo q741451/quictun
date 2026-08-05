@@ -18,92 +18,17 @@ env:
 
 jobs:
   build:
-    name: Build (x86_64)
+    name: Build (${{ matrix.name }})
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # BoringSSL/abseil/protobuf/googleurl are all built from source via
-      # quiche's own Bazel setup -- that's the single biggest cost in this
-      # job, so cache Bazel's repository + build output caches keyed on the
-      # lockfile and .bazelrc. A hit here turns a ~20-30 min cold build
-      # into a couple of minutes.
-      - name: Cache Bazel
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/bazel
-            ~/.cache/bazelisk
-          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc') }}
-          restore-keys: |
-            bazel-${{ runner.os }}-
-
-      # Ubuntu's default clang is too old for this quiche snapshot's
-      # vendored Chromium base/ code (hits real compiler-conformance
-      # issues around C++20/23 constexpr and `typename` requirements).
-      # clang-18 is the version verified to work.
-      - name: Install clang-18
-        run: |
-          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 18
-
-      - name: Install bazelisk
-        run: |
-          curl -fsSL -o /tmp/bazelisk \
-            https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
-          chmod +x /tmp/bazelisk
-          sudo mv /tmp/bazelisk /usr/local/bin/bazelisk
-          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
-
-      - name: Build
-        env:
-          CC: clang-18
-        run: |
-          set -e
-          nproc
-          # .bazelrc already carries the Chromium-aligned default flags
-          # (OPENSSL_SMALL, fno-rtti/exceptions, hidden visibility,
-          # function/data sections, bundled ICU, etc). Only add what's
-          # specific to this CI artifact: static linking + stripped size.
-          bazel build -c opt \
-            --linkopt=-static \
-            --linkopt=-s \
-            $TARGETS
-
-      - name: Stage artifacts
-        run: |
-          set -e
-          mkdir -p dist
-          for t in $TARGETS; do
-            name=${t#//quiche:}
-            cp "bazel-bin/quiche/$name" "dist/${name}-linux-x86_64"
-          done
-          chmod +x dist/*
-          for f in dist/*; do
-            file "$f"
-            file "$f" | grep -q "statically linked" || { echo "::error::$f is not statically linked"; exit 1; }
-          done
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: quiche-tools-linux-x86_64
-          path: dist/*
-          if-no-files-found: error
-
-  build-cross:
-    name: Build (${{ matrix.name }}, cross-compiled)
-    runs-on: ubuntu-latest
-    # Real cross-compilation, same as Chromium's actual arm64 build: clang
-    # supports multiple targets out of the box (--target=...), so this
-    # produces target object code directly on the x86_64 runner -- the
-    # target architecture's instructions never execute during the build,
-    # and there is no QEMU/emulation anywhere in this job. See
-    # build/toolchain/BUILD.bazel for the cc_toolchain definitions and
-    # //build/toolchain:linux_* for the platforms selected below via
-    # --platforms.
+    # Every architecture (including x86_64) uses the same from-scratch,
+    # pinned, Chromium-style toolchain -- Chromium's own pinned clang, a
+    # from-source libc++ built by that clang, and glibc pinned to a fixed
+    # Ubuntu archive snapshot -- built by build/toolchain/setup_toolchain.sh
+    # and wired into Bazel via build/toolchain/BUILD.bazel's --platforms.
+    # See that BUILD.bazel file's header comment for the full rationale:
+    # in short, none of this depends on which Ubuntu release happens to be
+    # running the build, which is what broke this project's mipsel build
+    # once already (see git history).
     #
     # Plain big-endian mips is deliberately not in this matrix: quiche's
     # own README states it only supports little-endian platforms, and
@@ -113,42 +38,56 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: x86_64
+            platform: linux_x64
+            file_match: "x86-64"
           - name: arm64
             platform: linux_arm64
-            packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu
             file_match: "ARM aarch64"
           - name: armv7
             platform: linux_armv7
-            packages: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf libc6-dev-armhf-cross binutils-arm-linux-gnueabihf
             file_match: "ARM,"
           - name: mipsel
             platform: linux_mipsel
-            packages: gcc-mipsel-linux-gnu g++-mipsel-linux-gnu libc6-dev-mipsel-cross binutils-mipsel-linux-gnu
             file_match: "MIPS,"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The toolchain itself (pinned clang download + from-source libc++
+      # build) doesn't change unless the pins in setup_toolchain.sh do, so
+      # it's cached separately from -- and is a much bigger win than --
+      # Bazel's own repository/output caches below: a hit here skips
+      # several minutes of `ninja` building libc++/libc++abi/libunwind
+      # from source.
+      - name: Cache toolchain (${{ matrix.name }})
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/chromium-clang
+            /opt/libcxx-${{ matrix.name == 'x86_64' && 'x64' || matrix.name }}
+          key: toolchain-${{ matrix.name }}-${{ hashFiles('build/toolchain/setup_toolchain.sh') }}
+
+      - name: Set up pinned toolchain (${{ matrix.name }})
+        run: |
+          set -e
+          ARCH=${{ matrix.name == 'x86_64' && 'x64' || matrix.name }}
+          bash build/toolchain/setup_toolchain.sh "$ARCH"
+
+      # BoringSSL/abseil/protobuf/googleurl are all built from source via
+      # quiche's own Bazel setup -- that's the single biggest cost in this
+      # job besides the toolchain itself, so cache Bazel's repository +
+      # build output caches keyed on the lockfile, .bazelrc, and the
+      # toolchain BUILD file.
       - name: Cache Bazel (${{ matrix.name }})
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/bazel-${{ matrix.name }}
             ~/.cache/bazelisk
-          key: bazel-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel') }}
+          key: bazel-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel', 'build/toolchain/toolchain_flags.bzl') }}
           restore-keys: |
             bazel-${{ matrix.name }}-
-
-      # Same clang-18 as the x86_64 job (it natively supports emitting code
-      # for other targets via -target=), plus Debian/Ubuntu's multiarch
-      # cross-libc/binutils packages that build/toolchain/BUILD.bazel's
-      # cc_toolchain for this architecture points at.
-      - name: Install clang-18 and ${{ matrix.name }} cross toolchain
-        run: |
-          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 18
-          sudo apt-get install -y -qq ${{ matrix.packages }}
 
       - name: Install bazelisk
         run: |
@@ -162,9 +101,19 @@ jobs:
         run: |
           set -e
           nproc
+          # .bazelrc already carries the Chromium-aligned default flags
+          # (OPENSSL_SMALL, fno-rtti/exceptions, hidden visibility,
+          # function/data sections, bundled ICU, etc). Only add what's
+          # specific to this CI artifact: static linking + stripped size.
+          # -static-pie, not -static: modern glibc's static libc.a bundles
+          # dlopen/dlclose support that assumes position-independent
+          # code, and rejects a plain non-PIE -static link with
+          # "relocation R_X86_64_PC32 ... recompile with -fPIC" (verified
+          # locally -- -fPIC alone, already in .bazelrc, isn't enough;
+          # the executable itself has to be linked as a static PIE).
           bazel build -c opt \
             --platforms=//build/toolchain:${{ matrix.platform }} \
-            --linkopt=-static \
+            --linkopt=-static-pie \
             --linkopt=-s \
             $TARGETS
 
@@ -180,7 +129,7 @@ jobs:
           for f in dist/*; do
             file "$f"
             file "$f" | grep -q '${{ matrix.file_match }}' || { echo "::error::$f is not a ${{ matrix.name }} binary"; exit 1; }
-            file "$f" | grep -q "statically linked" || { echo "::error::$f is not statically linked"; exit 1; }
+            file "$f" | grep -qE "statically linked|static-pie linked" || { echo "::error::$f is not statically linked"; exit 1; }
           done
 
       - name: Upload artifacts

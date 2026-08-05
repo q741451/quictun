@@ -1,27 +1,156 @@
-# A hand-written Bazel cc_toolchain that cross-compiles to aarch64-linux-gnu
-# from an x86_64 host using clang's built-in multi-target support --
-# this is the same mechanism Chromium's own arm64 builds use (clang
-# -target=aarch64-linux-gnu against a target sysroot/cross-libc, compiled
-# straight to arm64 object code on the x86_64 build machine). No emulation
-# (QEMU or otherwise) is involved in the build itself.
+# A from-scratch, pinned, Chromium-style cc_toolchain for all four
+# architectures this project builds for (x86_64, aarch64, armv7, mipsel).
 #
-# The cross-libc/headers and binutils come from Debian/Ubuntu's multiarch
-# cross packages (gcc-aarch64-linux-gnu, g++-aarch64-linux-gnu,
-# libc6-dev-arm64-cross, binutils-aarch64-linux-gnu), which install to the
-# well-known path /usr/aarch64-linux-gnu (and /usr/lib/gcc-cross/...).
-# clang autodetects that GCC cross-installation from --target= alone -- no
-# explicit --sysroot is passed. Passing --sysroot=/usr/aarch64-linux-gnu
-# here breaks the link: these packages' libc.so linker scripts embed
-# already-absolute paths (e.g. "/usr/aarch64-linux-gnu/lib/libc.so.6"), and
-# ld's --sysroot logic re-prepends the sysroot onto absolute paths found
-# inside linker scripts, producing a doubled, nonexistent path. Verified
-# locally: the exact recipe below (no --sysroot) produces a real aarch64
-# ELF binary; adding --sysroot reproduces the "cannot find ... inside ..."
-# ld failure.
+# This intentionally does NOT use Ubuntu's system/apt clang or gcc-*-cross
+# packages as the compiler. Those drift across Ubuntu releases in ways
+# that are invisible until they aren't: this project's mipsel toolchain
+# broke once already because the GCC bundled with Ubuntu's mipsel cross
+# package (GCC 10 on the Ubuntu release used for local dev) didn't support
+# a C++20 constexpr std::vector that GCC 11+ does, and the real GitHub
+# Actions runner (a different, newer Ubuntu release) silently had a
+# different GCC version than local testing did.
+#
+# Chromium avoids this class of problem entirely by never depending on
+# the host OS's own toolchain: it downloads a specific, hash-identified
+# prebuilt clang (pinned in tools/clang/scripts/update.py) and builds its
+# own libc++ from vendored LLVM source using that same clang, on every
+# platform, regardless of host OS. This toolchain follows the same
+# structure:
+#
+#   1. Chromium's actual current pinned clang/lld/llvm-ar/llvm-objcopy/
+#      llvm-strip/llvm-nm (the exact same prebuilt package Chromium's own
+#      build downloads -- see build/toolchain/setup_toolchain.sh for the
+#      exact commit and download URL). Provides the compiler, linker, and
+#      binutils-equivalents for every architecture from one binary.
+#
+#   2. libc++/libc++abi/libunwind, built from LLVM source at that same
+#      commit, once per target architecture, by that same clang. This is
+#      what actually makes constexpr std::vector (etc) support consistent
+#      across architectures: it no longer depends on whatever libstdc++
+#      version happens to ship with a given target's GCC cross-package.
+#
+#   3. glibc (headers, crt*.o, and -- unlike Chromium's own sysroot
+#      tarballs, which are dynamic-linking-only and ship no static
+#      libraries at all -- real .a static libraries), pinned to a fixed
+#      Ubuntu archive snapshot (snapshot.ubuntu.com) rather than "whatever
+#      apt has installed right now". This is the piece that actually
+#      caused the mipsel breakage above; pinning it is what fixes it for
+#      good, independent of which Ubuntu release happens to be running
+#      the build.
+#
+# mipsel is the one exception to using compiler-rt for the runtime
+# (libgcc.a/crtbeginS.o/libatomic.a instead): Chromium's clang package
+# ships no compiler-rt at all for MIPS (Chromium/V8 dropped MIPS support
+# in 2019), so mipsel still needs a real GCC's runtime pieces, pinned to
+# the same snapshot as everything else rather than left as a live
+# `apt install`. See setup_toolchain.sh for specifics.
+#
+# All of the download/build work happens in setup_toolchain.sh (run once
+# per architecture before Bazel runs, in CI or locally), producing fixed
+# paths (/opt/chromium-clang, /opt/libcxx-<arch>) that this BUILD file's
+# tool_paths/compile_flags/link_flags reference directly -- the same
+# "CI installs to a known path, Bazel hardcodes that path" pattern already
+# used for the JDK/Python toolchains Bazel itself auto-configures.
 
 load("@bazel_tools//tools/cpp:unix_cc_toolchain_config.bzl", "cc_toolchain_config")
+load(
+    ":toolchain_flags.bzl",
+    "libcxx_compile_flags",
+    "libcxx_link_flags",
+    "libcxx_link_libs",
+)
 
 package(default_visibility = ["//visibility:public"])
+
+filegroup(name = "empty")
+
+CLANG = "/opt/chromium-clang/bin/clang"
+
+LLVM_TOOL_PATHS = {
+    "gcc": CLANG,
+    "ld": "/opt/chromium-clang/bin/ld.lld",
+    "ar": "/opt/chromium-clang/bin/llvm-ar",
+    "cpp": CLANG,
+    "gcov": "/bin/false",
+    "nm": "/opt/chromium-clang/bin/llvm-nm",
+    "objdump": "/opt/chromium-clang/bin/llvm-objdump",
+    "strip": "/opt/chromium-clang/bin/llvm-strip",
+}
+
+# clang/lld's own resource-dir headers -- identical for every target,
+# since it's one clang binary for all of them.
+CLANG_BUILTIN_INCLUDES = [
+    "/opt/chromium-clang/lib/clang/23/include",
+    "/usr/local/include",
+]
+
+# --- x86_64 ---
+
+platform(
+    name = "linux_x64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_toolchain_config(
+    name = "x64_config",
+    toolchain_identifier = "chromium-clang-x86_64-linux-gnu",
+    host_system_name = "x86_64-unknown-linux-gnu",
+    target_system_name = "x86_64-unknown-linux-gnu",
+    cpu = "x86_64",
+    target_libc = "glibc_unknown",
+    compiler = "clang",
+    abi_version = "clang",
+    abi_libc_version = "glibc_unknown",
+    tool_paths = LLVM_TOOL_PATHS,
+    compile_flags = [
+        "--target=x86_64-unknown-linux-gnu",
+    ] + libcxx_compile_flags("x64"),
+    link_flags = [
+        "--target=x86_64-unknown-linux-gnu",
+    ] + libcxx_link_flags("x64"),
+    link_libs = libcxx_link_libs(),
+    archive_flags = [],
+    unfiltered_compile_flags = ["-no-canonical-prefixes"],
+    cxx_builtin_include_directories = CLANG_BUILTIN_INCLUDES + [
+        "/opt/libcxx-x64/include/c++/v1",
+        "/usr/include/x86_64-linux-gnu",
+        "/usr/include",
+    ],
+)
+
+cc_toolchain(
+    name = "x64_toolchain",
+    toolchain_identifier = "chromium-clang-x86_64-linux-gnu",
+    toolchain_config = ":x64_config",
+    all_files = ":empty",
+    ar_files = ":empty",
+    as_files = ":empty",
+    compiler_files = ":empty",
+    dwp_files = ":empty",
+    linker_files = ":empty",
+    objcopy_files = ":empty",
+    strip_files = ":empty",
+    supports_param_files = 0,
+)
+
+toolchain(
+    name = "x64_cc_toolchain",
+    exec_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    toolchain = ":x64_toolchain",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+
+# --- aarch64 ---
 
 platform(
     name = "linux_arm64",
@@ -31,11 +160,9 @@ platform(
     ],
 )
 
-filegroup(name = "empty")
-
 cc_toolchain_config(
-    name = "aarch64_clang_config",
-    toolchain_identifier = "clang-aarch64-linux-gnu",
+    name = "aarch64_config",
+    toolchain_identifier = "chromium-clang-aarch64-linux-gnu",
     host_system_name = "x86_64-unknown-linux-gnu",
     target_system_name = "aarch64-unknown-linux-gnu",
     cpu = "aarch64",
@@ -43,64 +170,27 @@ cc_toolchain_config(
     compiler = "clang",
     abi_version = "clang",
     abi_libc_version = "glibc_unknown",
-    tool_paths = {
-        "gcc": "/usr/bin/clang-18",
-        "ld": "/usr/bin/aarch64-linux-gnu-ld",
-        "ar": "/usr/bin/aarch64-linux-gnu-ar",
-        "cpp": "/usr/bin/aarch64-linux-gnu-cpp",
-        "gcov": "/bin/false",
-        "nm": "/usr/bin/aarch64-linux-gnu-nm",
-        "objdump": "/usr/bin/aarch64-linux-gnu-objdump",
-        "strip": "/usr/bin/aarch64-linux-gnu-strip",
-    },
+    tool_paths = LLVM_TOOL_PATHS,
     compile_flags = [
-        "--target=aarch64-linux-gnu",
-    ],
+        "--target=aarch64-unknown-linux-gnu",
+    ] + libcxx_compile_flags("arm64"),
     link_flags = [
-        "--target=aarch64-linux-gnu",
-        "-fuse-ld=/usr/bin/aarch64-linux-gnu-ld",
-    ],
+        "--target=aarch64-unknown-linux-gnu",
+    ] + libcxx_link_flags("arm64"),
+    link_libs = libcxx_link_libs(),
     archive_flags = [],
-    link_libs = [
-        # Bazel's default Unix cc_toolchain template (this one) links via
-        # explicit link_libs rather than clang's own implicit driver-spec
-        # auto-linking, so nothing here is optional. Found the hard way,
-        # on real CI, one at a time: -lstdc++ missing produced "undefined
-        # reference to std::__throw_out_of_range_fmt" (32-bit ARM); -lm
-        # missing produced "undefined reference to floor" from libstdc++'s
-        # own hash-table rehash policy (also 32-bit ARM, once -lstdc++ was
-        # fixed). Both apply to every architecture here, not just the one
-        # that happened to surface each one first.
-        "-lstdc++",
-        "-lm",
-        # 32-bit MIPS has no native 64-bit atomic instructions, so LLVM
-        # lowers 8-byte atomic load/store/RMW ops (e.g. absl's flags
-        # SequenceLock) to __atomic_load_8/__atomic_store_8 calls into
-        # libatomic. Harmless elsewhere: nothing is pulled from a static
-        # archive unless something actually references a symbol in it.
-        "-latomic",
-    ],
-    unfiltered_compile_flags = [
-        "-no-canonical-prefixes",
-    ],
-    # These are the exact paths clang -v printed as its "#include <...>
-    # search" list when cross-compiling locally (clang's own resource-dir
-    # headers, plus the multiarch cross-libc's include dir; clang resolves
-    # the latter through the auto-detected GCC cross-installation, so it's
-    # not tied to that installation's version number, e.g. gcc-11 vs
-    # gcc-13 on a newer Ubuntu -- only the two fixed paths below matter).
-    cxx_builtin_include_directories = [
-        "/usr/lib/llvm-18/lib/clang/18/include",
-        "/usr/lib/clang/18/include",
+    unfiltered_compile_flags = ["-no-canonical-prefixes"],
+    cxx_builtin_include_directories = CLANG_BUILTIN_INCLUDES + [
+        "/opt/libcxx-arm64/include/c++/v1",
         "/usr/aarch64-linux-gnu/include",
-        "/usr/aarch64-linux-gnu/usr/include",
+        "/usr/include",
     ],
 )
 
 cc_toolchain(
-    name = "aarch64_clang_toolchain",
-    toolchain_identifier = "clang-aarch64-linux-gnu",
-    toolchain_config = ":aarch64_clang_config",
+    name = "aarch64_toolchain",
+    toolchain_identifier = "chromium-clang-aarch64-linux-gnu",
+    toolchain_config = ":aarch64_config",
     all_files = ":empty",
     ar_files = ":empty",
     as_files = ":empty",
@@ -122,21 +212,11 @@ toolchain(
         "@platforms//os:linux",
         "@platforms//cpu:aarch64",
     ],
-    toolchain = ":aarch64_clang_toolchain",
+    toolchain = ":aarch64_toolchain",
     toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
 )
 
 # --- armv7 (armhf) ---
-#
-# Same recipe as aarch64 above: clang -target=arm-linux-gnueabihf, cross
-# packages gcc-arm-linux-gnueabihf/g++-arm-linux-gnueabihf/
-# libc6-dev-armhf-cross/binutils-arm-linux-gnueabihf, no --sysroot (verified
-# locally the same way). This packaging generation uses the older plain
-# multiarch layout (/usr/include/<triple> effectively reached via
-# /usr/arm-linux-gnueabihf/include, plus shared /usr/include and
-# /usr/local/include for arch-generic headers) rather than aarch64's
-# pseudo-sysroot-under-/usr/<triple> layout -- the exact search list is
-# what clang -v printed locally, not a guess.
 
 platform(
     name = "linux_armv7",
@@ -147,8 +227,8 @@ platform(
 )
 
 cc_toolchain_config(
-    name = "armv7_clang_config",
-    toolchain_identifier = "clang-arm-linux-gnueabihf",
+    name = "armv7_config",
+    toolchain_identifier = "chromium-clang-arm-linux-gnueabihf",
     host_system_name = "x86_64-unknown-linux-gnu",
     target_system_name = "arm-unknown-linux-gnueabihf",
     cpu = "armv7",
@@ -156,59 +236,28 @@ cc_toolchain_config(
     compiler = "clang",
     abi_version = "clang",
     abi_libc_version = "glibc_unknown",
-    tool_paths = {
-        "gcc": "/usr/bin/clang-18",
-        "ld": "/usr/bin/arm-linux-gnueabihf-ld",
-        "ar": "/usr/bin/arm-linux-gnueabihf-ar",
-        "cpp": "/usr/bin/arm-linux-gnueabihf-cpp",
-        "gcov": "/bin/false",
-        "nm": "/usr/bin/arm-linux-gnueabihf-nm",
-        "objdump": "/usr/bin/arm-linux-gnueabihf-objdump",
-        "strip": "/usr/bin/arm-linux-gnueabihf-strip",
-    },
+    tool_paths = LLVM_TOOL_PATHS,
     compile_flags = [
-        "--target=arm-linux-gnueabihf",
-    ],
+        "--target=armv7-unknown-linux-gnueabihf",
+    ] + libcxx_compile_flags("armv7"),
     link_flags = [
-        "--target=arm-linux-gnueabihf",
-        "-fuse-ld=/usr/bin/arm-linux-gnueabihf-ld",
-    ],
+        "--target=armv7-unknown-linux-gnueabihf",
+    ] + libcxx_link_flags("armv7"),
+    link_libs = libcxx_link_libs(),
     archive_flags = [],
-    link_libs = [
-        # Bazel's default Unix cc_toolchain template (this one) links via
-        # explicit link_libs rather than clang's own implicit driver-spec
-        # auto-linking, so nothing here is optional. Found the hard way,
-        # on real CI, one at a time: -lstdc++ missing produced "undefined
-        # reference to std::__throw_out_of_range_fmt" (32-bit ARM); -lm
-        # missing produced "undefined reference to floor" from libstdc++'s
-        # own hash-table rehash policy (also 32-bit ARM, once -lstdc++ was
-        # fixed). Both apply to every architecture here, not just the one
-        # that happened to surface each one first.
-        "-lstdc++",
-        "-lm",
-        # 32-bit MIPS has no native 64-bit atomic instructions, so LLVM
-        # lowers 8-byte atomic load/store/RMW ops (e.g. absl's flags
-        # SequenceLock) to __atomic_load_8/__atomic_store_8 calls into
-        # libatomic. Harmless elsewhere: nothing is pulled from a static
-        # archive unless something actually references a symbol in it.
-        "-latomic",
-    ],
-    unfiltered_compile_flags = [
-        "-no-canonical-prefixes",
-    ],
-    cxx_builtin_include_directories = [
-        "/usr/lib/llvm-18/lib/clang/18/include",
-        "/usr/lib/clang/18/include",
-        "/usr/local/include",
+    unfiltered_compile_flags = ["-no-canonical-prefixes"],
+    cxx_builtin_include_directories = CLANG_BUILTIN_INCLUDES + [
+        "/opt/libcxx-armv7/include/c++/v1",
         "/usr/arm-linux-gnueabihf/include",
+        "/usr/include/arm-linux-gnueabihf",
         "/usr/include",
     ],
 )
 
 cc_toolchain(
-    name = "armv7_clang_toolchain",
-    toolchain_identifier = "clang-arm-linux-gnueabihf",
-    toolchain_config = ":armv7_clang_config",
+    name = "armv7_toolchain",
+    toolchain_identifier = "chromium-clang-arm-linux-gnueabihf",
+    toolchain_config = ":armv7_config",
     all_files = ":empty",
     ar_files = ":empty",
     as_files = ":empty",
@@ -230,22 +279,16 @@ toolchain(
         "@platforms//os:linux",
         "@platforms//cpu:armv7",
     ],
-    toolchain = ":armv7_clang_toolchain",
+    toolchain = ":armv7_toolchain",
     toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
 )
 
 # --- mipsel (little-endian MIPS) ---
 #
-# Same recipe again: clang -target=mipsel-linux-gnu, cross packages
-# gcc-mipsel-linux-gnu/g++-mipsel-linux-gnu/libc6-dev-mipsel-cross/
-# binutils-mipsel-linux-gnu, no --sysroot.
-#
-# Deliberately not building for big-endian "mips": quiche's own README
-# states "QUICHE is only supported on little-endian platforms". That's not
-# a build-break concern, it's a correctness one -- code that assumes
-# little-endian (wire-format parsing, hashing, etc.) can silently produce
-# wrong results on big-endian rather than fail to compile. mipsel is
-# little-endian, so it's fine; big-endian mips is not attempted here.
+# Plain big-endian "mips" is deliberately not built for at all: quiche's
+# own README states it only supports little-endian platforms, which is a
+# correctness concern (silently wrong wire-format/crypto handling on a
+# mismatched byte order), not just a build-break one.
 
 platform(
     name = "linux_mipsel",
@@ -256,8 +299,8 @@ platform(
 )
 
 cc_toolchain_config(
-    name = "mipsel_clang_config",
-    toolchain_identifier = "clang-mipsel-linux-gnu",
+    name = "mipsel_config",
+    toolchain_identifier = "chromium-clang-mipsel-linux-gnu",
     host_system_name = "x86_64-unknown-linux-gnu",
     target_system_name = "mipsel-unknown-linux-gnu",
     cpu = "mipsel",
@@ -265,59 +308,27 @@ cc_toolchain_config(
     compiler = "clang",
     abi_version = "clang",
     abi_libc_version = "glibc_unknown",
-    tool_paths = {
-        "gcc": "/usr/bin/clang-18",
-        "ld": "/usr/bin/mipsel-linux-gnu-ld",
-        "ar": "/usr/bin/mipsel-linux-gnu-ar",
-        "cpp": "/usr/bin/mipsel-linux-gnu-cpp",
-        "gcov": "/bin/false",
-        "nm": "/usr/bin/mipsel-linux-gnu-nm",
-        "objdump": "/usr/bin/mipsel-linux-gnu-objdump",
-        "strip": "/usr/bin/mipsel-linux-gnu-strip",
-    },
+    tool_paths = LLVM_TOOL_PATHS,
     compile_flags = [
-        "--target=mipsel-linux-gnu",
-    ],
+        "--target=mipsel-unknown-linux-gnu",
+    ] + libcxx_compile_flags("mipsel"),
     link_flags = [
-        "--target=mipsel-linux-gnu",
-        "-fuse-ld=/usr/bin/mipsel-linux-gnu-ld",
-    ],
+        "--target=mipsel-unknown-linux-gnu",
+    ] + libcxx_link_flags("mipsel", mips_runtime = True),
+    link_libs = libcxx_link_libs(mips_runtime = True),
     archive_flags = [],
-    link_libs = [
-        # Bazel's default Unix cc_toolchain template (this one) links via
-        # explicit link_libs rather than clang's own implicit driver-spec
-        # auto-linking, so nothing here is optional. Found the hard way,
-        # on real CI, one at a time: -lstdc++ missing produced "undefined
-        # reference to std::__throw_out_of_range_fmt" (32-bit ARM); -lm
-        # missing produced "undefined reference to floor" from libstdc++'s
-        # own hash-table rehash policy (also 32-bit ARM, once -lstdc++ was
-        # fixed). Both apply to every architecture here, not just the one
-        # that happened to surface each one first.
-        "-lstdc++",
-        "-lm",
-        # 32-bit MIPS has no native 64-bit atomic instructions, so LLVM
-        # lowers 8-byte atomic load/store/RMW ops (e.g. absl's flags
-        # SequenceLock) to __atomic_load_8/__atomic_store_8 calls into
-        # libatomic. Harmless elsewhere: nothing is pulled from a static
-        # archive unless something actually references a symbol in it.
-        "-latomic",
-    ],
-    unfiltered_compile_flags = [
-        "-no-canonical-prefixes",
-    ],
-    cxx_builtin_include_directories = [
-        "/usr/lib/llvm-18/lib/clang/18/include",
-        "/usr/lib/clang/18/include",
-        "/usr/local/include",
+    unfiltered_compile_flags = ["-no-canonical-prefixes"],
+    cxx_builtin_include_directories = CLANG_BUILTIN_INCLUDES + [
+        "/opt/libcxx-mipsel/include/c++/v1",
         "/usr/mipsel-linux-gnu/include",
         "/usr/include",
     ],
 )
 
 cc_toolchain(
-    name = "mipsel_clang_toolchain",
-    toolchain_identifier = "clang-mipsel-linux-gnu",
-    toolchain_config = ":mipsel_clang_config",
+    name = "mipsel_toolchain",
+    toolchain_identifier = "chromium-clang-mipsel-linux-gnu",
+    toolchain_config = ":mipsel_config",
     all_files = ":empty",
     ar_files = ":empty",
     as_files = ":empty",
@@ -339,6 +350,6 @@ toolchain(
         "@platforms//os:linux",
         "@platforms//cpu:mips32",
     ],
-    toolchain = ":mipsel_clang_toolchain",
+    toolchain = ":mipsel_toolchain",
     toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
 )
