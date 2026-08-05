@@ -21,22 +21,6 @@ bazel_dep(name = "abseil-cpp", version = "20260107.0", repo_name = "com_google_a
 # Last updated 2025-05-29
 bazel_dep(name = "protobuf", version = "31.1", repo_name = "com_google_protobuf")
 
-# protobuf's own port_def.inc already excludes ARM32/powerpc64le/x86-Windows
-# from its [[clang::musttail]]-based fast-path parser (with upstream bug
-# references) because LLVM's tail-call elimination doesn't work there.
-# MIPS has the exact same failure (verified: clang-18 targeting
-# mipsel-linux-gnu, "failed to perform tail call elimination on a call
-# site marked musttail" compiling generated_message_tctable_lite.cc) but
-# isn't in upstream's exclusion list -- add it via patch, since
-# PROTOBUF_MUSTTAIL is guarded by "#ifdef ... #error already defined", so
-# it can't be worked around with a compiler -D flag.
-single_version_override(
-    module_name = "protobuf",
-    version = "31.1",
-    patches = ["//build/patches:protobuf-mips-musttail.patch"],
-    patch_strip = 1,
-)
-
 # Last updated 2026-05-22
 bazel_dep(name = "boringssl", version = "0.20260508.0")
 
@@ -79,13 +63,12 @@ http_archive(
     urls = ["https://github.com/google/anonymous-tokens/archive/e31089547b3d14a8a441bb58df086b171ebc915e.tar.gz"],
 )
 
-# Cross-compiling cc_toolchains for aarch64/armv7/mipsel, all built on the
-# same clang-18 used natively for x86_64. See build/toolchain/BUILD.bazel
-# for why this is real cross-compilation (clang -target=, Debian/Ubuntu's
-# multiarch cross-libc) and not QEMU emulation, and for why plain
-# big-endian mips is deliberately not included.
+# Cross-compiling cc_toolchains for aarch64/armv7, both built on the same
+# clang-18 used natively for x86_64. See build/toolchain/BUILD.bazel for
+# why this is real cross-compilation (clang -target=, Debian/Ubuntu's
+# multiarch cross-libc) and not QEMU emulation, and for why mips/mipsel
+# was tried and dropped.
 register_toolchains(
     "//build/toolchain:aarch64_clang_cc_toolchain",
     "//build/toolchain:armv7_clang_cc_toolchain",
-    "//build/toolchain:mipsel_clang_cc_toolchain",
 )
