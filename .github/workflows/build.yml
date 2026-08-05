@@ -38,18 +38,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # static_flag: -static-pie where the pinned glibc snapshot ships
+          # rcrt1.o (x86_64, arm64); plain -static elsewhere. Debian/Ubuntu's
+          # armhf and mipsel cross-glibc builds at this snapshot don't ship
+          # rcrt1.o (the static-PIE start file) at all -- verified locally,
+          # confirmed by identical "ld.lld: error: cannot open rcrt1.o" on
+          # real CI for both. Plain -static works fine on both (verified
+          # locally for armv7's full quic_client; mipsel was already
+          # verified with plain -static earlier this session, before this
+          # toolchain rewrite) -- neither hits the dlopen/-fPIC relocation
+          # issue that forced -static-pie on x86_64 in the first place,
+          # since that's specific to glibc 2.34+'s x86_64 static libc.a.
           - name: x86_64
             platform: linux_x64
             file_match: "x86-64"
+            static_flag: -static-pie
           - name: arm64
             platform: linux_arm64
             file_match: "ARM aarch64"
+            static_flag: -static-pie
           - name: armv7
             platform: linux_armv7
             file_match: "ARM,"
+            static_flag: -static
           - name: mipsel
             platform: linux_mipsel
             file_match: "MIPS,"
+            static_flag: -static
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -118,15 +133,11 @@ jobs:
           # (OPENSSL_SMALL, fno-rtti/exceptions, hidden visibility,
           # function/data sections, bundled ICU, etc). Only add what's
           # specific to this CI artifact: static linking + stripped size.
-          # -static-pie, not -static: modern glibc's static libc.a bundles
-          # dlopen/dlclose support that assumes position-independent
-          # code, and rejects a plain non-PIE -static link with
-          # "relocation R_X86_64_PC32 ... recompile with -fPIC" (verified
-          # locally -- -fPIC alone, already in .bazelrc, isn't enough;
-          # the executable itself has to be linked as a static PIE).
+          # matrix.static_flag picks -static-pie vs plain -static -- see
+          # the matrix comment above for why this differs per arch.
           bazel build -c opt \
             --platforms=//build/toolchain:${{ matrix.platform }} \
-            --linkopt=-static-pie \
+            --linkopt=${{ matrix.static_flag }} \
             --linkopt=-s \
             $TARGETS
 
