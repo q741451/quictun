@@ -15,6 +15,7 @@
 #include "absl/types/span.h"
 #include "quiche/quic/core/io/socket.h"
 #include "quiche/quic/core/quic_connection.h"
+#include "quiche/quic/core/quic_framer.h"
 #include "quiche/quic/core/quic_packet_writer.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/platform/api/quic_logging.h"
@@ -82,6 +83,7 @@ QuictunServerConnection::QuictunServerConnection(
       udp_fd_(std::move(udp_fd)),
       self_address_(self_address),
       peer_address_(peer_address),
+      connection_id_generator_(connection_id_generator),
       expected_psk_(psk),
       on_closed_(std::move(on_closed)) {
   std::unique_ptr<QuicPacketWriter> writer =
@@ -176,15 +178,57 @@ void QuictunServerConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
 void QuictunServerConnection::ProcessPacket(
     const QuicSocketAddress& self_address,
     const QuicSocketAddress& /*peer_address*/, const QuicReceivedPacket& packet) {
-  // Deliberately ignore the passed-in peer_address and always use the
-  // canonical peer_address_ this connection was created with: this
-  // dedicated, connect()ed socket can only ever receive packets from that
-  // one peer, so there's no demuxing ambiguity to resolve here -- but
-  // QuicPacketReader independently re-normalizes the address on every call
-  // (e.g. "::ffff:127.0.0.1" -> "127.0.0.1"), and handing QuicConnection an
-  // address that doesn't byte-for-byte match what it was constructed with
-  // makes it think the peer migrated mid-handshake, fatally aborting the
-  // connection (QUIC_CONNECTION_MIGRATION_HANDSHAKE_UNCONFIRMED).
+  // This dedicated, connect()ed UDP socket can only ever receive packets
+  // from peer_address_ -- but that doesn't mean every packet that lands
+  // here truly belongs to *this* QUIC connection. Once this connection is
+  // torn down server-side (deferred via pending_removal_/CollectGarbage(),
+  // see quictun_server_driver.cc), its socket/connect() 4-tuple claim isn't
+  // released until the next garbage-collection pass, and UDP source ports
+  // have no TCP-style TIME_WAIT delay -- so the client's OS can reuse the
+  // exact same ephemeral port for a brand-new connection within
+  // milliseconds, and the kernel will keep routing that peer's packets
+  // straight to this now-stale socket, bypassing the rendezvous socket (and
+  // QuictunServerDriver::ProcessPacket's own same-check) entirely. Forwarding
+  // such a packet into a QuicConnection that doesn't recognize its
+  // connection ID hits a fatal QUICHE_DCHECK in quic_connection.cc that
+  // assumes a server can never see this (an assumption that only holds with
+  // a real QuicDispatcher demuxing by connection ID up front, which quictun
+  // deliberately doesn't have). Detect and silently drop that case here --
+  // the new client's retransmissions will succeed once this connection's
+  // socket is actually closed and the 4-tuple frees up, letting them reach
+  // the rendezvous socket and be recognized there as a genuinely new
+  // connection. Not just Initial packets: once a misrouted new connection's
+  // Initial slips through, ITS follow-up Handshake/1-RTT packets would
+  // arrive at this same stale socket too (same misrouted 4-tuple) before
+  // the client ever hears back -- so every packet's connection ID is
+  // checked here, not only long-header Initial ones.
+  PacketHeaderFormat format;
+  QuicLongHeaderType long_packet_type;
+  bool version_present;
+  bool has_length_prefix;
+  QuicVersionLabel version_label;
+  ParsedQuicVersion parsed_version = ParsedQuicVersion::Unsupported();
+  absl::string_view destination_connection_id;
+  absl::string_view source_connection_id;
+  std::optional<absl::string_view> retry_token;
+  std::string detailed_error;
+  QuicErrorCode header_error =
+      QuicFramer::ParsePublicHeaderDispatcherShortHeaderLengthUnknown(
+          packet, &format, &long_packet_type, &version_present,
+          &has_length_prefix, &version_label, &parsed_version,
+          &destination_connection_id, &source_connection_id, &retry_token,
+          &detailed_error, connection_id_generator_);
+  if (header_error == QUIC_NO_ERROR && !destination_connection_id.empty() &&
+      QuicConnectionId(destination_connection_id) != connection_->connection_id()) {
+    QUIC_LOG(INFO) << "Dropping packet for unrecognized connection ID "
+                   << QuicConnectionId(destination_connection_id) << " from "
+                   << peer_address_ << " on stale connection "
+                   << connection_->connection_id()
+                   << "'s socket -- peer reused its address, retry will "
+                      "reach the rendezvous socket once this connection is "
+                      "garbage-collected";
+    return;
+  }
   connection_->ProcessUdpPacket(self_address, peer_address_, packet);
 }
 
@@ -196,6 +240,12 @@ void QuictunServerConnection::ConnectComplete(absl::Status status) {
   if (!status.ok()) {
     QUIC_LOG(WARNING) << "Failed to connect to target for " << peer_address_
                       << ": " << status;
+    // A failed async connect already tears the socket down internally (see
+    // EventLoopConnectingClientSocket::FinishOrRearmAsyncConnect(), which
+    // calls its private Close() before invoking this callback with an error
+    // status) -- calling target_socket_->Disconnect() again from Close()
+    // below would hit a fatal descriptor_ != kInvalidSocketFd check.
+    target_socket_disconnected_ = true;
     Close();
     return;
   }

@@ -65,14 +65,24 @@ absl::Status QuictunClientDriver::Start() {
   }
   listen_fd_ = OwnedSocketFd(*fd);
 
+  // Without SO_REUSEADDR, restarting quictun_client shortly after it served
+  // any connections fails to rebind --local: those connections' local
+  // 4-tuples (sharing this listen port) linger in TIME_WAIT for up to a
+  // couple of minutes, and the kernel refuses a fresh bind() to the same
+  // port for a plain listening socket during that window.
+  absl::Status status = SetReuseAddrAndPort(*listen_fd_);
+  if (!status.ok()) {
+    return status;
+  }
+
   if (local_address_.host().address_family() == IpAddressFamily::IP_V6) {
-    absl::Status status = SetIpv6OnlyDisabled(*listen_fd_);
+    status = SetIpv6OnlyDisabled(*listen_fd_);
     if (!status.ok()) {
       return status;
     }
   }
 
-  absl::Status status = socket_api::Bind(*listen_fd_, local_address_);
+  status = socket_api::Bind(*listen_fd_, local_address_);
   if (!status.ok()) {
     return status;
   }

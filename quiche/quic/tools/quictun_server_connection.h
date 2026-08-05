@@ -83,6 +83,9 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   ~QuictunServerConnection() override;
 
   const QuicSocketAddress& peer_address() const { return peer_address_; }
+  const QuicConnectionId& connection_id() const {
+    return connection_->connection_id();
+  }
 
   // QuicSession::Visitor:
   void OnConnectionClosed(QuicConnectionId server_connection_id,
@@ -149,6 +152,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   OwnedSocketFd udp_fd_;
   const QuicSocketAddress self_address_;
   const QuicSocketAddress peer_address_;
+  ConnectionIdGeneratorInterface& connection_id_generator_;
   QuicPacketReader reader_;
   std::unique_ptr<QuicConnection> connection_;
   std::unique_ptr<QuictunServerSession> session_;

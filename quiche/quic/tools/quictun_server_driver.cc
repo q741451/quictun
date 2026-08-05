@@ -146,15 +146,6 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
   const QuicSocketAddress peer_address =
       AdaptPeerAddressForListenSocket(listen_address_, raw_peer_address);
 
-  auto existing = connections_.find(peer_address);
-  if (existing != connections_.end()) {
-    // A packet from a peer already migrated to its own socket, still queued
-    // on the rendezvous socket from before the kernel finished routing them
-    // there -- see the header comment on connections_.
-    existing->second->ProcessPacket(self_address, peer_address, packet);
-    return;
-  }
-
   PacketHeaderFormat format;
   QuicLongHeaderType long_packet_type;
   bool version_present;
@@ -165,12 +156,50 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
   absl::string_view source_connection_id;
   std::optional<absl::string_view> retry_token;
   std::string detailed_error;
-  QuicErrorCode error = QuicFramer::ParsePublicHeaderDispatcherShortHeaderLengthUnknown(
-      packet, &format, &long_packet_type, &version_present, &has_length_prefix,
-      &version_label, &parsed_version, &destination_connection_id,
-      &source_connection_id, &retry_token, &detailed_error,
-      connection_id_generator_);
-  if (error != QUIC_NO_ERROR) {
+  QuicErrorCode header_error =
+      QuicFramer::ParsePublicHeaderDispatcherShortHeaderLengthUnknown(
+          packet, &format, &long_packet_type, &version_present,
+          &has_length_prefix, &version_label, &parsed_version,
+          &destination_connection_id, &source_connection_id, &retry_token,
+          &detailed_error, connection_id_generator_);
+
+  auto existing = connections_.find(peer_address);
+  if (existing != connections_.end()) {
+    // Normally this is just a packet from a peer already migrated to its
+    // own socket, still queued on the rendezvous socket from before the
+    // kernel finished routing them there -- see the header comment on
+    // connections_. But it can also be an Initial packet for a genuinely
+    // NEW connection that happens to reuse the exact same (peer IP,
+    // ephemeral port) as an old one we haven't garbage-collected yet: UDP
+    // source ports have no TIME_WAIT-style reuse delay the way TCP ports
+    // do, so a client can reuse a port within milliseconds of its previous
+    // connection closing. Blindly forwarding that new Initial into the
+    // stale QuicConnection hits a fatal QUICHE_DCHECK in
+    // quic_connection.cc's connection-ID validation, which assumes a
+    // server never sees a mismatched connection ID directly -- an
+    // assumption that only holds with a real QuicDispatcher doing
+    // connection-ID-based demuxing up front, which quictun deliberately
+    // doesn't have (see the architecture comment in this file). Detect
+    // that case and replace the stale entry instead of forwarding to it.
+    bool looks_like_new_connection =
+        header_error == QUIC_NO_ERROR && version_present &&
+        long_packet_type == INITIAL &&
+        QuicConnectionId(destination_connection_id) !=
+            existing->second->connection_id();
+    if (!looks_like_new_connection) {
+      existing->second->ProcessPacket(self_address, peer_address, packet);
+      return;
+    }
+    QUIC_LOG(INFO) << "Peer " << peer_address
+                   << " reused its address for a new connection (old "
+                      "connection ID "
+                   << existing->second->connection_id() << ", new "
+                   << QuicConnectionId(destination_connection_id)
+                   << ") -- replacing the stale entry";
+    connections_.erase(existing);
+  }
+
+  if (header_error != QUIC_NO_ERROR) {
     QUIC_DVLOG(1) << "Dropping unparseable first packet from " << peer_address
                  << ": " << detailed_error;
     return;

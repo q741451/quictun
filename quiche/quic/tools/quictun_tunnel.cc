@@ -34,25 +34,7 @@ void QuictunTunnel::OnStreamDataAvailable() {
   if (closed_) {
     return;
   }
-  while (pending_to_tcp_.size() < kMaxQueuedChunks) {
-    std::string buffer(kReadSize, '\0');
-    bool fin = false;
-    size_t bytes_read =
-        stream_->Read(absl::MakeSpan(&buffer[0], buffer.size()), &fin);
-    if (bytes_read > 0) {
-      buffer.resize(bytes_read);
-      pending_to_tcp_.push_back(std::move(buffer));
-    }
-    if (fin) {
-      // No more QUIC->TCP data will ever arrive; nothing else to do here
-      // (the stream's own OnClose()/OnStreamClosed() is what eventually
-      // tears the tunnel down once both directions are fully finished).
-      break;
-    }
-    if (bytes_read == 0) {
-      break;
-    }
-  }
+  FillQueueFromStream();
   MaybeFlushQuicToTcp();
 }
 
@@ -117,7 +99,33 @@ void QuictunTunnel::SendComplete(absl::Status status) {
     Close("TCP send error", /*reset_stream=*/true);
     return;
   }
+  // A queue slot just freed up: top it back up from the stream in case a
+  // prior burst left unread data buffered there (see FillQueueFromStream's
+  // comment) before flushing whatever's now queued.
+  FillQueueFromStream();
   MaybeFlushQuicToTcp();
+}
+
+void QuictunTunnel::FillQueueFromStream() {
+  while (pending_to_tcp_.size() < kMaxQueuedChunks) {
+    std::string buffer(kReadSize, '\0');
+    bool fin = false;
+    size_t bytes_read =
+        stream_->Read(absl::MakeSpan(&buffer[0], buffer.size()), &fin);
+    if (bytes_read > 0) {
+      buffer.resize(bytes_read);
+      pending_to_tcp_.push_back(std::move(buffer));
+    }
+    if (fin) {
+      // No more QUIC->TCP data will ever arrive; nothing else to do here
+      // (the stream's own OnClose()/OnStreamClosed() is what eventually
+      // tears the tunnel down once both directions are fully finished).
+      break;
+    }
+    if (bytes_read == 0) {
+      break;
+    }
+  }
 }
 
 void QuictunTunnel::BeginReadFromTcp() {

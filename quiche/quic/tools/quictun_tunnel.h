@@ -69,6 +69,19 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   void MaybeFlushQuicToTcp();
   void Close(absl::string_view reason, bool reset_stream);
 
+  // Reads as much currently-available data from `stream_` as fits in
+  // `pending_to_tcp_` (up to kMaxQueuedChunks). Called both when new stream
+  // data arrives (OnStreamDataAvailable) and whenever a queue slot frees up
+  // (SendComplete) -- QuicStreamSequencer only invokes OnStreamDataAvailable
+  // when new data arrives, so if a single burst of stream data exceeds the
+  // queue's capacity, the leftover bytes must be pulled proactively once
+  // room frees up. Otherwise they (and the QUIC-level flow-control credit
+  // needed to unblock the sender, which is only released by reading) can get
+  // stranded forever: the sender is blocked on flow control waiting for us
+  // to read, and we're waiting for a callback that will never re-fire
+  // because the sender never sends the new data that would trigger it.
+  void FillQueueFromStream();
+
   QuictunStream* const stream_;
   ConnectingClientSocket* const socket_;
   std::function<void()> on_closed_;
