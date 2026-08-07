@@ -69,9 +69,10 @@ void SetQuictunStartupBandwidthHint(QuicConnection* connection,
 // These are process-wide QuicFlags (not per-connection QuicConfig), so
 // this must be called exactly once at process startup, before any
 // connection is created -- and it applies to every connection the process
-// ever makes, not just one. `loss_threshold_percent` (e.g. 50 for 50%)
-// and/or `full_loss_count` may each be 0 to leave that specific knob at
-// QUICHE's own real default; a no-op call (both 0) is safe.
+// ever makes, not just one. `loss_threshold_percent` is a percent (e.g.
+// 50 for 50%), not a fraction. Both parameters default (in
+// QuictunTuningOptions) to QUICHE's own real defaults (2, 8), so calling
+// this with those defaults is a harmless no-op.
 void ApplyQuictunBbrStartupLossOverrides(int32_t loss_threshold_percent,
                                          int32_t full_loss_count);
 

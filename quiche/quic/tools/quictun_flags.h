@@ -86,14 +86,17 @@ struct QuictunTuningOptions {
   // settle for whatever it's already reached -- once a round sees enough
   // distinct loss-detection events AND the lost bytes exceed a fraction of
   // bytes in flight. See ApplyQuictunBbrStartupLossOverrides() in
-  // quictun_connection_factory.h. QUICHE's own real defaults are 2%
-  // (loss_threshold) / 8 events (full_loss_count) -- on a path with
-  // genuine baseline loss above 2% that can still sustain a much higher
-  // real bandwidth once ramped, this fires prematurely and the connection
-  // settles for far less than the path can actually do. 0 (default)
-  // leaves QUICHE's real default unchanged for that knob.
-  int32_t bbr_startup_loss_threshold_percent = 0;
-  int32_t bbr_startup_full_loss_count = 0;
+  // quictun_connection_factory.h. Defaults here match QUICHE's own real
+  // defaults exactly (2%, 8 events) -- i.e. quictun applies no override
+  // at all unless one of these is explicitly changed, and the values
+  // shown by --helpfull/the startup banner are always what's actually in
+  // effect, not a sentinel. On a path with genuine baseline loss above 2%
+  // that can still sustain a much higher real bandwidth once ramped, the
+  // real default fires prematurely and the connection settles for far
+  // less than the path can actually do -- raise loss_threshold_percent
+  // (and/or full_loss_count) past the path's real loss rate to fix that.
+  int32_t bbr_startup_loss_threshold_percent = 2;
+  int32_t bbr_startup_full_loss_count = 8;
 };
 
 // Defines --key, --zero_rtt, --congestion_control, --so_txtime,
