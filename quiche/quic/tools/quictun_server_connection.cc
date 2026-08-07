@@ -169,7 +169,20 @@ void QuictunServerConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
     }
   }
   if (events & kSocketEventWritable) {
-    connection_->OnCanWrite();
+    // OnBlockedWriterCanWrite(), not plain OnCanWrite(): this event means
+    // "the OS says the socket is writable again", which is specifically
+    // what clears the writer's own write_blocked_ bookkeeping first (see
+    // QuicConnection::OnBlockedWriterCanWrite() and, for the reference
+    // pattern this mirrors, QuicDispatcher::OnCanWrite() in
+    // quic_dispatcher.cc). Calling plain OnCanWrite() here instead -- as
+    // this used to -- leaves that flag stuck set the first time a real
+    // write actually blocks (e.g. the kernel send buffer momentarily
+    // full under GSO batching with --so_txtime), so every subsequent
+    // firing of this same event hits OnCanWrite()'s own internal
+    // QUIC_BUG(quic_bug_10511_22) check and fatally closes the
+    // connection instead of recovering -- turning one transient block
+    // into a permanently dead connection.
+    connection_->OnBlockedWriterCanWrite();
     if (!event_loop_->SupportsEdgeTriggered()) {
       event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
     }
