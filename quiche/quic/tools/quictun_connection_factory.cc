@@ -9,11 +9,15 @@
 #include <string>
 
 #include "quiche/quic/core/batch_writer/quic_gso_batch_writer.h"
+#include "quiche/quic/core/congestion_control/send_algorithm_interface.h"
 #include "quiche/quic/core/io/socket.h"
+#include "quiche/quic/core/quic_bandwidth.h"
 #include "quiche/quic/core/quic_connection.h"
+#include "quiche/quic/core/quic_constants.h"
 #include "quiche/quic/core/quic_default_packet_writer.h"
 #include "quiche/quic/core/quic_packet_writer.h"
 #include "quiche/quic/core/quic_sent_packet_manager.h"
+#include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/platform/api/quic_flags.h"
 #include "quiche/quic/platform/api/quic_logging.h"
@@ -64,6 +68,33 @@ void SetQuictunCongestionControl(QuicConnection* connection,
   // that side's own send direction, which is the technically correct
   // behavior in QUIC (each direction has its own controller).
   connection->sent_packet_manager().SetSendAlgorithm(type);
+}
+
+void SetQuictunStartupBandwidthHint(QuicConnection* connection,
+                                    int32_t bandwidth_kbps, int32_t rtt_ms) {
+  if (bandwidth_kbps <= 0) {
+    return;
+  }
+  SendAlgorithmInterface::NetworkParams params(
+      QuicBandwidth::FromKBitsPerSecond(bandwidth_kbps),
+      QuicTime::Delta::FromMilliseconds(rtt_ms > 0 ? rtt_ms : kInitialRttMs),
+      /*allow_cwnd_to_decrease=*/false);
+  connection->AdjustNetworkParameters(params);
+}
+
+void ApplyQuictunBbrStartupLossOverrides(int32_t loss_threshold_percent,
+                                         int32_t full_loss_count) {
+  // See BbrSender::ShouldExitStartupDueToLoss() (bbr_sender.cc) -- despite
+  // the "bbr2" in these flag names, they're read directly by BBRv1's own
+  // STARTUP-loss-exit check, confirmed by grepping bbr_sender.cc itself
+  // (not bbr2_sender.cc). Real defaults: threshold 0.02 (2%), count 8.
+  if (loss_threshold_percent > 0) {
+    SetQuicFlag(quic_bbr2_default_loss_threshold,
+               loss_threshold_percent / 100.0);
+  }
+  if (full_loss_count > 0) {
+    SetQuicFlag(quic_bbr2_default_startup_full_loss_count, full_loss_count);
+  }
 }
 
 }  // namespace quic

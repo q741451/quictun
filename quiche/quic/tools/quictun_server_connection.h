@@ -87,6 +87,9 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   const QuicConnectionId& connection_id() const {
     return connection_->connection_id();
   }
+  // Exposed for QuictunServerDriver to apply per-connection startup tuning
+  // (see SetQuictunStartupBandwidthHint()) right after construction.
+  QuicConnection* connection() const { return connection_.get(); }
 
   // QuicSession::Visitor:
   void OnConnectionClosed(QuicConnectionId server_connection_id,

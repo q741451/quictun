@@ -8,6 +8,7 @@
 //
 // Usage: quictun_client --local=[::]:12948 --remote=<server-ip>:4433 --key='shared secret'
 
+#include <csignal>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -22,6 +23,7 @@
 #include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
 #include "quiche/quic/tools/quictun_client_driver.h"
+#include "quiche/quic/tools/quictun_connection_factory.h"
 #include "quiche/quic/tools/quictun_flags.h"
 #include "quiche/common/platform/api/quiche_command_line_flags.h"
 #include "quiche/common/platform/api/quiche_system_event_loop.h"
@@ -37,6 +39,15 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "TCP connection. Required.");
 
 int main(int argc, char* argv[]) {
+  // quic::socket_api::Send() (quic/core/io/socket.cc) is a bare ::send()
+  // with no MSG_NOSIGNAL, so writing to the local --local TCP socket after
+  // its peer already reset the connection -- routine whenever a download
+  // being tunneled gets cancelled -- delivers SIGPIPE. Left at its default
+  // disposition, that kills the whole process instantly with no log line
+  // and no crash report, instead of the EPIPE status that should have just
+  // closed that one tunnel (QuictunTunnel::SendComplete() already handles
+  // a failed send correctly -- this is the only piece that was missing).
+  signal(SIGPIPE, SIG_IGN);
   quiche::QuicheSystemEventLoop system_event_loop("quictun_client");
   const char* usage =
       "Usage: quictun_client --local=[::]:12948 --remote=<server-ip>:4433 "
@@ -69,6 +80,12 @@ int main(int argc, char* argv[]) {
     std::cerr << "--key is required" << std::endl;
     return 1;
   }
+  // Process-wide; must run before any connection is created, and after
+  // flag parsing since it reads --bbr_startup_loss_threshold_percent/
+  // --bbr_startup_full_loss_count.
+  quic::ApplyQuictunBbrStartupLossOverrides(
+      options.bbr_startup_loss_threshold_percent,
+      options.bbr_startup_full_loss_count);
 
   quic::PrintQuictunStartupBanner(
       "quictun_client",

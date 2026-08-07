@@ -142,6 +142,9 @@ void QuictunClientDriver::AcceptLoop() {
       socket_api::Close(accepted->fd);
       continue;
     }
+    SetQuictunStartupBandwidthHint(connection->connection(),
+                                   options_.startup_bandwidth_kbps,
+                                   options_.startup_rtt_ms);
     QuictunClientConnection* raw = connection.get();
     connections_.emplace(raw, std::move(connection));
   }

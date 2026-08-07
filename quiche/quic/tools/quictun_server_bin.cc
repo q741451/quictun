@@ -8,6 +8,7 @@
 //
 // Usage: quictun_server --listen=[::]:4433 --target=127.0.0.1:12948 --key='shared secret'
 
+#include <csignal>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -21,6 +22,7 @@
 #include "quiche/quic/core/quic_default_clock.h"
 #include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/quic/tools/quictun_connection_factory.h"
 #include "quiche/quic/tools/quictun_flags.h"
 #include "quiche/quic/tools/quictun_server_driver.h"
 #include "quiche/common/platform/api/quiche_command_line_flags.h"
@@ -37,6 +39,16 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "tunnel. Required.");
 
 int main(int argc, char* argv[]) {
+  // quic::socket_api::Send() (quic/core/io/socket.cc) is a bare ::send()
+  // with no MSG_NOSIGNAL, so writing to the local --target TCP socket
+  // after its peer already reset the connection -- routine whenever a
+  // download being tunneled gets cancelled -- delivers SIGPIPE. Left at
+  // its default disposition, that kills the whole process instantly with
+  // no log line and no crash report, instead of the EPIPE status that
+  // should have just closed that one tunnel (QuictunTunnel::SendComplete()
+  // already handles a failed send correctly -- this is the only piece
+  // that was missing).
+  signal(SIGPIPE, SIG_IGN);
   quiche::QuicheSystemEventLoop system_event_loop("quictun_server");
   const char* usage =
       "Usage: quictun_server --listen=[::]:4433 --target=127.0.0.1:12948 "
@@ -69,6 +81,12 @@ int main(int argc, char* argv[]) {
     std::cerr << "--key is required" << std::endl;
     return 1;
   }
+  // Process-wide; must run before any connection is created, and after
+  // flag parsing since it reads --bbr_startup_loss_threshold_percent/
+  // --bbr_startup_full_loss_count.
+  quic::ApplyQuictunBbrStartupLossOverrides(
+      options.bbr_startup_loss_threshold_percent,
+      options.bbr_startup_full_loss_count);
 
   quic::PrintQuictunStartupBanner(
       "quictun_server",

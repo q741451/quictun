@@ -74,6 +74,44 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "buffer drops (visible via /proc/net/snmp's Udp: RcvbufErrors column, "
     "or nstat -az UdpRcvbufErrors) climb during a transfer.");
 
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, startup_bandwidth_kbps, 0,
+    "If > 0, bootstrap every new connection's congestion controller with "
+    "this assumed starting bandwidth (Kbps, i.e. kilobits/sec -- NOT KB/s "
+    "or bytes) instead of ramping up from scratch. Only affects the "
+    "controller while still in STARTUP; has no effect once a connection "
+    "reaches steady state. 0 (default) disables this -- normal cold-start "
+    "behavior.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, startup_rtt_ms, 0,
+    "Assumed starting RTT (milliseconds) paired with "
+    "--startup_bandwidth_kbps -- only used, and only meaningful, if that "
+    "flag is also > 0. 0 (default) falls back to QUICHE's own initial RTT "
+    "guess (100ms).");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, bbr_startup_loss_threshold_percent, 0,
+    "Process-wide. Overrides one of the two thresholds BBRv1 uses to "
+    "decide 'give up probing for more bandwidth, I've hit loss-driven "
+    "congestion' during STARTUP (BbrSender::ShouldExitStartupDueToLoss(), "
+    "quic_bbr2_default_loss_threshold -- the name says bbr2 but BBRv1 "
+    "reads the same flag). QUICHE's own default is 2. On a path with "
+    "genuine baseline loss above that which can still sustain a much "
+    "higher real bandwidth once ramped, this fires prematurely and "
+    "settles for less than the path can actually do. 0 (default) leaves "
+    "QUICHE's real default (2) unchanged; a value here is a percent (e.g. "
+    "50 for 50%), not a fraction.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, bbr_startup_full_loss_count, 0,
+    "Process-wide. The other threshold paired with "
+    "--bbr_startup_loss_threshold_percent -- minimum number of distinct "
+    "loss-detection events (not lost packets) in one round before that "
+    "threshold check even applies (quic_bbr2_default_startup_full_loss_"
+    "count; QUICHE's own default is 8). 0 (default) leaves QUICHE's real "
+    "default (8) unchanged.");
+
 namespace quic {
 
 QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
@@ -97,6 +135,14 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
       static_cast<QuicByteCount>(
           quiche::GetQuicheCommandLineFlag(FLAGS_udp_socket_buffer_kb)) *
       1024;
+  options.startup_bandwidth_kbps =
+      quiche::GetQuicheCommandLineFlag(FLAGS_startup_bandwidth_kbps);
+  options.startup_rtt_ms =
+      quiche::GetQuicheCommandLineFlag(FLAGS_startup_rtt_ms);
+  options.bbr_startup_loss_threshold_percent = quiche::GetQuicheCommandLineFlag(
+      FLAGS_bbr_startup_loss_threshold_percent);
+  options.bbr_startup_full_loss_count =
+      quiche::GetQuicheCommandLineFlag(FLAGS_bbr_startup_full_loss_count);
   return options;
 }
 
@@ -152,6 +198,26 @@ void PrintQuictunStartupBanner(
                      1024)});
   lines.push_back({"udp_socket_buffer_kb",
                     absl::StrCat(options.udp_socket_buffer_bytes / 1024)});
+  if (options.startup_bandwidth_kbps > 0) {
+    lines.push_back({"startup_bandwidth_kbps",
+                      absl::StrCat(options.startup_bandwidth_kbps)});
+    lines.push_back(
+        {"startup_rtt_ms",
+         absl::StrCat(options.startup_rtt_ms > 0 ? options.startup_rtt_ms
+                                                  : 100)});
+  }
+  if (options.bbr_startup_loss_threshold_percent > 0 ||
+      options.bbr_startup_full_loss_count > 0) {
+    lines.push_back(
+        {"bbr_startup_loss_threshold_percent",
+         absl::StrCat(options.bbr_startup_loss_threshold_percent > 0
+                          ? options.bbr_startup_loss_threshold_percent
+                          : 2)});
+    lines.push_back({"bbr_startup_full_loss_count",
+                      absl::StrCat(options.bbr_startup_full_loss_count > 0
+                                       ? options.bbr_startup_full_loss_count
+                                       : 8)});
+  }
 
   size_t name_width = 0;
   for (const QuictunConfigLine& line : lines) {

@@ -67,11 +67,40 @@ struct QuictunTuningOptions {
   // exposed for operators to size against their own concurrency/throughput
   // needs rather than trusting a single hardcoded default to fit everyone.
   QuicByteCount udp_socket_buffer_bytes = 1024 * 1024;
+
+  // Manual startup-state tuning for BBR (see
+  // SetQuictunStartupBandwidthHint() in quictun_connection_factory.h). If
+  // startup_bandwidth_kbps > 0, bootstraps every new connection's
+  // congestion controller (while still in STARTUP) with this assumed
+  // bandwidth/RTT instead of letting it ramp up from scratch -- useful on
+  // paths where the true available bandwidth is already known from
+  // experience and the normal ramp-up is too slow to reach it (e.g. a
+  // long-haul path with a large bandwidth-delay product). 0 (default)
+  // disables this -- normal cold-start behavior, unaffected.
+  int32_t startup_bandwidth_kbps = 0;
+  int32_t startup_rtt_ms = 0;
+
+  // Process-wide (not per-connection) overrides for the two thresholds
+  // BbrSender::ShouldExitStartupDueToLoss() (bbr_sender.cc) uses to decide
+  // BBRv1 should give up on STARTUP -- stop probing for more bandwidth and
+  // settle for whatever it's already reached -- once a round sees enough
+  // distinct loss-detection events AND the lost bytes exceed a fraction of
+  // bytes in flight. See ApplyQuictunBbrStartupLossOverrides() in
+  // quictun_connection_factory.h. QUICHE's own real defaults are 2%
+  // (loss_threshold) / 8 events (full_loss_count) -- on a path with
+  // genuine baseline loss above 2% that can still sustain a much higher
+  // real bandwidth once ramped, this fires prematurely and the connection
+  // settles for far less than the path can actually do. 0 (default)
+  // leaves QUICHE's real default unchanged for that knob.
+  int32_t bbr_startup_loss_threshold_percent = 0;
+  int32_t bbr_startup_full_loss_count = 0;
 };
 
 // Defines --key, --zero_rtt, --congestion_control, --so_txtime,
 // --idle_timeout_seconds, --initial_stream_flow_control_window_kb,
-// --initial_session_flow_control_window_kb, --udp_socket_buffer_kb and
+// --initial_session_flow_control_window_kb, --udp_socket_buffer_kb,
+// --startup_bandwidth_kbps, --startup_rtt_ms,
+// --bbr_startup_loss_threshold_percent, --bbr_startup_full_loss_count and
 // reads their current values into a QuictunTuningOptions. Must be called
 // after quiche::QuicheParseCommandLineFlags().
 QuictunTuningOptions GetQuictunTuningOptionsFromFlags();

@@ -10,6 +10,7 @@
 #ifndef QUICHE_QUIC_TOOLS_QUICTUN_CONNECTION_FACTORY_H_
 #define QUICHE_QUIC_TOOLS_QUICTUN_CONNECTION_FACTORY_H_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -43,6 +44,36 @@ CongestionControlType ParseQuictunCongestionControl(
 // for why) -- safe to call any number of times.
 void SetQuictunCongestionControl(QuicConnection* connection,
                                  CongestionControlType type);
+
+// Manual startup-state tuning -- see --startup_bandwidth_kbps/
+// --startup_rtt_ms in quictun_flags.cc. Bootstraps `connection`'s
+// congestion controller with an assumed starting bandwidth/RTT (see
+// SendAlgorithmInterface::NetworkParams and, for BBR2 specifically,
+// Bbr2Sender::AdjustNetworkParameters -- it only has an effect while
+// still in STARTUP). No-op if `bandwidth_kbps <= 0`.
+void SetQuictunStartupBandwidthHint(QuicConnection* connection,
+                                    int32_t bandwidth_kbps, int32_t rtt_ms);
+
+// Process-wide, not per-connection -- see --bbr_startup_loss_threshold_
+// percent/--bbr_startup_full_loss_count in quictun_flags.cc.
+// BbrSender::ShouldExitStartupDueToLoss() (bbr_sender.cc) makes BBRv1 give
+// up on STARTUP -- i.e. stop probing for more bandwidth and settle for
+// whatever it's already reached -- once a round sees enough loss events
+// (default quic_bbr2_default_startup_full_loss_count = 8) AND the lost
+// bytes exceed a fraction of bytes in flight (default
+// quic_bbr2_default_loss_threshold = 0.02, i.e. 2%). On a path with
+// genuine baseline loss above 2% (e.g. a long-haul/lossy link that can
+// still sustain a real, higher bandwidth once ramped), this fires well
+// before actually finding the true available bandwidth.
+//
+// These are process-wide QuicFlags (not per-connection QuicConfig), so
+// this must be called exactly once at process startup, before any
+// connection is created -- and it applies to every connection the process
+// ever makes, not just one. `loss_threshold_percent` (e.g. 50 for 50%)
+// and/or `full_loss_count` may each be 0 to leave that specific knob at
+// QUICHE's own real default; a no-op call (both 0) is safe.
+void ApplyQuictunBbrStartupLossOverrides(int32_t loss_threshold_percent,
+                                         int32_t full_loss_count);
 
 }  // namespace quic
 

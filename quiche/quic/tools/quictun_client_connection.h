@@ -61,6 +61,10 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
 
   ~QuictunClientConnection() override;
 
+  // Exposed for QuictunClientDriver to apply per-connection startup tuning
+  // (see SetQuictunStartupBandwidthHint()) right after construction.
+  QuicConnection* connection() const { return connection_.get(); }
+
   // QuicSession::Visitor:
   void OnConnectionClosed(QuicConnectionId server_connection_id,
                           QuicErrorCode error, const std::string& error_details,

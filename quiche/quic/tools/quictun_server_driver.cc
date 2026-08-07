@@ -223,6 +223,9 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
   if (connection == nullptr) {
     return;
   }
+  SetQuictunStartupBandwidthHint(connection->connection(),
+                                 options_.startup_bandwidth_kbps,
+                                 options_.startup_rtt_ms);
   connections_.emplace(peer_address, std::move(connection));
 }
 
