@@ -35,7 +35,8 @@ absl::Status SetReuseAddrAndPort(SocketFd fd);
 
 // Creates a non-blocking UDP socket for `address_for_family`'s address
 // family, with SO_RCVBUF/SO_SNDBUF both set to `buffer_bytes` (see
-// --udp_socket_buffer_kb in quictun_flags.cc). Deliberately goes through
+// --udp_socket_buffer_kb in quictun_flags.cc) and kernel RX timestamping
+// enabled (best-effort; see the .cc file). Deliberately goes through
 // QuicUdpSocketApi::Create() rather than the lower-level
 // socket_api::CreateSocket(): only the former also enables the self-IP
 // (IP_PKTINFO/IPV6_RECVPKTINFO) and ECN/TOS receive options that

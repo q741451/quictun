@@ -54,6 +54,15 @@ absl::StatusOr<OwnedSocketFd> CreateQuicUdpSocket(
   if (fd == kInvalidSocketFd) {
     return absl::InternalError("QuicUdpSocketApi::Create failed");
   }
+  // Best-effort: kernel RX timestamping (SOF_TIMESTAMPING_RX_SOFTWARE) marks
+  // each packet with the time it actually arrived, in softirq context --
+  // more accurate than timestamping in userspace after recvmmsg() returns,
+  // which under load (event loop busy servicing other connections/sockets)
+  // can lag actual arrival by however long that delay was, inflating RTT
+  // samples. Consumed in QuicPacketReader::ReadAndDispatchPackets(). Silently
+  // no-ops if the kernel doesn't support it (see quic_udp_socket.cc); not
+  // treated as fatal since RTT accuracy degrades gracefully without it.
+  QuicUdpSocketApi().EnableReceiveTimestamp(fd);
   return OwnedSocketFd(fd);
 }
 

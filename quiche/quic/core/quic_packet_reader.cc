@@ -47,9 +47,16 @@ bool QuicPacketReader::ReadAndDispatchPackets(
 
   // Use clock.Now() as the packet receipt time, the time between packet
   // arriving at the host and now is considered part of the network delay.
+  // wall_now is clock.WallNow() taken at the same moment as `now`: if a
+  // given packet has a kernel-provided RECV_TIMESTAMP (see
+  // QuicUdpSocketApi::EnableReceiveTimestamp()), the two together let that
+  // per-packet QuicWallTime be converted into an offset from `now` below,
+  // since QuicTime and QuicWallTime aren't otherwise directly comparable.
   QuicTime now = QuicTime::Zero();
+  QuicWallTime wall_now = QuicWallTime::Zero();
   if (!GetQuicReloadableFlag(quic_move_clock_now)) {
     now = clock.Now();
+    wall_now = clock.WallNow();
   }
 
   QuicUdpPacketInfoBitMask info_bits(
@@ -66,6 +73,7 @@ bool QuicPacketReader::ReadAndDispatchPackets(
   if (GetQuicReloadableFlag(quic_move_clock_now)) {
     QUIC_CODE_COUNT(quic_move_clock_now);
     now = clock.Now();
+    wall_now = clock.WallNow();
   }
   for (size_t i = 0; i < packets_read; ++i) {
     auto& result = read_results_[i];
@@ -109,11 +117,26 @@ bool QuicPacketReader::ReadAndDispatchPackets(
       flow_label = result.packet_info.flow_label();
     }
 
+    // Prefer the kernel's own per-packet receive timestamp over the single
+    // `now` snapshot taken for the whole batch, when available -- under
+    // load, a batch read can return many packets at once (see
+    // kNumPacketsPerReadMmsgCall), and packets earlier in that batch may
+    // actually have arrived measurably before `now`. QuicWallTime isn't
+    // directly comparable to QuicTime (different, implementation-defined
+    // epochs), so convert via the offset from `wall_now`, itself captured
+    // at essentially the same instant as `now`.
+    QuicTime packet_time = now;
+    if (result.packet_info.HasValue(QuicUdpPacketInfoBit::RECV_TIMESTAMP)) {
+      packet_time =
+          now - wall_now.AbsoluteDifference(result.packet_info.receive_timestamp());
+    }
+
     QuicReceivedPacket packet(
-        result.packet_buffer.buffer, result.packet_buffer.buffer_len, now,
-        /*owns_buffer=*/false, ttl, has_ttl, headers, headers_length,
-        /*owns_header_buffer=*/false, result.packet_info.ecn_codepoint(),
-        result.packet_info.GetTos(), flow_label);
+        result.packet_buffer.buffer, result.packet_buffer.buffer_len,
+        packet_time, /*owns_buffer=*/false, ttl, has_ttl, headers,
+        headers_length, /*owns_header_buffer=*/false,
+        result.packet_info.ecn_codepoint(), result.packet_info.GetTos(),
+        flow_label);
     QuicSocketAddress self_address(self_ip, port);
     processor->ProcessPacket(self_address, peer_address, packet);
   }
