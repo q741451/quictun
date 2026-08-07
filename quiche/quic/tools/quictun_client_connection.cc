@@ -233,7 +233,20 @@ void QuictunClientConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
     // connection instead of recovering -- turning one transient block
     // into a permanently dead connection.
     connection_->OnBlockedWriterCanWrite();
-    if (!event_loop_->SupportsEdgeTriggered()) {
+    // `&& connection_->IsWriterBlocked()`, not just `!SupportsEdgeTriggered()`
+    // alone: a UDP socket is essentially always writable at the OS level, so
+    // on this codebase's only event loop implementation (QuicPollEventLoop,
+    // poll()-based, SupportsEdgeTriggered() always false -- there's no epoll
+    // variant here), unconditionally re-arming for kSocketEventWritable makes
+    // RunEventLoopOnce() return immediately on every single call instead of
+    // actually sleeping up to its timeout, pinning one CPU core at 100% for
+    // as long as this UDP socket exists -- i.e. for the whole lifetime of any
+    // connection. Only re-arm when the writer actually still has something
+    // it couldn't send, matching the reference pattern in
+    // quic_server_io_harness.cc (`dispatcher_.OnCanWrite(); if (... &&
+    // dispatcher_.HasPendingWrites()) { RearmSocket(...); }`).
+    if (!event_loop_->SupportsEdgeTriggered() &&
+        connection_->IsWriterBlocked()) {
       event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
     }
   }
