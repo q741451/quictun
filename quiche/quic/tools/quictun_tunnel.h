@@ -21,12 +21,15 @@
 
 #include <deque>
 #include <functional>
+#include <memory>
 #include <string>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/connecting_client_socket.h"
+#include "quiche/quic/core/quic_alarm.h"
+#include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/tools/quictun_session.h"
 #include "quiche/common/quiche_mem_slice.h"
 
@@ -64,6 +67,10 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   void ReceiveComplete(absl::StatusOr<quiche::QuicheMemSlice> data) override;
   void SendComplete(absl::Status status) override;
 
+  // Called by FlushCloseAlarmDelegate (quictun_tunnel.cc); not for other
+  // callers.
+  void OnFlushCloseAlarm();
+
  private:
   void BeginReadFromTcp();
   void MaybeFlushQuicToTcp();
@@ -74,6 +81,14 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   // already seen) and every byte of that final delivery has actually been
   // forwarded to the TCP side -- see the comment on quic_receive_done_.
   void MaybeCloseAfterQuicFin();
+
+  // Checks whether it's safe to finish tearing the tunnel down after the
+  // local TCP side has already hit EOF and had its FIN written to the
+  // stream (tcp_receive_done_, set by ReceiveComplete()) -- closes if the
+  // stream has actually finished sending (and, ideally, gotten acked;
+  // see flush_close_alarm_'s comment), otherwise arms flush_close_alarm_ to
+  // check again shortly.
+  void MaybeCloseAfterLocalEof();
 
   // Reads as much currently-available data from `stream_` as fits in
   // `pending_to_tcp_` (up to kMaxQueuedChunks). Called both when new stream
@@ -104,7 +119,27 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   std::deque<std::string> pending_to_tcp_;
   bool tcp_send_in_flight_ = false;
   bool tcp_receive_in_flight_ = false;
+
+  // Set once ReceiveComplete() sees TCP EOF from the local socket and has
+  // written the corresponding FIN to the stream. Closing the tunnel right
+  // away at that point (as an earlier version of this fix did) is unsafe:
+  // QuicConnection::CloseConnection() unconditionally discards any stream
+  // data that's been handed to WriteToStream() but not yet actually sent on
+  // the wire (ClearQueuedPackets()) -- for a transfer bigger than fits in
+  // the last few packets (e.g. quictun's own chaos test's big_download
+  // check), that silently truncates the tail of a completely legitimate
+  // response. See MaybeCloseAfterLocalEof()/flush_close_alarm_ for the fix:
+  // wait for the stream to actually finish sending (ideally get acked, so a
+  // lossy path's retransmissions have a chance too) before finalizing.
   bool tcp_receive_done_ = false;
+
+  // Bounds how long MaybeCloseAfterLocalEof() will wait for the stream to
+  // actually flush (see tcp_receive_done_) before giving up and closing
+  // anyway -- matches idle_timeout's role as an outer safety net: normally
+  // the wait is at most a couple of RTTs, but if the peer has vanished and
+  // acks will never come, don't hang the tunnel open indefinitely either.
+  std::unique_ptr<QuicAlarm> flush_close_alarm_;
+  QuicTime local_eof_time_ = QuicTime::Zero();
 
   // Set once the QUIC stream has delivered its FIN (peer done sending --
   // see FillQueueFromStream()). ConnectingClientSocket exposes no

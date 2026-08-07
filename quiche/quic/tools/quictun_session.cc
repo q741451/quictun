@@ -110,6 +110,8 @@ void QuictunStream::WriteToStream(absl::string_view data, bool fin) {
   WriteOrBufferData(data, fin, /*ack_listener=*/nullptr);
 }
 
+QuicConnection* QuictunStream::connection() { return session()->connection(); }
+
 bool QuictunStream::CanBufferMoreWrites() const {
   // Previously also capped BufferedDataBytes() at a hardcoded 256 KB on top
   // of this -- tighter than the (independently configurable, see

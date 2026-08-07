@@ -84,6 +84,11 @@ class QUICHE_EXPORT QuictunStream : public QuicStream {
   // an unbounded amount of buffered (unsent) data.
   bool CanBufferMoreWrites() const;
 
+  // QuicStream::session() is protected; exposed here so QuictunTunnel (not
+  // a QuicStream subclass) can reach the connection's alarm factory/clock
+  // for MaybeCloseAfterLocalEof()'s flush_close_alarm_.
+  QuicConnection* connection();
+
  private:
   QuictunStreamDelegate* const delegate_;
 };
