@@ -55,7 +55,8 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
       const QuicServerId& server_id, const QuicSocketAddress& remote_address,
       QuicCryptoClientConfig* crypto_config, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
-      SocketFd accepted_tcp_fd, const QuicSocketAddress& tcp_peer_address,
+      QuicByteCount udp_socket_buffer_bytes, SocketFd accepted_tcp_fd,
+      const QuicSocketAddress& tcp_peer_address,
       std::function<void(QuictunClientConnection*)> on_closed);
 
   ~QuictunClientConnection() override;

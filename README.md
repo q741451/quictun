@@ -63,6 +63,8 @@ quictun_server  (built Aug  6 2026 20:14:23)
   so_txtime                              = false
   idle_timeout_seconds                   = 60
   initial_stream_flow_control_window_kb  = 512
+  initial_session_flow_control_window_kb = 512
+  udp_socket_buffer_kb                   = 1024
 ==================================================================
 ```
 
@@ -79,7 +81,9 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | `--congestion_control` | `cubic` | `cubic`, `bbr`, `bbr2`, or `bbr3`. Applies independently to *this endpoint's own send direction* -- client and server each pick their own, and the two need not match. An unrecognized value falls back to `cubic` with a logged warning rather than failing to start. |
 | `--so_txtime` | `false` | Use `SO_TXTIME` (Linux packet pacing offload) on the UDP send path. Falls back silently if the kernel doesn't support it. |
 | `--idle_timeout_seconds` | `60` | QUIC connection idle timeout, in seconds. |
-| `--initial_stream_flow_control_window_kb` | `512` | Initial flow-control window advertised to the peer, in KiB. Since each connection carries exactly one stream, this is effectively the per-tunnel receive buffer budget -- raise it for high-bandwidth-delay-product paths. |
+| `--initial_stream_flow_control_window_kb` | `512` | Initial per-stream flow-control window advertised to the peer, in KiB. Independent of `--initial_session_flow_control_window_kb` -- since each connection carries exactly one stream, the smaller of the two is what actually caps throughput in practice, so raise both together for high-bandwidth-delay-product paths. |
+| `--initial_session_flow_control_window_kb` | `512` | Initial per-session flow-control window advertised to the peer, in KiB. See `--initial_stream_flow_control_window_kb` above. |
+| `--udp_socket_buffer_kb` | `1024` | `SO_RCVBUF`/`SO_SNDBUF` size set on every UDP socket quictun creates (one per QUIC connection), in KiB; applies to both the receive and send buffer. Too small a value under load can cause the kernel to drop packets before quictun ever sees them, which looks like network loss to the congestion controller rather than a local buffering problem -- if `/proc/net/snmp`'s `Udp: RcvbufErrors` column (or `nstat -az UdpRcvbufErrors`) climbs during a transfer, raise this. |
 
 ### `quictun_server`-only
 

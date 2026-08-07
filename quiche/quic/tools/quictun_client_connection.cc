@@ -31,9 +31,11 @@ std::unique_ptr<QuictunClientConnection> QuictunClientConnection::Create(
     const QuicServerId& server_id, const QuicSocketAddress& remote_address,
     QuicCryptoClientConfig* crypto_config, const std::string& psk,
     CongestionControlType congestion_control, bool so_txtime_enabled,
-    SocketFd accepted_tcp_fd, const QuicSocketAddress& tcp_peer_address,
+    QuicByteCount udp_socket_buffer_bytes, SocketFd accepted_tcp_fd,
+    const QuicSocketAddress& tcp_peer_address,
     std::function<void(QuictunClientConnection*)> on_closed) {
-  absl::StatusOr<OwnedSocketFd> fd = CreateQuicUdpSocket(remote_address);
+  absl::StatusOr<OwnedSocketFd> fd =
+      CreateQuicUdpSocket(remote_address, udp_socket_buffer_bytes);
   if (!fd.ok()) {
     QUIC_LOG(ERROR) << "Failed to create UDP socket for tunnel to "
                     << remote_address << ": " << fd.status();

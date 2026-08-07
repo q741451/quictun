@@ -111,8 +111,15 @@ void QuictunStream::WriteToStream(absl::string_view data, bool fin) {
 }
 
 bool QuictunStream::CanBufferMoreWrites() const {
-  constexpr uint64_t kMaxBufferedBytes = 256 * 1024;
-  return CanWriteNewData() && BufferedDataBytes() < kMaxBufferedBytes;
+  // Previously also capped BufferedDataBytes() at a hardcoded 256 KB on top
+  // of this -- tighter than the (independently configurable, see
+  // quictun_flags.h) QUIC-level flow-control window on any path with a
+  // window larger than that, making the hardcoded cap the actual
+  // throughput ceiling instead of the window an operator explicitly set.
+  // main's own TunnelPump (quiche/quictun/tunnel_pump.cc) and QUICHE's own
+  // reference connect_tunnel.cc both rely on nothing more than the
+  // underlying stream's own write-availability check, so do the same here.
+  return CanWriteNewData();
 }
 
 QuictunSessionBase::QuictunSessionBase(QuicConnection* connection,

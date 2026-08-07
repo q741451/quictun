@@ -14,6 +14,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "quiche/quic/core/io/socket.h"
+#include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
 
 namespace quic {
@@ -33,21 +34,23 @@ absl::Status SetIpv6OnlyDisabled(SocketFd fd);
 absl::Status SetReuseAddrAndPort(SocketFd fd);
 
 // Creates a non-blocking UDP socket for `address_for_family`'s address
-// family. Deliberately goes through QuicUdpSocketApi::Create() rather than
-// the lower-level socket_api::CreateSocket(): only the former also enables
-// the self-IP (IP_PKTINFO/IPV6_RECVPKTINFO) and ECN/TOS receive options that
+// family, with SO_RCVBUF/SO_SNDBUF both set to `buffer_bytes` (see
+// --udp_socket_buffer_kb in quictun_flags.cc). Deliberately goes through
+// QuicUdpSocketApi::Create() rather than the lower-level
+// socket_api::CreateSocket(): only the former also enables the self-IP
+// (IP_PKTINFO/IPV6_RECVPKTINFO) and ECN/TOS receive options that
 // QuicPacketReader::ReadAndDispatchPackets() requires -- without them it
 // QUIC_BUGs (fatally) on the first received packet with "Unable to get self
 // IP address". Does not bind, connect, or set any other socket options.
 absl::StatusOr<OwnedSocketFd> CreateQuicUdpSocket(
-    const QuicSocketAddress& address_for_family);
+    const QuicSocketAddress& address_for_family, QuicByteCount buffer_bytes);
 
 // Creates a non-blocking UDP socket for `address`'s family (see
 // CreateQuicUdpSocket() above), with SO_REUSEADDR/SO_REUSEPORT set and, for
 // IPv6, IPV6_V6ONLY disabled so the socket is dual-stack. Does not bind or
 // connect it.
 absl::StatusOr<OwnedSocketFd> CreateReusableUdpSocket(
-    const QuicSocketAddress& address);
+    const QuicSocketAddress& address, QuicByteCount buffer_bytes);
 
 }  // namespace quic
 

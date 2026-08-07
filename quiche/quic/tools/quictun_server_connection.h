@@ -77,6 +77,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
       const QuicSocketAddress& target_address,
       QuicConnectionId server_connection_id, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
+      QuicByteCount udp_socket_buffer_bytes,
       const QuicReceivedPacket& first_packet,
       std::function<void(QuictunServerConnection*)> on_closed);
 

@@ -79,7 +79,7 @@ QuictunServerDriver::QuictunServerDriver(QuicEventLoop* event_loop,
   config_template_.SetInitialStreamFlowControlWindowToSend(
       options.initial_stream_flow_control_window_bytes);
   config_template_.SetInitialSessionFlowControlWindowToSend(
-      options.initial_stream_flow_control_window_bytes);
+      options.initial_session_flow_control_window_bytes);
 
   // NOTE: QuicCryptoServerConfig::set_pre_shared_key() is deliberately not
   // called here -- see quictun_client_driver.cc's comment on the client
@@ -103,7 +103,8 @@ QuictunServerDriver::QuictunServerDriver(QuicEventLoop* event_loop,
 }
 
 absl::Status QuictunServerDriver::Start() {
-  absl::StatusOr<OwnedSocketFd> fd = CreateReusableUdpSocket(listen_address_);
+  absl::StatusOr<OwnedSocketFd> fd = CreateReusableUdpSocket(
+      listen_address_, options_.udp_socket_buffer_bytes);
   if (!fd.ok()) {
     return fd.status();
   }
@@ -216,7 +217,8 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
           connection_id_generator_, config_template_, crypto_config_.get(),
           &compressed_certs_cache_, listen_address_, self_address, peer_address,
           target_address_, QuicConnectionId(destination_connection_id),
-          options_.psk, congestion_control_, options_.so_txtime, packet,
+          options_.psk, congestion_control_, options_.so_txtime,
+          options_.udp_socket_buffer_bytes, packet,
           [this](QuictunServerConnection* c) { RemoveConnection(c); });
   if (connection == nullptr) {
     return;

@@ -14,7 +14,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "quiche/quic/core/io/socket.h"
-#include "quiche/quic/core/quic_constants.h"
+#include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/quic_udp_socket.h"
 #include "quiche/quic/platform/api/quic_ip_address_family.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
@@ -46,11 +46,11 @@ absl::Status SetReuseAddrAndPort(SocketFd fd) {
 }
 
 absl::StatusOr<OwnedSocketFd> CreateQuicUdpSocket(
-    const QuicSocketAddress& address_for_family) {
+    const QuicSocketAddress& address_for_family, QuicByteCount buffer_bytes) {
   SocketFd fd = QuicUdpSocketApi().Create(
       address_for_family.host().AddressFamilyToInt(),
-      /*receive_buffer_size=*/kDefaultSocketReceiveBuffer,
-      /*send_buffer_size=*/kDefaultSocketReceiveBuffer);
+      /*receive_buffer_size=*/static_cast<int>(buffer_bytes),
+      /*send_buffer_size=*/static_cast<int>(buffer_bytes));
   if (fd == kInvalidSocketFd) {
     return absl::InternalError("QuicUdpSocketApi::Create failed");
   }
@@ -58,8 +58,9 @@ absl::StatusOr<OwnedSocketFd> CreateQuicUdpSocket(
 }
 
 absl::StatusOr<OwnedSocketFd> CreateReusableUdpSocket(
-    const QuicSocketAddress& address) {
-  absl::StatusOr<OwnedSocketFd> owned_fd = CreateQuicUdpSocket(address);
+    const QuicSocketAddress& address, QuicByteCount buffer_bytes) {
+  absl::StatusOr<OwnedSocketFd> owned_fd =
+      CreateQuicUdpSocket(address, buffer_bytes);
   if (!owned_fd.ok()) {
     return owned_fd.status();
   }

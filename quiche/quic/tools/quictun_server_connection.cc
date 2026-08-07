@@ -35,9 +35,11 @@ std::unique_ptr<QuictunServerConnection> QuictunServerConnection::Create(
     const QuicSocketAddress& peer_address,
     const QuicSocketAddress& target_address, QuicConnectionId server_connection_id,
     const std::string& psk, CongestionControlType congestion_control,
-    bool so_txtime_enabled, const QuicReceivedPacket& first_packet,
+    bool so_txtime_enabled, QuicByteCount udp_socket_buffer_bytes,
+    const QuicReceivedPacket& first_packet,
     std::function<void(QuictunServerConnection*)> on_closed) {
-  absl::StatusOr<OwnedSocketFd> fd = CreateReusableUdpSocket(listen_address);
+  absl::StatusOr<OwnedSocketFd> fd =
+      CreateReusableUdpSocket(listen_address, udp_socket_buffer_bytes);
   if (!fd.ok()) {
     QUIC_LOG(ERROR) << "Failed to create per-connection UDP socket for "
                     << peer_address << ": " << fd.status();

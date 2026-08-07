@@ -47,16 +47,33 @@ struct QuictunTuningOptions {
 
   QuicTime::Delta idle_timeout = QuicTime::Delta::FromSeconds(60);
 
-  // Effectively the per-tunnel throughput budget on high-bandwidth-delay-
-  // product paths, since each connection carries exactly one stream. Used
-  // for both the stream- and session-level flow control windows.
+  // Initial per-stream flow-control window. Since each connection carries
+  // exactly one stream, in practice the smaller of this and
+  // initial_session_flow_control_window_bytes is what actually caps
+  // throughput on high-bandwidth-delay-product paths -- raise both
+  // together. Independently tunable from the session window (unlike
+  // stock QuicConfig, which would default both to the same 16 KB) so an
+  // operator can match them to their own path's BDP instead of guessing.
   QuicByteCount initial_stream_flow_control_window_bytes = 512 * 1024;
+
+  // Initial per-session flow-control window. See
+  // initial_stream_flow_control_window_bytes above.
+  QuicByteCount initial_session_flow_control_window_bytes = 512 * 1024;
+
+  // SO_RCVBUF/SO_SNDBUF set on every UDP socket quictun creates (one per
+  // QUIC connection). Too small a value under load can cause packets to be
+  // dropped by the kernel before quictun ever sees them -- indistinguishable
+  // from real network loss to the congestion controller -- so this is
+  // exposed for operators to size against their own concurrency/throughput
+  // needs rather than trusting a single hardcoded default to fit everyone.
+  QuicByteCount udp_socket_buffer_bytes = 1024 * 1024;
 };
 
 // Defines --key, --zero_rtt, --congestion_control, --so_txtime,
-// --idle_timeout_seconds, --initial_stream_flow_control_window_kb and reads
-// their current values into a QuictunTuningOptions. Must be called after
-// quiche::QuicheParseCommandLineFlags().
+// --idle_timeout_seconds, --initial_stream_flow_control_window_kb,
+// --initial_session_flow_control_window_kb, --udp_socket_buffer_kb and
+// reads their current values into a QuictunTuningOptions. Must be called
+// after quiche::QuicheParseCommandLineFlags().
 QuictunTuningOptions GetQuictunTuningOptionsFromFlags();
 
 // Parses `value` as "host:port" or "[ipv6-literal]:port" into a

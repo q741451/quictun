@@ -38,7 +38,7 @@ QuictunClientDriver::QuictunClientDriver(QuicEventLoop* event_loop,
   config_template_.SetInitialStreamFlowControlWindowToSend(
       options.initial_stream_flow_control_window_bytes);
   config_template_.SetInitialSessionFlowControlWindowToSend(
-      options.initial_stream_flow_control_window_bytes);
+      options.initial_session_flow_control_window_bytes);
 
   // NOTE: QuicCryptoClientConfig::set_pre_shared_key() is *not* used here --
   // it's an unimplemented stub for TLS-based QUIC in this snapshot
@@ -134,7 +134,8 @@ void QuictunClientDriver::AcceptLoop() {
             event_loop_, &helper_, alarm_factory_.get(),
             connection_id_generator_, buffer_allocator_, config_template_,
             server_id_, remote_address_, crypto_config_.get(), options_.psk,
-            congestion_control_, options_.so_txtime, accepted->fd,
+            congestion_control_, options_.so_txtime,
+            options_.udp_socket_buffer_bytes, accepted->fd,
             accepted->peer_address,
             [this](QuictunClientConnection* c) { RemoveConnection(c); });
     if (connection == nullptr) {

@@ -53,10 +53,26 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, initial_stream_flow_control_window_kb, 512,
-    "Initial flow-control window advertised to the peer, in KiB. Since "
-    "each connection carries exactly one stream, this is effectively the "
-    "per-tunnel receive buffer budget; raise it for high-bandwidth-delay-"
-    "product paths.");
+    "Initial per-stream flow-control window advertised to the peer, in "
+    "KiB. Independent of --initial_session_flow_control_window_kb -- the "
+    "smaller of the two is what actually caps throughput in practice, "
+    "since each connection carries exactly one stream. Raise both "
+    "together for high-bandwidth-delay-product paths.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, initial_session_flow_control_window_kb, 512,
+    "Initial per-session flow-control window advertised to the peer, in "
+    "KiB. See --initial_stream_flow_control_window_kb.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, udp_socket_buffer_kb, 1024,
+    "SO_RCVBUF/SO_SNDBUF size set on every UDP socket quictun creates (one "
+    "per QUIC connection), in KiB. Applies to both the receive and send "
+    "buffer. Too small a value under load can cause the kernel to drop "
+    "packets before quictun ever sees them, which looks like network loss "
+    "to the congestion controller; raise it if system-wide UDP receive "
+    "buffer drops (visible via /proc/net/snmp's Udp: RcvbufErrors column, "
+    "or nstat -az UdpRcvbufErrors) climb during a transfer.");
 
 namespace quic {
 
@@ -72,6 +88,14 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
   options.initial_stream_flow_control_window_bytes =
       static_cast<QuicByteCount>(quiche::GetQuicheCommandLineFlag(
           FLAGS_initial_stream_flow_control_window_kb)) *
+      1024;
+  options.initial_session_flow_control_window_bytes =
+      static_cast<QuicByteCount>(quiche::GetQuicheCommandLineFlag(
+          FLAGS_initial_session_flow_control_window_kb)) *
+      1024;
+  options.udp_socket_buffer_bytes =
+      static_cast<QuicByteCount>(
+          quiche::GetQuicheCommandLineFlag(FLAGS_udp_socket_buffer_kb)) *
       1024;
   return options;
 }
@@ -122,6 +146,12 @@ void PrintQuictunStartupBanner(
       {"initial_stream_flow_control_window_kb",
        absl::StrCat(options.initial_stream_flow_control_window_bytes /
                      1024)});
+  lines.push_back(
+      {"initial_session_flow_control_window_kb",
+       absl::StrCat(options.initial_session_flow_control_window_bytes /
+                     1024)});
+  lines.push_back({"udp_socket_buffer_kb",
+                    absl::StrCat(options.udp_socket_buffer_bytes / 1024)});
 
   size_t name_width = 0;
   for (const QuictunConfigLine& line : lines) {
