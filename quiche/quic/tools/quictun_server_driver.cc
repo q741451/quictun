@@ -134,6 +134,9 @@ void QuictunServerDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
                                         SocketFd /*fd*/,
                                         QuicSocketEventMask events) {
   if (events & kSocketEventReadable) {
+    // Reset once per OnSocketEvent() call, not per packet -- see the
+    // member's own comment in the header.
+    new_connection_budget_ = kMaxNewConnectionsPerSocketEvent;
     bool more_to_read = true;
     while (more_to_read) {
       more_to_read = reader_.ReadAndDispatchPackets(
@@ -211,6 +214,18 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
     return;
   }
 
+  if (new_connection_budget_ <= 0) {
+    // This event-loop pass has already created kMaxNewConnectionsPerSocketEvent
+    // connections -- don't act on this packet now (see the member's own
+    // comment in the header for why: bound how much of one pass a burst of
+    // new connections can monopolize). Not buffered for explicit redelivery;
+    // the peer's own QUIC retransmission of this unacknowledged Initial
+    // packet will arrive again on a later iteration, once budget resets.
+    QUIC_DVLOG(1) << "Deferring new connection from " << peer_address
+                 << ": per-event-loop-pass new connection budget exhausted";
+    return;
+  }
+
   std::unique_ptr<QuictunServerConnection> connection =
       QuictunServerConnection::Create(
           event_loop_, &helper_, alarm_factory_.get(), &socket_factory_,
@@ -223,6 +238,7 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
   if (connection == nullptr) {
     return;
   }
+  --new_connection_budget_;
   SetQuictunStartupBandwidthHint(connection->connection(),
                                  options_.startup_bandwidth_kbps,
                                  options_.startup_rtt_ms);
