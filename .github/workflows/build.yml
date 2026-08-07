@@ -136,7 +136,22 @@ jobs:
           # specific to this CI artifact: static linking + stripped size.
           # matrix.static_flag picks -static-pie vs plain -static -- see
           # the matrix comment above for why this differs per arch.
+          #
+          # --disk_cache / --repository_cache: the "Cache Bazel" step above
+          # only restores ~/.cache/bazel-${{ matrix.name }} as a plain
+          # tarball -- it doesn't make Bazel actually *use* that directory
+          # for anything. Without these two flags, Bazel's real action
+          # cache lives in its default output_user_root instead (something
+          # like ~/.cache/bazel/_bazel_runner/<hash>, never cached), so
+          # every run was silently recompiling all ~1700 actions from
+          # scratch despite the cache step reporting a hit every time
+          # (confirmed via `bazel build`'s own summary line, e.g.
+          # "2065 processes: 343 internal, 1722 processwrapper-sandbox" --
+          # zero disk-cache hits). Pointing both at the actually-cached
+          # directory is what makes the restored tarball mean anything.
           bazel build -c opt \
+            --disk_cache=$HOME/.cache/bazel-${{ matrix.name }}/disk \
+            --repository_cache=$HOME/.cache/bazel-${{ matrix.name }}/repo \
             --platforms=//build/toolchain:${{ matrix.platform }} \
             --linkopt=${{ matrix.static_flag }} \
             --linkopt=-s \
