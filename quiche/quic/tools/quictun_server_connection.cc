@@ -87,6 +87,7 @@ QuictunServerConnection::QuictunServerConnection(
       peer_address_(peer_address),
       connection_id_generator_(connection_id_generator),
       expected_psk_(psk),
+      idle_timeout_(config.IdleNetworkTimeout()),
       on_closed_(std::move(on_closed)) {
   std::unique_ptr<QuicPacketWriter> writer =
       MakeQuictunPacketWriter(*udp_fd_, so_txtime_enabled);
@@ -309,7 +310,7 @@ void QuictunServerConnection::MaybeStartTunnel() {
     return;
   }
   tunnel_ = std::make_unique<QuictunTunnel>(
-      session_->stream(), target_socket_.get(), [this] {
+      session_->stream(), target_socket_.get(), idle_timeout_, [this] {
         // QuictunTunnel::Close() already disconnected target_socket_ before
         // invoking this callback -- see the comment on
         // target_socket_disconnected_.

@@ -22,6 +22,7 @@
 #include "quiche/quic/core/quic_error_codes.h"
 #include "quiche/quic/core/quic_packet_reader.h"
 #include "quiche/quic/core/quic_process_packet_interface.h"
+#include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/socket_factory.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
@@ -178,6 +179,11 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   bool auth_delegate_attached_ = false;
   bool authenticated_ = false;
   std::string key_read_buffer_;
+
+  // Passed to QuictunTunnel's own idle-timeout mechanism (see its comment on
+  // idle_alarm_) -- read from `config` at construction time since it isn't
+  // otherwise available where MaybeStartTunnel() constructs the tunnel.
+  const QuicTime::Delta idle_timeout_;
 
   std::function<void(QuictunServerConnection*)> on_closed_;
   bool closed_ = false;

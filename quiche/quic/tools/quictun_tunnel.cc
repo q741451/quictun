@@ -24,7 +24,7 @@ namespace quic {
 
 namespace {
 
-// How long MaybeCloseAfterLocalEof() waits, total, for the stream to finish
+// How long MaybeFinalizeClose() waits, total, for the stream to finish
 // sending before giving up on a clean flush and closing anyway. A couple of
 // RTTs' worth even on quictun's own worse-case tested path (~200ms RTT, see
 // the congestion-control tuning flags) plus room for one retransmission.
@@ -41,16 +41,30 @@ class FlushCloseAlarmDelegate : public QuicAlarm::DelegateWithoutContext {
   QuictunTunnel* const tunnel_;
 };
 
+class IdleAlarmDelegate : public QuicAlarm::DelegateWithoutContext {
+ public:
+  explicit IdleAlarmDelegate(QuictunTunnel* tunnel) : tunnel_(tunnel) {}
+  void OnAlarm() override { tunnel_->OnIdleAlarm(); }
+
+ private:
+  QuictunTunnel* const tunnel_;
+};
+
 }  // namespace
 
 QuictunTunnel::QuictunTunnel(QuictunStream* stream, ConnectingClientSocket* socket,
+                             QuicTime::Delta idle_timeout,
                              std::function<void()> on_closed)
-    : stream_(stream), socket_(socket), on_closed_(std::move(on_closed)) {}
+    : stream_(stream),
+      socket_(socket),
+      on_closed_(std::move(on_closed)),
+      idle_timeout_(idle_timeout) {}
 
 void QuictunTunnel::Start(absl::string_view seed_quic_to_tcp_data) {
   if (!seed_quic_to_tcp_data.empty()) {
     pending_to_tcp_.push_back(std::string(seed_quic_to_tcp_data));
   }
+  ResetIdleAlarm();
   BeginReadFromTcp();
   MaybeFlushQuicToTcp();
 }
@@ -71,10 +85,20 @@ void QuictunTunnel::OnStreamCanWriteMore() {
     // More write capacity freeing up is a reasonable proxy for "some
     // previously-sent data just got acked" -- an opportunistic early check,
     // cheaper than waiting out flush_close_alarm_'s full retry interval.
-    MaybeCloseAfterLocalEof();
+    MaybeFinalizeClose();
     return;
   }
-  if (tcp_receive_in_flight_) {
+  // Strict backpressure, mirroring shadowsocks-libev's remote_recv_cb/
+  // server_send_cb pair (server.c): only resume reading from the TCP side
+  // once every previously-read byte has actually been handed off by the
+  // stream (HasBufferedData() false), not just once there's *some* room
+  // (the old CanBufferMoreWrites() check). This makes "we just read EOF"
+  // and "we still have unsent data from a previous read" structurally
+  // mutually exclusive, the same way ss-libev's io-watcher toggling does --
+  // see ReceiveComplete()'s empty-data branch, which no longer needs to
+  // assume there might be unflushed data sitting around from a *previous*
+  // read (flush_close_alarm_ still guards the *current*, just-written fin).
+  if (tcp_receive_in_flight_ || stream_->HasBufferedData()) {
     return;
   }
   BeginReadFromTcp();
@@ -120,16 +144,20 @@ void QuictunTunnel::ReceiveComplete(
     // giving up on receiving any more either -- and waiting for the peer to
     // close on its own is what let closed TCP targets pile up as leaked
     // connections forever (see the comment on quic_receive_done_ in the
-    // header). See MaybeCloseAfterLocalEof() for why this can't just close
+    // header). See MaybeFinalizeClose() for why this can't just close
     // immediately, though: see tcp_receive_done_'s comment.
     tcp_receive_done_ = true;
-    local_eof_time_ = stream_->connection()->clock()->ApproximateNow();
+    send_done_time_ = stream_->connection()->clock()->ApproximateNow();
     stream_->WriteToStream("", /*fin=*/true);
-    MaybeCloseAfterLocalEof();
+    MaybeFinalizeClose();
     return;
   }
+  ResetIdleAlarm();
   stream_->WriteToStream(data->AsStringView(), /*fin=*/false);
-  if (stream_->CanBufferMoreWrites()) {
+  // Strict backpressure -- see OnStreamCanWriteMore()'s comment: don't read
+  // more until this write has fully drained, so a *later* EOF can never
+  // land on top of still-unsent data from here.
+  if (!stream_->HasBufferedData()) {
     BeginReadFromTcp();
   }
   // Otherwise wait for OnStreamCanWriteMore() to resume reading from TCP.
@@ -158,6 +186,7 @@ void QuictunTunnel::FillQueueFromStream() {
     size_t bytes_read =
         stream_->Read(absl::MakeSpan(&buffer[0], buffer.size()), &fin);
     if (bytes_read > 0) {
+      ResetIdleAlarm();
       buffer.resize(bytes_read);
       pending_to_tcp_.push_back(std::move(buffer));
     }
@@ -203,15 +232,23 @@ void QuictunTunnel::MaybeCloseAfterQuicFin() {
     return;
   }
   // mirroring connect_tunnel.cc's OnClientStreamClose(): the peer is done
-  // sending and we've forwarded everything it sent, so treat the tunnel as
-  // finished rather than waiting on the TCP target to also decide to close
-  // -- which, for a target that itself expects the client to hang up first,
-  // may never happen (see the comment on quic_receive_done_ in the header).
-  Close("peer finished sending, no more data to relay",
-        /*reset_stream=*/false);
+  // sending and we've forwarded everything it sent, so treat our own send
+  // direction as finished too -- nothing else will ever need relaying to
+  // `socket_` -- rather than waiting on the TCP target to also decide to
+  // close on its own, which, for a target that itself expects the client to
+  // hang up first, may never happen (see the comment on quic_receive_done_
+  // in the header). Actual teardown still goes through MaybeFinalizeClose():
+  // see tcp_receive_done_'s comment for why this can't just close the
+  // connection immediately, the same as the ReceiveComplete()-driven path.
+  if (!tcp_receive_done_) {
+    tcp_receive_done_ = true;
+    send_done_time_ = stream_->connection()->clock()->ApproximateNow();
+    stream_->WriteToStream("", /*fin=*/true);
+  }
+  MaybeFinalizeClose();
 }
 
-void QuictunTunnel::MaybeCloseAfterLocalEof() {
+void QuictunTunnel::MaybeFinalizeClose() {
   if (closed_ || !tcp_receive_done_) {
     return;
   }
@@ -219,12 +256,12 @@ void QuictunTunnel::MaybeCloseAfterLocalEof() {
     if (flush_close_alarm_) {
       flush_close_alarm_->Cancel();
     }
-    Close("TCP target closed connection", /*reset_stream=*/false);
+    Close("tunnel finished", /*reset_stream=*/false);
     return;
   }
   QuicConnection* connection = stream_->connection();
   QuicTime now = connection->clock()->ApproximateNow();
-  if (now - local_eof_time_ >= kMaxFlushCloseWait) {
+  if (now - send_done_time_ >= kMaxFlushCloseWait) {
     // Waited long enough -- either the peer is gone and nothing will ever
     // ack, or something else is stuck. Don't hang the tunnel open forever;
     // close anyway, same tradeoff idle_timeout makes at a coarser grain.
@@ -233,8 +270,7 @@ void QuictunTunnel::MaybeCloseAfterLocalEof() {
     if (flush_close_alarm_) {
       flush_close_alarm_->Cancel();
     }
-    Close("TCP target closed connection (flush wait exceeded)",
-          /*reset_stream=*/false);
+    Close("tunnel finished (flush wait exceeded)", /*reset_stream=*/false);
     return;
   }
   if (!flush_close_alarm_) {
@@ -242,19 +278,47 @@ void QuictunTunnel::MaybeCloseAfterLocalEof() {
         connection->alarm_factory()->CreateAlarm(new FlushCloseAlarmDelegate(this)));
   }
   QuicTime deadline = std::min(now + kFlushCloseRetryInterval,
-                               local_eof_time_ + kMaxFlushCloseWait);
+                               send_done_time_ + kMaxFlushCloseWait);
   if (!flush_close_alarm_->IsSet() || flush_close_alarm_->deadline() > deadline) {
     flush_close_alarm_->Update(deadline, QuicTime::Delta::Zero());
   }
 }
 
-void QuictunTunnel::OnFlushCloseAlarm() { MaybeCloseAfterLocalEof(); }
+void QuictunTunnel::OnFlushCloseAlarm() { MaybeFinalizeClose(); }
+
+void QuictunTunnel::ResetIdleAlarm() {
+  if (closed_) {
+    return;
+  }
+  if (!idle_alarm_) {
+    idle_alarm_.reset(stream_->connection()->alarm_factory()->CreateAlarm(
+        new IdleAlarmDelegate(this)));
+  }
+  idle_alarm_->Update(
+      stream_->connection()->clock()->ApproximateNow() + idle_timeout_,
+      QuicTime::Delta::Zero());
+}
+
+void QuictunTunnel::OnIdleAlarm() {
+  if (closed_) {
+    return;
+  }
+  // Mirrors shadowsocks-libev's server_timeout_cb: nothing productive has
+  // happened on either leg for idle_timeout_ -- most likely socket_ is
+  // connected to a target/peer that itself expects *us* to send the next
+  // byte, which (since the tunnel got here) will never come. Give up rather
+  // than hold the fd pair open forever; see idle_alarm_'s comment.
+  Close("idle timeout", /*reset_stream=*/true);
+}
 
 void QuictunTunnel::Close(absl::string_view reason, bool reset_stream) {
   QUICHE_DCHECK(!closed_);
   closed_ = true;
   if (flush_close_alarm_) {
     flush_close_alarm_->Cancel();
+  }
+  if (idle_alarm_) {
+    idle_alarm_->Cancel();
   }
   QUICHE_DVLOG(1) << "Closing quictun tunnel: " << reason;
   socket_->Disconnect();

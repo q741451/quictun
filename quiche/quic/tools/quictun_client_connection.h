@@ -21,6 +21,7 @@
 #include "quiche/quic/core/quic_packet_reader.h"
 #include "quiche/quic/core/quic_process_packet_interface.h"
 #include "quiche/quic/core/quic_server_id.h"
+#include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
 #include "quiche/quic/tools/quictun_accepted_tcp_socket.h"
@@ -139,6 +140,11 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   const SocketFd accepted_tcp_fd_;
   const QuicSocketAddress tcp_peer_address_;
   bool stream_opened_ = false;
+
+  // Passed to QuictunTunnel's own idle-timeout mechanism (see its comment on
+  // idle_alarm_) -- read from `config` at construction time since it isn't
+  // otherwise available where StartTunnel() constructs the tunnel.
+  const QuicTime::Delta idle_timeout_;
 
   std::function<void(QuictunClientConnection*)> on_closed_;
   bool closed_ = false;

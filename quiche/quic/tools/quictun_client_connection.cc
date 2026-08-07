@@ -85,6 +85,7 @@ QuictunClientConnection::QuictunClientConnection(
       buffer_allocator_(buffer_allocator),
       accepted_tcp_fd_(accepted_tcp_fd),
       tcp_peer_address_(tcp_peer_address),
+      idle_timeout_(config.IdleNetworkTimeout()),
       on_closed_(std::move(on_closed)) {
   std::unique_ptr<QuicPacketWriter> writer =
       MakeQuictunPacketWriter(*udp_fd_, so_txtime_enabled);
@@ -157,7 +158,7 @@ void QuictunClientConnection::StartTunnel(QuictunStream* stream) {
       accepted_tcp_fd_, tcp_peer_address_, event_loop_, buffer_allocator_,
       /*async_visitor=*/nullptr);
   tunnel_ = std::make_unique<QuictunTunnel>(stream, tcp_socket_.get(),
-                                            [this] {
+                                            idle_timeout_, [this] {
                                               tcp_socket_disconnected_ = true;
                                               Close();
                                             });
