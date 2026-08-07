@@ -322,12 +322,43 @@ void QuictunTunnel::Close(absl::string_view reason, bool reset_stream) {
   }
   QUICHE_DVLOG(1) << "Closing quictun tunnel: " << reason;
   socket_->Disconnect();
-  if (reset_stream) {
-    stream_->Reset(QUIC_STREAM_CANCELLED);
-  }
+
+  // on_closed_ before stream_->Reset(), not after: on_closed_ synchronously
+  // runs the owner's own Close() (QuictunServerConnection::Close() /
+  // QuictunClientConnection::Close()), which tears down the whole
+  // connection_ (CloseConnection()) and marks *its* record of socket_ as
+  // disconnected. Only after that has genuinely finished is it safe to
+  // attempt stream_->Reset() -- which needs to write a RST_STREAM packet,
+  // and a failing write is itself something QuicConnection::OnWriteError()
+  // reacts to by synchronously tearing down the connection right then and
+  // there (see QuicConnection::CloseConnection()'s own in_close_connection_
+  // reentrancy guard for the general pattern this mirrors). With the old
+  // ordering (Reset() before on_closed_), that synchronous teardown would
+  // reenter QuictunServerConnection::OnConnectionClosed() -> Close() while
+  // it still believed target_socket_ hadn't been disconnected yet (that
+  // bookkeeping only happens inside the on_closed_ callback, which hadn't
+  // run yet) -- and calling Disconnect() on the already-disconnected
+  // socket_ from within that reentrant call hit a fatal
+  // QUICHE_CHECK(descriptor_ != kInvalidSocketFd) in
+  // EventLoopConnectingClientSocket::Disconnect(). Reordering so on_closed_
+  // completes first means that check is already correctly up to date by
+  // the time (if ever) a write failure during Reset() triggers the same
+  // reentrant path -- and skipping Reset() once the connection is already
+  // gone (below) means that reentrant path is no longer even reachable in
+  // the first place.
   std::function<void()> on_closed = std::move(on_closed_);
   if (on_closed) {
     on_closed();
+  }
+
+  // Only now, after the owner has had its chance to fully close the
+  // connection above -- see the comment above on_closed's invocation. If it
+  // already did (the common case: the owner's Close() always closes
+  // connection_ if still connected), connection() is already disconnected
+  // and Reset() would have nothing to actually send, so skip it outright
+  // rather than attempt (and possibly fail) a pointless write.
+  if (reset_stream && stream_->connection()->connected()) {
+    stream_->Reset(QUIC_STREAM_CANCELLED);
   }
 }
 
