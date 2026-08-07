@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ quictun ]
   workflow_dispatch:
+  # Lets release.yml call this workflow's own build job directly (same
+  # matrix, same toolchain, same artifacts) instead of duplicating it --
+  # a release is built exactly the same way as every regular CI run.
+  workflow_call:
 
 # Binaries built and released on every run: just the quictun TCP-over-QUIC
 # tunnel tool itself. QUICHE's own upstream example tools (quic_client,

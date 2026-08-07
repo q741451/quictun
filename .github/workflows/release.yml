@@ -1,0 +1,77 @@
+name: Release
+
+# Two ways to cut a release, both produce the exact same result:
+#
+# 1. Push a tag: `git tag v1.2.3 && git push origin v1.2.3`.
+# 2. From the web UI: Actions tab -> "Release" (this workflow) -> "Run
+#    workflow" -> type a version -> Run. Pick which branch/ref to build
+#    from in that same dropdown (defaults to quictun).
+#
+# Either way this builds all 4 architectures via build.yml's own build job
+# (see its workflow_call trigger) and publishes them as a GitHub Release
+# with all 8 binaries (quictun_client/quictun_server x 4 archs) attached.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Release tag to publish (e.g. v1.2.3). Only used for a manual
+          run -- pushing a tag uses the pushed tag itself. Created
+          automatically, pointing at whatever ref this workflow runs
+          against (see the branch/tag dropdown above), if it doesn't
+          already exist.
+        required: true
+        type: string
+
+# Needed for the release job to create a GitHub Release and upload assets
+# using the default, auto-issued GITHUB_TOKEN -- no PAT required.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # build.yml's own "Upload artifacts" step names each matrix leg's
+      # artifact quictun-linux-${{ matrix.name }} (x86_64/arm64/armv7/
+      # mipsel), each containing that arch's quictun_client-linux-*/
+      # quictun_server-linux-* pair -- merge all four into one directory,
+      # no name collisions since the arch is baked into every filename.
+      - name: Download all built binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: quictun-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: List staged release assets
+        run: ls -la dist
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "${{ steps.tag.outputs.tag }}" \
+            --generate-notes \
+            dist/*
