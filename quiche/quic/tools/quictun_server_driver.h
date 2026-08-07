@@ -66,22 +66,6 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
  private:
   void RemoveConnection(QuictunServerConnection* connection);
 
-  // Caps how many new QuictunServerConnections ProcessPacket() will create
-  // within a single OnSocketEvent() call, matching QuicServerIoHarness's
-  // own kNumSessionsToCreatePerSocketEvent (quic_server_io_harness.h) --
-  // same number (16), same reason: one burst of near-simultaneous new
-  // connections (e.g. a browser opening many short-lived tunnels at once)
-  // shouldn't be able to monopolize an entire event-loop pass at the
-  // expense of every already-established connection sharing it. Simpler
-  // than QuicDispatcher's own version of this: rather than buffering the
-  // excess packets to explicitly redeliver next iteration (which needs a
-  // real buffered-packet store this driver doesn't have), packets beyond
-  // the budget are just not acted on this iteration; the client's own
-  // QUIC retransmission of its unacknowledged Initial packet is what
-  // gets it picked up on a later iteration, once budget resets.
-  static constexpr int kMaxNewConnectionsPerSocketEvent = 16;
-  int new_connection_budget_ = kMaxNewConnectionsPerSocketEvent;
-
   QuicEventLoop* const event_loop_;
   const QuicSocketAddress listen_address_;
   const QuicSocketAddress target_address_;
