@@ -48,17 +48,17 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  std::string local_flag = quiche::GetQuicheCommandLineFlag(FLAGS_local);
   std::optional<quic::QuicSocketAddress> local_address =
-      quic::ParseQuictunSocketAddress(
-          quiche::GetQuicheCommandLineFlag(FLAGS_local));
+      quic::ParseQuictunSocketAddress(local_flag);
   if (!local_address.has_value()) {
     quiche::QuichePrintCommandLineFlagHelp(usage);
     return 1;
   }
 
+  std::string remote_flag = quiche::GetQuicheCommandLineFlag(FLAGS_remote);
   std::optional<quic::QuicSocketAddress> remote_address =
-      quic::ParseQuictunSocketAddress(
-          quiche::GetQuicheCommandLineFlag(FLAGS_remote));
+      quic::ParseQuictunSocketAddress(remote_flag);
   if (!remote_address.has_value()) {
     quiche::QuichePrintCommandLineFlagHelp(usage);
     return 1;
@@ -69,6 +69,10 @@ int main(int argc, char* argv[]) {
     std::cerr << "--key is required" << std::endl;
     return 1;
   }
+
+  quic::PrintQuictunStartupBanner(
+      "quictun_client",
+      {{"local", local_flag}, {"remote", remote_flag}}, options);
 
   std::unique_ptr<quic::QuicEventLoop> event_loop =
       quic::GetDefaultEventLoop()->Create(quic::QuicDefaultClock::Get());

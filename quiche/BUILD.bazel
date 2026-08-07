@@ -635,6 +635,7 @@ cc_library(
     name = "quictun_common",
     srcs = [
         "quic/tools/quictun_accepted_tcp_socket.cc",
+        "quic/tools/quictun_build_info.cc",
         "quic/tools/quictun_certificate.cc",
         "quic/tools/quictun_client_connection.cc",
         "quic/tools/quictun_client_driver.cc",
@@ -654,6 +655,7 @@ cc_library(
     ],
     hdrs = [
         "quic/tools/quictun_accepted_tcp_socket.h",
+        "quic/tools/quictun_build_info.h",
         "quic/tools/quictun_certificate.h",
         "quic/tools/quictun_client_connection.h",
         "quic/tools/quictun_client_driver.h",

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/quic_time.h"
@@ -64,6 +65,28 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags();
 // flags are always IP:port, never DNS names).
 std::optional<QuicSocketAddress> ParseQuictunSocketAddress(
     absl::string_view value);
+
+// One "name = value" line in the startup banner below. `value` should
+// already be formatted the way it's meant to be displayed (including any
+// redaction -- see PrintQuictunStartupBanner()'s handling of --key).
+struct QuictunConfigLine {
+  std::string name;
+  std::string value;
+};
+
+// Logs (once, at INFO) a human-readable startup banner: `binary_name`, this
+// build's compile date/time (QuictunBuildTimestamp(), see
+// quictun_build_info.h), and every active configuration value -- the
+// binary-specific ones the caller supplies via `binary_specific_config`
+// (e.g. --local/--remote for quictun_client, --listen/--target for
+// quictun_server) followed by the flags common to both binaries, read from
+// `options`. `--key` itself is never printed, only its length, so these
+// logs are safe to paste into a bug report without leaking the shared
+// secret. Call once from main(), after flags are parsed and validated.
+void PrintQuictunStartupBanner(
+    absl::string_view binary_name,
+    const std::vector<QuictunConfigLine>& binary_specific_config,
+    const QuictunTuningOptions& options);
 
 }  // namespace quic
 

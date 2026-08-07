@@ -4,16 +4,22 @@
 
 #include "quiche/quic/tools/quictun_flags.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <iomanip>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <vector>
 
+#include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/quic_server_id.h"
 #include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/platform/api/quic_ip_address.h"
 #include "quiche/quic/platform/api/quic_logging.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/quic/tools/quictun_build_info.h"
 #include "quiche/common/platform/api/quiche_command_line_flags.h"
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
@@ -97,6 +103,43 @@ std::optional<QuicSocketAddress> ParseQuictunSocketAddress(
   }
 
   return QuicSocketAddress(ip, server_id->port());
+}
+
+void PrintQuictunStartupBanner(
+    absl::string_view binary_name,
+    const std::vector<QuictunConfigLine>& binary_specific_config,
+    const QuictunTuningOptions& options) {
+  std::vector<QuictunConfigLine> lines = binary_specific_config;
+  lines.push_back(
+      {"key", absl::StrCat("<redacted, ", options.psk.size(), " bytes>")});
+  lines.push_back({"zero_rtt", options.zero_rtt ? "true" : "false"});
+  lines.push_back({"congestion_control", options.congestion_control});
+  lines.push_back({"so_txtime", options.so_txtime ? "true" : "false"});
+  lines.push_back({"idle_timeout_seconds",
+                    absl::StrCat(options.idle_timeout.ToSeconds())});
+  lines.push_back(
+      {"initial_stream_flow_control_window_kb",
+       absl::StrCat(options.initial_stream_flow_control_window_bytes /
+                     1024)});
+
+  size_t name_width = 0;
+  for (const QuictunConfigLine& line : lines) {
+    name_width = std::max(name_width, line.name.size());
+  }
+  constexpr int kRuleWidth = 66;
+
+  std::ostringstream banner;
+  banner << "\n"
+         << std::string(kRuleWidth, '=') << "\n"
+         << binary_name << "  (built " << QuictunBuildTimestamp() << ")\n"
+         << std::string(kRuleWidth, '-') << "\n";
+  for (const QuictunConfigLine& line : lines) {
+    banner << "  " << std::left << std::setw(static_cast<int>(name_width))
+           << line.name << "  = " << line.value << "\n";
+  }
+  banner << std::string(kRuleWidth, '=');
+
+  QUIC_LOG(INFO) << banner.str();
 }
 
 }  // namespace quic
