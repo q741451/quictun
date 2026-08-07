@@ -114,7 +114,7 @@ jobs:
           path: |
             ~/.cache/bazel-${{ matrix.name }}
             ~/.cache/bazelisk
-          key: bazel-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel', 'build/toolchain/toolchain_flags.bzl') }}
+          key: bazel-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel', 'build/toolchain/toolchain_flags.bzl', '.github/workflows/build.yml') }}
           restore-keys: |
             bazel-${{ matrix.name }}-
 
