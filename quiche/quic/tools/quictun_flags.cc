@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iomanip>
+#include <iostream>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -137,9 +138,16 @@ void PrintQuictunStartupBanner(
     banner << "  " << std::left << std::setw(static_cast<int>(name_width))
            << line.name << "  = " << line.value << "\n";
   }
-  banner << std::string(kRuleWidth, '=');
+  banner << std::string(kRuleWidth, '=') << "\n";
 
-  QUIC_LOG(INFO) << banner.str();
+  // Deliberately std::cerr, not QUIC_LOG(INFO): this banner is an operator-
+  // facing "here's what's actually running" confirmation, not a leveled
+  // debug log. quiche's flag parsing calls absl::InitializeLog() before
+  // this runs, and absl's default stderr threshold after that point is
+  // WARNING -- QUIC_LOG(INFO) here would silently disappear unless the
+  // operator already knew to pass --stderrthreshold=0, defeating the
+  // point of a banner meant to be visible by default.
+  std::cerr << banner.str();
 }
 
 }  // namespace quic

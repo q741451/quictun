@@ -4,6 +4,7 @@
 
 #include "quiche/quic/tools/quictun_server_driver.h"
 
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -119,8 +120,12 @@ absl::Status QuictunServerDriver::Start() {
     return absl::InternalError("Failed to register rendezvous UDP socket");
   }
 
-  QUIC_LOG(INFO) << "quictun_server listening on " << listen_address_
-                 << ", tunneling to " << target_address_;
+  // std::cerr, not QUIC_LOG(INFO): see the comment on
+  // PrintQuictunStartupBanner() in quictun_flags.cc -- this is the "bind
+  // actually succeeded, tunnel is ready" confirmation that completes the
+  // startup banner, and needs the same default visibility.
+  std::cerr << "quictun_server listening on " << listen_address_
+            << ", tunneling to " << target_address_ << std::endl;
   return absl::OkStatus();
 }
 

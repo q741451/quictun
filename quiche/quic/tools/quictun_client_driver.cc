@@ -4,6 +4,7 @@
 
 #include "quiche/quic/tools/quictun_client_driver.h"
 
+#include <iostream>
 #include <memory>
 #include <utility>
 
@@ -97,8 +98,12 @@ absl::Status QuictunClientDriver::Start() {
     return absl::InternalError("Failed to register TCP listen socket");
   }
 
-  QUIC_LOG(INFO) << "quictun_client listening on " << local_address_
-                 << ", tunneling to " << remote_address_;
+  // std::cerr, not QUIC_LOG(INFO): see the comment on
+  // PrintQuictunStartupBanner() in quictun_flags.cc -- this is the "bind
+  // actually succeeded, tunnel is ready" confirmation that completes the
+  // startup banner, and needs the same default visibility.
+  std::cerr << "quictun_client listening on " << local_address_
+            << ", tunneling to " << remote_address_ << std::endl;
   return absl::OkStatus();
 }
 
