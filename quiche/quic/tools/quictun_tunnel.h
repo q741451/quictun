@@ -69,6 +69,12 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   void MaybeFlushQuicToTcp();
   void Close(absl::string_view reason, bool reset_stream);
 
+  // Tears the whole tunnel down (mirroring quic/tools/connect_tunnel.cc's
+  // OnClientStreamClose()) once the peer has finished sending (QUIC FIN
+  // already seen) and every byte of that final delivery has actually been
+  // forwarded to the TCP side -- see the comment on quic_receive_done_.
+  void MaybeCloseAfterQuicFin();
+
   // Reads as much currently-available data from `stream_` as fits in
   // `pending_to_tcp_` (up to kMaxQueuedChunks). Called both when new stream
   // data arrives (OnStreamDataAvailable) and whenever a queue slot frees up
@@ -99,6 +105,23 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   bool tcp_send_in_flight_ = false;
   bool tcp_receive_in_flight_ = false;
   bool tcp_receive_done_ = false;
+
+  // Set once the QUIC stream has delivered its FIN (peer done sending --
+  // see FillQueueFromStream()). ConnectingClientSocket exposes no
+  // shutdown(SHUT_WR)-equivalent half-close, so quictun can't turn that into
+  // a one-directional close of `socket_` the way a real half-close would;
+  // instead, once every already-queued byte has actually been forwarded
+  // (pending_to_tcp_ empty, nothing in flight -- see MaybeCloseAfterQuicFin()),
+  // the whole tunnel is torn down, exactly like QUICHE's own
+  // connect_tunnel.cc treats OnClientStreamClose(). Without this, a peer
+  // that closes first while the TCP target is itself waiting for us to hang
+  // up (e.g. any simple request/response service) leaves both ends open
+  // forever: nothing ever half-closes, so OnStreamClosed() never fires, and
+  // the connection accumulates as a leaked UDP+TCP socket pair -- this is
+  // what caused permanently-100%-CPU-under-bursty-load, since short-lived
+  // connections routinely have the local side finish first.
+  bool quic_receive_done_ = false;
+
   bool closed_ = false;
 
   static constexpr size_t kReadSize = 16 * 1024;

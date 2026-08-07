@@ -74,13 +74,20 @@ void QuictunTunnel::ReceiveComplete(
     return;
   }
   if (data->empty()) {
-    // TCP peer closed its write side: forward as a QUIC FIN. The TCP fd's
-    // own read side is left alone (no `shutdown(SHUT_WR)` equivalent is
-    // exposed by ConnectingClientSocket) -- data may still flow QUIC->TCP
-    // until the stream fully closes; see the file comment for this known
-    // limitation.
+    // TCP peer closed its write side: forward as a QUIC FIN, then tear the
+    // whole tunnel down right away -- mirroring QUICHE's own
+    // connect_tunnel.cc (OnDestinationConnectionClosed(), which
+    // unconditionally Disconnect()s and closes the client stream too)
+    // rather than waiting for the QUIC stream's own direction to also
+    // independently finish. ConnectingClientSocket has no
+    // shutdown(SHUT_WR)-equivalent half-close, so there's no way to signal
+    // "no more data is coming from me" without giving up on receiving any
+    // more either -- and waiting for the peer to close on its own is what
+    // let closed TCP targets pile up as leaked connections forever (see the
+    // comment on quic_receive_done_ in the header).
     tcp_receive_done_ = true;
     stream_->WriteToStream("", /*fin=*/true);
+    Close("TCP target closed connection", /*reset_stream=*/false);
     return;
   }
   stream_->WriteToStream(data->AsStringView(), /*fin=*/false);
@@ -117,9 +124,12 @@ void QuictunTunnel::FillQueueFromStream() {
       pending_to_tcp_.push_back(std::move(buffer));
     }
     if (fin) {
-      // No more QUIC->TCP data will ever arrive; nothing else to do here
-      // (the stream's own OnClose()/OnStreamClosed() is what eventually
-      // tears the tunnel down once both directions are fully finished).
+      // No more QUIC->TCP data will ever arrive. Don't tear the tunnel down
+      // here directly, though: `buffer` above may have just captured the
+      // final real chunk that came with this FIN, still sitting unsent in
+      // pending_to_tcp_ -- see MaybeCloseAfterQuicFin(), invoked once that's
+      // actually been flushed.
+      quic_receive_done_ = true;
       break;
     }
     if (bytes_read == 0) {
@@ -137,13 +147,30 @@ void QuictunTunnel::BeginReadFromTcp() {
 }
 
 void QuictunTunnel::MaybeFlushQuicToTcp() {
-  if (closed_ || tcp_send_in_flight_ || pending_to_tcp_.empty()) {
+  if (closed_ || tcp_send_in_flight_) {
+    return;
+  }
+  if (pending_to_tcp_.empty()) {
+    MaybeCloseAfterQuicFin();
     return;
   }
   std::string chunk = std::move(pending_to_tcp_.front());
   pending_to_tcp_.pop_front();
   tcp_send_in_flight_ = true;
   socket_->SendAsync(std::move(chunk));
+}
+
+void QuictunTunnel::MaybeCloseAfterQuicFin() {
+  if (closed_ || !quic_receive_done_) {
+    return;
+  }
+  // mirroring connect_tunnel.cc's OnClientStreamClose(): the peer is done
+  // sending and we've forwarded everything it sent, so treat the tunnel as
+  // finished rather than waiting on the TCP target to also decide to close
+  // -- which, for a target that itself expects the client to hang up first,
+  // may never happen (see the comment on quic_receive_done_ in the header).
+  Close("peer finished sending, no more data to relay",
+        /*reset_stream=*/false);
 }
 
 void QuictunTunnel::Close(absl::string_view reason, bool reset_stream) {
