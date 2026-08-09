@@ -15,6 +15,7 @@
 #include "absl/types/span.h"
 #include "quiche/quic/core/io/socket.h"
 #include "quiche/quic/core/quic_connection.h"
+#include "quiche/quic/core/quic_error_codes.h"
 #include "quiche/quic/core/quic_framer.h"
 #include "quiche/quic/core/quic_packet_writer.h"
 #include "quiche/quic/core/quic_types.h"
@@ -149,8 +150,13 @@ void QuictunServerConnection::Close() {
 }
 
 void QuictunServerConnection::OnConnectionClosed(
-    QuicConnectionId /*server_connection_id*/, QuicErrorCode /*error*/,
-    const std::string& /*error_details*/, ConnectionCloseSource /*source*/) {
+    QuicConnectionId /*server_connection_id*/, QuicErrorCode error,
+    const std::string& error_details, ConnectionCloseSource source) {
+  QUIC_LOG(INFO) << "quictun connection from " << peer_address_
+                 << " closed: " << QuicErrorCodeToString(error) << " (\""
+                 << error_details << "\"), source="
+                 << (source == ConnectionCloseSource::FROM_PEER ? "PEER"
+                                                                 : "SELF");
   Close();
 }
 

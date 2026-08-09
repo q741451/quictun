@@ -265,8 +265,11 @@ void QuictunTunnel::MaybeFinalizeClose() {
     // Waited long enough -- either the peer is gone and nothing will ever
     // ack, or something else is stuck. Don't hang the tunnel open forever;
     // close anyway, same tradeoff idle_timeout makes at a coarser grain.
-    QUICHE_DVLOG(1) << "Giving up waiting for stream flush after "
-                    << kMaxFlushCloseWait << ", closing anyway";
+    QUICHE_LOG(WARNING) << "Giving up waiting for stream flush after "
+                        << kMaxFlushCloseWait << ", closing anyway"
+                        << " (HasBufferedData=" << stream_->HasBufferedData()
+                        << ", IsWaitingForAcks=" << stream_->IsWaitingForAcks()
+                        << ")";
     if (flush_close_alarm_) {
       flush_close_alarm_->Cancel();
     }
@@ -320,7 +323,8 @@ void QuictunTunnel::Close(absl::string_view reason, bool reset_stream) {
   if (idle_alarm_) {
     idle_alarm_->Cancel();
   }
-  QUICHE_DVLOG(1) << "Closing quictun tunnel: " << reason;
+  QUICHE_LOG(INFO) << "Closing quictun tunnel: " << reason
+                   << ", reset_stream=" << reset_stream;
   socket_->Disconnect();
 
   // on_closed_ before stream_->Reset(), not after: on_closed_ synchronously
