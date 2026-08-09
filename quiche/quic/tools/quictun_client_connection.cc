@@ -89,7 +89,7 @@ QuictunClientConnection::QuictunClientConnection(
       idle_timeout_(config.IdleNetworkTimeout()),
       on_closed_(std::move(on_closed)) {
   std::unique_ptr<QuicPacketWriter> writer =
-      MakeQuictunPacketWriter(*udp_fd_, so_txtime_enabled);
+      MakeQuictunPacketWriter(*udp_fd_, so_txtime_enabled, event_loop);
 
   connection_ = std::make_unique<QuicConnection>(
       QuicUtils::CreateRandomConnectionId(), QuicSocketAddress(),

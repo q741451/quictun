@@ -14,6 +14,7 @@
 #include <memory>
 #include <string>
 
+#include "quiche/quic/core/io/quic_event_loop.h"
 #include "quiche/quic/core/io/socket.h"
 #include "quiche/quic/core/quic_connection.h"
 #include "quiche/quic/core/quic_packet_writer.h"
@@ -27,11 +28,36 @@ namespace quic {
 void EnableQuictunSoTxTime();
 
 // Returns a QuicDefaultPacketWriter, or -- if `so_txtime_enabled` -- a
-// QuicGsoBatchWriter (Linux packet pacing offload). Falls back silently to
-// the plain writer if the kernel doesn't support SO_TXTIME, same as
-// QuicGsoBatchWriter always does when release time isn't available.
+// QuicGsoBatchWriter (Linux packet pacing offload) -- either way wrapped so
+// that, the moment a write actually blocks, `event_loop` is told to resume
+// watching `fd` for writability. Falls back silently to the plain writer if
+// the kernel doesn't support SO_TXTIME, same as QuicGsoBatchWriter always
+// does when release time isn't available.
+//
+// This rearming is necessary, not an optional nicety: quictun only ever asks
+// its (poll()-based, always level-triggered -- see
+// QuicEventLoop::SupportsEdgeTriggered()) event loop to keep watching a
+// socket for writability while a write is actually known to be blocked, to
+// avoid pinning a CPU core spinning through RunEventLoopOnce() on a socket
+// that's (as UDP sockets almost always are) actually writable -- see
+// QuictunClientConnection::OnSocketEvent()'s own comment on this. But the
+// watch is armed by RearmSocket(), a one-shot subscription that POLLOUT
+// consumes (see QuicPollEventLoop::ProcessIoEvents()) -- so if a write
+// blocks for the first time right after the connection's initial
+// registration already consumed that one-shot subscription (the ordinary
+// case: sockets start out actually writable, so the very first poll() cycle
+// fires kSocketEventWritable, finds nothing blocked yet, and -- correctly,
+// by that same CPU-pinning-avoidance logic -- doesn't re-arm), nothing ever
+// re-subscribes, and the socket is never told again that it's writable, even
+// once it genuinely is -- the connection is stuck sending nothing, forever,
+// with no error. Wrapping the writer here catches every blocked write at the
+// one real choke point everything must pass through to actually reach the
+// wire, so no call path can bypass it -- mirrors
+// quic_client_default_network_helper.h's QuicLevelTriggeredPacketWriter
+// (same fix, for QuicDefaultPacketWriter specifically; this generalizes it
+// to also cover QuicGsoBatchWriter, which quictun uses too).
 std::unique_ptr<QuicPacketWriter> MakeQuictunPacketWriter(
-    SocketFd fd, bool so_txtime_enabled);
+    SocketFd fd, bool so_txtime_enabled, QuicEventLoop* event_loop);
 
 // Parses "cubic" | "bbr" | "bbr2" | "bbr3" into a CongestionControlType.
 // Returns kCubicBytes (quictun's default) and logs a warning for any other

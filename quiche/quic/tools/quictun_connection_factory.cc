@@ -10,6 +10,7 @@
 
 #include "quiche/quic/core/batch_writer/quic_gso_batch_writer.h"
 #include "quiche/quic/core/congestion_control/send_algorithm_interface.h"
+#include "quiche/quic/core/io/quic_event_loop.h"
 #include "quiche/quic/core/io/socket.h"
 #include "quiche/quic/core/quic_bandwidth.h"
 #include "quiche/quic/core/quic_connection.h"
@@ -24,16 +25,95 @@
 
 namespace quic {
 
+namespace {
+
+// See MakeQuictunPacketWriter()'s comment for why this exists. Generalizes
+// quic_client_default_network_helper.h's QuicLevelTriggeredPacketWriter
+// (which only wraps QuicDefaultPacketWriter) into a decorator around any
+// QuicPacketWriter, since quictun also uses QuicGsoBatchWriter -- and checks
+// both WritePacket() *and* Flush(), since QuicGsoBatchWriter (batch mode)
+// can report a newly-blocked write from either: WritePacket() itself when a
+// full packet can't be buffered without flushing, or Flush() when an
+// explicit/implicit flush of already-buffered packets hits the block.
+class RearmOnBlockPacketWriter : public QuicPacketWriter {
+ public:
+  RearmOnBlockPacketWriter(std::unique_ptr<QuicPacketWriter> wrapped,
+                           SocketFd fd, QuicEventLoop* event_loop)
+      : wrapped_(std::move(wrapped)), fd_(fd), event_loop_(event_loop) {}
+
+  WriteResult WritePacket(const char* buffer, size_t buf_len,
+                          const QuicIpAddress& self_address,
+                          const QuicSocketAddress& peer_address,
+                          PerPacketOptions* options,
+                          const QuicPacketWriterParams& params) override {
+    WriteResult result = wrapped_->WritePacket(buffer, buf_len, self_address,
+                                               peer_address, options, params);
+    MaybeRearm(result);
+    return result;
+  }
+
+  WriteResult Flush() override {
+    WriteResult result = wrapped_->Flush();
+    MaybeRearm(result);
+    return result;
+  }
+
+  bool IsWriteBlocked() const override { return wrapped_->IsWriteBlocked(); }
+  void SetWritable() override { wrapped_->SetWritable(); }
+  std::optional<int> MessageTooBigErrorCode() const override {
+    return wrapped_->MessageTooBigErrorCode();
+  }
+  QuicByteCount GetMaxPacketSize(
+      const QuicSocketAddress& peer_address) const override {
+    return wrapped_->GetMaxPacketSize(peer_address);
+  }
+  bool SupportsReleaseTime() const override {
+    return wrapped_->SupportsReleaseTime();
+  }
+  bool IsBatchMode() const override { return wrapped_->IsBatchMode(); }
+  bool SupportsEcn() const override { return wrapped_->SupportsEcn(); }
+  QuicPacketBuffer GetNextWriteLocation(
+      const QuicIpAddress& self_address,
+      const QuicSocketAddress& peer_address) override {
+    return wrapped_->GetNextWriteLocation(self_address, peer_address);
+  }
+
+ private:
+  void MaybeRearm(const WriteResult& result) {
+    if (!IsWriteBlockedStatus(result.status)) {
+      return;
+    }
+    // Level-triggered only (SupportsEdgeTriggered() sockets don't consume
+    // their subscription on firing, so have no need of this) -- see this
+    // class's own comment, and QuictunClientConnection::OnSocketEvent()'s,
+    // for why this specific rearm is otherwise never guaranteed to happen.
+    if (!event_loop_->SupportsEdgeTriggered()) {
+      bool success = event_loop_->RearmSocket(fd_, kSocketEventWritable);
+      QUICHE_DCHECK(success);
+    }
+  }
+
+  const std::unique_ptr<QuicPacketWriter> wrapped_;
+  const SocketFd fd_;
+  QuicEventLoop* const event_loop_;
+};
+
+}  // namespace
+
 void EnableQuictunSoTxTime() {
   SetQuicRestartFlag(quic_support_release_time_for_gso, true);
 }
 
 std::unique_ptr<QuicPacketWriter> MakeQuictunPacketWriter(
-    SocketFd fd, bool so_txtime_enabled) {
+    SocketFd fd, bool so_txtime_enabled, QuicEventLoop* event_loop) {
+  std::unique_ptr<QuicPacketWriter> writer;
   if (so_txtime_enabled) {
-    return std::make_unique<QuicGsoBatchWriter>(fd, CLOCK_MONOTONIC);
+    writer = std::make_unique<QuicGsoBatchWriter>(fd, CLOCK_MONOTONIC);
+  } else {
+    writer = std::make_unique<QuicDefaultPacketWriter>(fd);
   }
-  return std::make_unique<QuicDefaultPacketWriter>(fd);
+  return std::make_unique<RearmOnBlockPacketWriter>(std::move(writer), fd,
+                                                     event_loop);
 }
 
 CongestionControlType ParseQuictunCongestionControl(const std::string& value) {
