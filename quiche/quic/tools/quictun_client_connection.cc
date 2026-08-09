@@ -199,13 +199,28 @@ void QuictunClientConnection::Close() {
 void QuictunClientConnection::OnConnectionClosed(
     QuicConnectionId /*server_connection_id*/, QuicErrorCode error,
     const std::string& error_details, ConnectionCloseSource source) {
-  QUIC_LOG(INFO) << "quictun connection closed: "
-                 << QuicErrorCodeToString(error) << " (\"" << error_details
-                 << "\"), source="
-                 << (source == ConnectionCloseSource::FROM_PEER ? "PEER"
-                                                                 : "SELF")
-                 << ", EarlyDataAccepted=" << session_->EarlyDataAccepted()
-                 << " EarlyDataReason=" << session_->EarlyDataReason();
+  // EarlyDataAccepted()/EarlyDataReason() are only meaningful (and only
+  // safe to call -- TlsClientHandshaker::EarlyDataAccepted() itself
+  // QUIC_BUG_IFs otherwise) once the handshake has actually produced 1-RTT
+  // keys. A connection that never gets that far (e.g. ECONNREFUSED before
+  // any handshake progress) hits this constantly, spamming an unrelated,
+  // message-less quic_bug_12736_2 on every single closed attempt.
+  if (session_->OneRttKeysAvailable()) {
+    QUIC_LOG(INFO) << "quictun connection closed: "
+                   << QuicErrorCodeToString(error) << " (\"" << error_details
+                   << "\"), source="
+                   << (source == ConnectionCloseSource::FROM_PEER ? "PEER"
+                                                                   : "SELF")
+                   << ", EarlyDataAccepted=" << session_->EarlyDataAccepted()
+                   << " EarlyDataReason=" << session_->EarlyDataReason();
+  } else {
+    QUIC_LOG(INFO) << "quictun connection closed: "
+                   << QuicErrorCodeToString(error) << " (\"" << error_details
+                   << "\"), source="
+                   << (source == ConnectionCloseSource::FROM_PEER ? "PEER"
+                                                                   : "SELF")
+                   << " (handshake never completed)";
+  }
   Close();
 }
 
