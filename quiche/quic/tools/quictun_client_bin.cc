@@ -38,6 +38,16 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "Address:port of the quictun_server to connect to for each accepted "
     "TCP connection. Required.");
 
+#ifdef QUICTUN_COVERAGE_BUILD
+// See quictun_server_bin.cc's identical block for why this exists --
+// coverage-instrumented builds only, absent from every normal build.
+extern "C" int __llvm_profile_write_file(void);
+void FlushCoverageAndExit(int /*signum*/) {
+  __llvm_profile_write_file();
+  std::_Exit(0);
+}
+#endif
+
 int main(int argc, char* argv[]) {
   // quic::socket_api::Send() (quic/core/io/socket.cc) is a bare ::send()
   // with no MSG_NOSIGNAL, so writing to the local --local TCP socket after
@@ -48,6 +58,9 @@ int main(int argc, char* argv[]) {
   // closed that one tunnel (QuictunTunnel::SendComplete() already handles
   // a failed send correctly -- this is the only piece that was missing).
   signal(SIGPIPE, SIG_IGN);
+#ifdef QUICTUN_COVERAGE_BUILD
+  signal(SIGTERM, FlushCoverageAndExit);
+#endif
   quiche::QuicheSystemEventLoop system_event_loop("quictun_client");
   const char* usage =
       "Usage: quictun_client --local=[::]:12948 --remote=<server-ip>:4433 "

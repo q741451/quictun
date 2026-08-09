@@ -56,6 +56,11 @@ void EnableQuictunSoTxTime();
 // quic_client_default_network_helper.h's QuicLevelTriggeredPacketWriter
 // (same fix, for QuicDefaultPacketWriter specifically; this generalizes it
 // to also cover QuicGsoBatchWriter, which quictun uses too).
+//
+// If QUICTUN_INJECT_WRITE_BLOCK_AFTER is set in the environment, the
+// returned writer also fires a one-shot synthetic write-block (see
+// FaultInjectingPacketWriter in the .cc) for writeblock_fault_test.py --
+// inert and unread otherwise.
 std::unique_ptr<QuicPacketWriter> MakeQuictunPacketWriter(
     SocketFd fd, bool so_txtime_enabled, QuicEventLoop* event_loop);
 

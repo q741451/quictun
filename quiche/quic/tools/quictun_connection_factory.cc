@@ -4,6 +4,8 @@
 
 #include "quiche/quic/tools/quictun_connection_factory.h"
 
+#include <cerrno>
+#include <cstdlib>
 #include <ctime>
 #include <memory>
 #include <string>
@@ -98,6 +100,110 @@ class RearmOnBlockPacketWriter : public QuicPacketWriter {
   QuicEventLoop* const event_loop_;
 };
 
+// Test-only fault injector for writeblock_fault_test.py (see its own
+// top-of-file comment): deterministically forces exactly one WritePacket()
+// call to report WRITE_STATUS_BLOCKED, without touching the real socket, so
+// tests can exercise RearmOnBlockPacketWriter's actual rearm mechanism on
+// demand instead of hoping a genuine kernel sendmsg() EWOULDBLOCK happens to
+// occur -- on loopback, real backpressure turns out to essentially never
+// materialize (confirmed via strace: thousands of back-to-back sendmsg()
+// calls against a 4KB SO_SNDBUF, zero EAGAIN -- loopback delivery is
+// synchronous enough that the send buffer never visibly backs up), so a
+// black-box test relying on it would be unreliable at best.
+//
+// Inert unless QUICTUN_INJECT_WRITE_BLOCK_AFTER is set in the environment;
+// wrapping only happens when it's set (see MakeQuictunPacketWriter()), so
+// this has zero effect on normal (non-test) runs -- the env var doesn't
+// even get read otherwise.
+//
+// Mirrors QuicDefaultPacketWriter's own IsWriteBlocked()/SetWritable()
+// contract exactly (including its WritePacket()-entry DCHECK(!blocked)):
+// QuicConnection reads writer_->IsWriteBlocked() as the source of truth
+// after seeing IsWriteBlockedStatus(result.status) (see quic_connection.cc,
+// e.g. right after SendPacket()'s WritePacket() call), not just the
+// WriteResult itself, so an injector that only faked the return value
+// without also flipping IsWriteBlocked() would trip QuicConnection's own
+// consistency DCHECKs instead of exercising the rearm path cleanly.
+class FaultInjectingPacketWriter : public QuicPacketWriter {
+ public:
+  FaultInjectingPacketWriter(std::unique_ptr<QuicPacketWriter> wrapped,
+                             int trigger_after_n_writes)
+      : wrapped_(std::move(wrapped)), remaining_(trigger_after_n_writes) {}
+
+  WriteResult WritePacket(const char* buffer, size_t buf_len,
+                          const QuicIpAddress& self_address,
+                          const QuicSocketAddress& peer_address,
+                          PerPacketOptions* options,
+                          const QuicPacketWriterParams& params) override {
+    QUICHE_DCHECK(!blocked_);
+    if (MaybeInjectBlock()) {
+      return WriteResult(WRITE_STATUS_BLOCKED, EWOULDBLOCK);
+    }
+    return wrapped_->WritePacket(buffer, buf_len, self_address, peer_address,
+                                 options, params);
+  }
+
+  // Shares `remaining_` with WritePacket() rather than counting separately,
+  // so the same QUICTUN_INJECT_WRITE_BLOCK_AFTER budget can land on
+  // whichever call actually reaches the wire Nth -- necessary to reach
+  // QuicGsoBatchWriter (--so_txtime): in batch mode, WritePacket() usually
+  // just buffers into the pending GSO segment and reports OK immediately;
+  // the real send (and thus the real place a block can happen) is Flush(),
+  // called either explicitly or implicitly once the batch fills.
+  WriteResult Flush() override {
+    QUICHE_DCHECK(!blocked_);
+    if (MaybeInjectBlock()) {
+      return WriteResult(WRITE_STATUS_BLOCKED, EWOULDBLOCK);
+    }
+    return wrapped_->Flush();
+  }
+
+  bool IsWriteBlocked() const override {
+    return blocked_ || wrapped_->IsWriteBlocked();
+  }
+  void SetWritable() override {
+    blocked_ = false;
+    wrapped_->SetWritable();
+  }
+  std::optional<int> MessageTooBigErrorCode() const override {
+    return wrapped_->MessageTooBigErrorCode();
+  }
+  QuicByteCount GetMaxPacketSize(
+      const QuicSocketAddress& peer_address) const override {
+    return wrapped_->GetMaxPacketSize(peer_address);
+  }
+  bool SupportsReleaseTime() const override {
+    return wrapped_->SupportsReleaseTime();
+  }
+  bool IsBatchMode() const override { return wrapped_->IsBatchMode(); }
+  bool SupportsEcn() const override { return wrapped_->SupportsEcn(); }
+  QuicPacketBuffer GetNextWriteLocation(
+      const QuicIpAddress& self_address,
+      const QuicSocketAddress& peer_address) override {
+    return wrapped_->GetNextWriteLocation(self_address, peer_address);
+  }
+
+ private:
+  // Returns true (and flips blocked_) exactly once, on the call where
+  // remaining_ reaches 0; false (decrementing remaining_ if still >= 0,
+  // i.e. leaving it alone once already consumed) every other time.
+  bool MaybeInjectBlock() {
+    if (remaining_ == 0) {
+      remaining_ = -1;  // Already fired -- stay armed-off, fire only once.
+      blocked_ = true;
+      return true;
+    }
+    if (remaining_ > 0) {
+      --remaining_;
+    }
+    return false;
+  }
+
+  const std::unique_ptr<QuicPacketWriter> wrapped_;
+  int remaining_;
+  bool blocked_ = false;
+};
+
 }  // namespace
 
 void EnableQuictunSoTxTime() {
@@ -111,6 +217,12 @@ std::unique_ptr<QuicPacketWriter> MakeQuictunPacketWriter(
     writer = std::make_unique<QuicGsoBatchWriter>(fd, CLOCK_MONOTONIC);
   } else {
     writer = std::make_unique<QuicDefaultPacketWriter>(fd);
+  }
+  // Test-only, see FaultInjectingPacketWriter's own comment -- normal runs
+  // never set this env var, so this getenv() is the only cost paid.
+  if (const char* trigger_after = std::getenv("QUICTUN_INJECT_WRITE_BLOCK_AFTER")) {
+    writer = std::make_unique<FaultInjectingPacketWriter>(
+        std::move(writer), std::atoi(trigger_after));
   }
   return std::make_unique<RearmOnBlockPacketWriter>(std::move(writer), fd,
                                                      event_loop);

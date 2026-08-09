@@ -38,6 +38,25 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "Address:port of the TCP server to connect to for each accepted "
     "tunnel. Required.");
 
+#ifdef QUICTUN_COVERAGE_BUILD
+// Coverage-instrumented builds only (--copt=-DQUICTUN_COVERAGE_BUILD,
+// alongside -fprofile-instr-generate) -- absent, and this whole block does
+// not exist, in every normal build. quictun_server has no natural
+// clean-exit path (its event loop below runs forever) and installs no
+// SIGTERM handler, so a coverage test harness's terminate()/kill() calls --
+// the only way anything ever stops a quictun process -- leave zero durable
+// profile data on disk: confirmed empirically (0-byte .profraw even with
+// -fprofile-continuous, which doesn't appear to actually engage in this
+// clang snapshot). __llvm_profile_write_file() is compiler-rt's profiling
+// runtime, only linked in when built with -fprofile-instr-generate, hence
+// this being gated on the same macro rather than always declared.
+extern "C" int __llvm_profile_write_file(void);
+void FlushCoverageAndExit(int /*signum*/) {
+  __llvm_profile_write_file();
+  std::_Exit(0);
+}
+#endif
+
 int main(int argc, char* argv[]) {
   // quic::socket_api::Send() (quic/core/io/socket.cc) is a bare ::send()
   // with no MSG_NOSIGNAL, so writing to the local --target TCP socket
@@ -49,6 +68,9 @@ int main(int argc, char* argv[]) {
   // already handles a failed send correctly -- this is the only piece
   // that was missing).
   signal(SIGPIPE, SIG_IGN);
+#ifdef QUICTUN_COVERAGE_BUILD
+  signal(SIGTERM, FlushCoverageAndExit);
+#endif
   quiche::QuicheSystemEventLoop system_event_loop("quictun_server");
   const char* usage =
       "Usage: quictun_server --listen=[::]:4433 --target=127.0.0.1:12948 "
