@@ -57,10 +57,12 @@ void EnableQuictunSoTxTime();
 // (same fix, for QuicDefaultPacketWriter specifically; this generalizes it
 // to also cover QuicGsoBatchWriter, which quictun uses too).
 //
-// If QUICTUN_INJECT_WRITE_BLOCK_AFTER is set in the environment, the
-// returned writer also fires a one-shot synthetic write-block (see
-// FaultInjectingPacketWriter in the .cc) for writeblock_fault_test.py --
-// inert and unread otherwise.
+// Built with -DQUICTUN_TEST_BUILD (see writeblock_fault_test.py; not set by
+// any normal build, including CI's release artifacts), the returned writer
+// also fires a one-shot synthetic write-block -- see FaultInjectingPacketWriter
+// in the .cc -- when QUICTUN_INJECT_WRITE_BLOCK_AFTER is set in the
+// environment. Without that macro, none of this code exists in the binary
+// at all, not just at runtime.
 std::unique_ptr<QuicPacketWriter> MakeQuictunPacketWriter(
     SocketFd fd, bool so_txtime_enabled, QuicEventLoop* event_loop);
 

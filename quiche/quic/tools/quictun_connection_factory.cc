@@ -100,6 +100,7 @@ class RearmOnBlockPacketWriter : public QuicPacketWriter {
   QuicEventLoop* const event_loop_;
 };
 
+#ifdef QUICTUN_TEST_BUILD
 // Test-only fault injector for writeblock_fault_test.py (see its own
 // top-of-file comment): deterministically forces exactly one WritePacket()
 // call to report WRITE_STATUS_BLOCKED, without touching the real socket, so
@@ -111,10 +112,13 @@ class RearmOnBlockPacketWriter : public QuicPacketWriter {
 // synchronous enough that the send buffer never visibly backs up), so a
 // black-box test relying on it would be unreliable at best.
 //
-// Inert unless QUICTUN_INJECT_WRITE_BLOCK_AFTER is set in the environment;
-// wrapping only happens when it's set (see MakeQuictunPacketWriter()), so
-// this has zero effect on normal (non-test) runs -- the env var doesn't
-// even get read otherwise.
+// Compiled in only under -DQUICTUN_TEST_BUILD (see MakeQuictunPacketWriter());
+// entirely absent -- not just runtime-inert -- from every normal build,
+// including CI's release artifacts (.github/workflows/build.yml never
+// passes this macro). Runtime behavior is additionally still gated on
+// QUICTUN_INJECT_WRITE_BLOCK_AFTER being set in the environment even when
+// this macro is on, so a QUICTUN_TEST_BUILD binary run normally (env var
+// unset) behaves identically to a normal build.
 //
 // Mirrors QuicDefaultPacketWriter's own IsWriteBlocked()/SetWritable()
 // contract exactly (including its WritePacket()-entry DCHECK(!blocked)):
@@ -203,6 +207,7 @@ class FaultInjectingPacketWriter : public QuicPacketWriter {
   int remaining_;
   bool blocked_ = false;
 };
+#endif  // QUICTUN_TEST_BUILD
 
 }  // namespace
 
@@ -218,12 +223,14 @@ std::unique_ptr<QuicPacketWriter> MakeQuictunPacketWriter(
   } else {
     writer = std::make_unique<QuicDefaultPacketWriter>(fd);
   }
-  // Test-only, see FaultInjectingPacketWriter's own comment -- normal runs
-  // never set this env var, so this getenv() is the only cost paid.
+#ifdef QUICTUN_TEST_BUILD
+  // Test-only, see FaultInjectingPacketWriter's own comment -- normal
+  // (non-QUICTUN_TEST_BUILD) builds don't even contain this getenv() call.
   if (const char* trigger_after = std::getenv("QUICTUN_INJECT_WRITE_BLOCK_AFTER")) {
     writer = std::make_unique<FaultInjectingPacketWriter>(
         std::move(writer), std::atoi(trigger_after));
   }
+#endif  // QUICTUN_TEST_BUILD
   return std::make_unique<RearmOnBlockPacketWriter>(std::move(writer), fd,
                                                      event_loop);
 }
