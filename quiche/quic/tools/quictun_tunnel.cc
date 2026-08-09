@@ -65,6 +65,23 @@ void QuictunTunnel::Start(absl::string_view seed_quic_to_tcp_data) {
     pending_to_tcp_.push_back(std::string(seed_quic_to_tcp_data));
   }
   ResetIdleAlarm();
+  // Pick up anything the stream's sequencer is already holding from before
+  // this tunnel existed as its delegate: on the server side in particular,
+  // QuictunServerConnection reads only up through the --key preamble itself
+  // (see its OnStreamDataAvailable()), then stops reading -- deliberately,
+  // matching QUICHE's own connect_tunnel.cc pattern of leaving
+  // not-yet-wanted data safely unread in the sequencer rather than copying
+  // it into an application-level buffer -- once authenticated, until this
+  // tunnel is actually constructed (which on the server waits on the
+  // --target dial-out, a real async connect that can take real time). Any
+  // stream data that arrives during that window sits safely buffered by
+  // QUIC's own flow control, but SetStreamDelegate() switching the active
+  // delegate over to this tunnel is a plain pointer assignment with no
+  // side effects -- it does not itself re-deliver an OnDataAvailable()
+  // notification for already-arrived data, and the peer has no reason to
+  // send anything more once it's already said everything it needs to.
+  // Without this call, that data would simply never be read, indefinitely.
+  FillQueueFromStream();
   BeginReadFromTcp();
   MaybeFlushQuicToTcp();
 }
