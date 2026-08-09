@@ -177,6 +177,14 @@ std::optional<QuicSocketAddress> ParseQuictunSocketAddress(
   return QuicSocketAddress(ip, server_id->port());
 }
 
+void PrintQuictunVersionLine(absl::string_view binary_name) {
+  // Same std::cerr-not-QUIC_LOG rationale as PrintQuictunStartupBanner()
+  // below -- plus this runs before quiche's flag parsing (which is what
+  // calls absl::InitializeLog()), so QUIC_LOG isn't even set up yet at
+  // this point regardless.
+  std::cerr << binary_name << "  (built " << QuictunBuildTimestamp() << ")\n";
+}
+
 void PrintQuictunStartupBanner(
     absl::string_view binary_name,
     const std::vector<QuictunConfigLine>& binary_specific_config,

@@ -134,6 +134,10 @@ jobs:
         run: |
           set -e
           nproc
+          # See build/regen_quictun_build_timestamp.sh's own comment: this
+          # is what makes quictun's startup banner show this actual build's
+          # real time rather than a stale one frozen by Bazel's cache.
+          ./build/regen_quictun_build_timestamp.sh
           # .bazelrc already carries the Chromium-aligned default flags
           # (OPENSSL_SMALL, fno-rtti/exceptions, hidden visibility,
           # function/data sections, bundled ICU, etc). Only add what's

@@ -5,14 +5,15 @@
 #include "quiche/quic/tools/quictun_build_info.h"
 
 #include "absl/strings/string_view.h"
+#include "quiche/quic/tools/quictun_build_timestamp.h"
 
 namespace quic {
 
 absl::string_view QuictunBuildTimestamp() {
-  // __DATE__ expands to e.g. "Aug  6 2026" (note the double space before
-  // single-digit days -- that's the standard's own formatting, not a typo
-  // here), __TIME__ to e.g. "20:14:23".
-  return __DATE__ " " __TIME__;
+  // See this function's declaration (quictun_build_info.h) for why
+  // QUICTUN_BUILD_TIMESTAMP comes from an externally-regenerated header
+  // rather than __DATE__/__TIME__ or a Bazel-native stamping mechanism.
+  return QUICTUN_BUILD_TIMESTAMP;
 }
 
 }  // namespace quic

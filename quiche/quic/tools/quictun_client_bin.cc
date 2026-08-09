@@ -61,6 +61,13 @@ int main(int argc, char* argv[]) {
 #ifdef QUICTUN_COVERAGE_BUILD
   signal(SIGTERM, FlushCoverageAndExit);
 #endif
+  // Before anything else, including flag parsing: --help/--helpfull exit
+  // from inside QuicheParseCommandLineFlags() below without ever reaching
+  // PrintQuictunStartupBanner() (which needs parsed flags anyway), and
+  // every flag-validation failure past that point returns before it too
+  // -- this is the one build-identifying line guaranteed to show up no
+  // matter how the process exits.
+  quic::PrintQuictunVersionLine("quictun_client");
   quiche::QuicheSystemEventLoop system_event_loop("quictun_client");
   const char* usage =
       "Usage: quictun_client --local=[::]:12948 --remote=<server-ip>:4433 "

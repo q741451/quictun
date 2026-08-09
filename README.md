@@ -53,7 +53,7 @@ git hash or re-read a shell history:
 
 ```
 ==================================================================
-quictun_server  (built Aug  6 2026 20:14:23)
+quictun_server  (built 2026/08/06 20:14:23)
 ------------------------------------------------------------------
   listen                                 = [::]:4433
   target                                 = 127.0.0.1:12948
@@ -126,9 +126,16 @@ separate GitHub Releases page.
 sudo apt install libicu-dev clang lld
 git clone -b quictun https://github.com/q741451/quictun.git
 cd quictun
+./build/regen_quictun_build_timestamp.sh
 bazel build -c opt --platforms=//build/toolchain:linux_x64 //quiche:quictun_client //quiche:quictun_server
 ./bazel-bin/quiche/quictun_client --helpfull
 ```
+
+`./build/regen_quictun_build_timestamp.sh` writes the current time into a
+small generated header the [startup banner](#startup-banner) reads --
+required (the build fails without it: it's gitignored, not checked in),
+and worth rerunning before each later rebuild too, or the banner will
+just keep showing this first build's time.
 
 `--platforms=//build/toolchain:linux_x64` selects this repo's pinned
 toolchain (see `build/toolchain/BUILD.bazel`); other supported values are

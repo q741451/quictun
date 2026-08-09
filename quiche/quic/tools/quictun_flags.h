@@ -137,6 +137,16 @@ void PrintQuictunStartupBanner(
     const std::vector<QuictunConfigLine>& binary_specific_config,
     const QuictunTuningOptions& options);
 
+// Just "<binary_name> (built <timestamp>)" -- the one line of
+// PrintQuictunStartupBanner() above that doesn't need parsed flags to
+// print. Call this first thing in main(), before flag parsing: unlike the
+// full banner (which only ever runs once startup fully succeeds -- every
+// flag-validation failure returns before reaching it, and
+// --help/--helpfull exits from inside QuicheParseCommandLineFlags()
+// itself), this makes the build identifiable even when the process never
+// gets that far.
+void PrintQuictunVersionLine(absl::string_view binary_name);
+
 }  // namespace quic
 
 #endif  // QUICHE_QUIC_TOOLS_QUICTUN_FLAGS_H_

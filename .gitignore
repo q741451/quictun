@@ -1,1 +1,5 @@
 bazel-*
+
+# Regenerated fresh before every build by
+# build/regen_quictun_build_timestamp.sh -- never checked in.
+/quiche/quic/tools/quictun_build_timestamp.h

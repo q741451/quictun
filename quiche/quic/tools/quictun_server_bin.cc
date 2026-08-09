@@ -71,6 +71,9 @@ int main(int argc, char* argv[]) {
 #ifdef QUICTUN_COVERAGE_BUILD
   signal(SIGTERM, FlushCoverageAndExit);
 #endif
+  // See quictun_client_bin.cc's identical call for why this comes before
+  // everything else, including flag parsing.
+  quic::PrintQuictunVersionLine("quictun_server");
   quiche::QuicheSystemEventLoop system_event_loop("quictun_server");
   const char* usage =
       "Usage: quictun_server --listen=[::]:4433 --target=127.0.0.1:12948 "

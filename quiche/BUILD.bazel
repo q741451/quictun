@@ -635,6 +635,19 @@ cc_library(
     name = "quictun_common",
     srcs = [
         "quic/tools/quictun_accepted_tcp_socket.cc",
+        # Not checked in, not a Bazel-generated target either -- see
+        # build/regen_quictun_build_timestamp.sh, which (re)writes this file
+        # with the actual current time immediately before every `bazel
+        # build`. Two Bazel-native attempts at expressing "regenerate this
+        # on every build" (a genrule(stamp = True) reading $(BUILD_TIMESTAMP)
+        # -- not a recognized Make variable on this Bazel version; a custom
+        # rule reading ctx.version_file with execution_requirements =
+        # {"no-cache": "1"} -- empirically still got cached across
+        # invocations with zero source changes, confirmed via
+        # --subcommands showing the action never even re-ran) both failed
+        # to actually take effect. Plain source file that changes before
+        # Bazel ever sees it sidesteps needing either to work correctly.
+        "quic/tools/quictun_build_timestamp.h",
         "quic/tools/quictun_build_info.cc",
         "quic/tools/quictun_certificate.cc",
         "quic/tools/quictun_client_connection.cc",
