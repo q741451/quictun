@@ -102,6 +102,12 @@ QuictunServerConnection::QuictunServerConnection(
   session_ = std::make_unique<QuictunServerSession>(
       connection_.get(), /*owner=*/this, config, "quictun/1", crypto_config,
       compressed_certs_cache);
+  // Registered before any packet processing (matching QuictunClientConnection's
+  // SetCanOpenStreamCallback/CryptoConnect ordering): guarantees this fires
+  // for the incoming stream no matter which of the several packet-delivery
+  // paths below ends up being the one that actually creates it -- see
+  // SetStreamCreatedCallback()'s comment.
+  session_->SetStreamCreatedCallback([this] { MaybeStartTunnel(); });
   session_->Initialize();
 
   bool registered = event_loop_->RegisterSocket(

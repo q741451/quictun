@@ -128,6 +128,25 @@ class QUICHE_EXPORT QuictunSessionBase : public QuicSession,
     stream_delegate_ = delegate;
   }
 
+  // Invoked synchronously, exactly once, the moment CreateStream() actually
+  // creates quictun's one stream -- whether that's an incoming stream (the
+  // server side, via CreateIncomingStream() below, itself called
+  // synchronously by the QuicSession framework from inside
+  // ProcessUdpPacket() no matter which socket delivered the packet -- see
+  // QuictunServerConnection::MaybeStartTunnel(), which used to instead be
+  // re-polled ("has stream() gone non-null yet?") from several different
+  // packet-delivery call sites and had one -- QuictunServerDriver's
+  // rendezvous-socket forwarding path -- that forgot to poll it at all) or
+  // an outgoing one (the client side, via OpenOutgoingStream(), called
+  // directly by its caller, which already knows the stream now exists
+  // without needing this). Registering this is the same idea as
+  // QuicSimpleServerSession wiring its own request-handling logic directly
+  // into CreateIncomingStream()/the stream object itself, rather than some
+  // external owner re-checking session state from arbitrary call sites.
+  void SetStreamCreatedCallback(std::function<void()> callback) {
+    stream_created_callback_ = std::move(callback);
+  }
+
  private:
   QuictunStream* CreateStream(QuicStreamId id);
 
@@ -139,6 +158,7 @@ class QUICHE_EXPORT QuictunSessionBase : public QuicSession,
   std::string alpn_;
   QuictunStream* stream_ = nullptr;
   QuictunStreamDelegate* stream_delegate_ = nullptr;
+  std::function<void()> stream_created_callback_;
 };
 
 class QUICHE_EXPORT QuictunClientSession final : public QuictunSessionBase {

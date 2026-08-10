@@ -176,6 +176,14 @@ QuictunStream* QuictunSessionBase::CreateStream(QuicStreamId id) {
   QuictunStream* stream_ptr = stream.get();
   stream_ = stream_ptr;
   ActivateStream(std::move(stream));
+  // Notify after the stream is fully activated (present in the session's own
+  // stream map, so anything the callback does -- e.g. SetStreamDelegate(),
+  // stream()->Read() -- sees consistent state), but still synchronously
+  // within whatever caused this stream to be created, exactly once. See the
+  // comment on SetStreamCreatedCallback() for why this exists.
+  if (stream_created_callback_) {
+    stream_created_callback_();
+  }
   return stream_ptr;
 }
 
