@@ -13,6 +13,7 @@
 #include "quiche/quic/core/quic_constants.h"
 #include "quiche/quic/tools/quictun_connection_factory.h"
 #include "quiche/quic/tools/fake_proof_verifier.h"
+#include "quiche/quic/tools/quictun_reusable_session_cache.h"
 #include "quiche/quic/tools/quictun_socket_util.h"
 #include "quiche/quic/platform/api/quic_logging.h"
 #include "quiche/common/platform/api/quiche_logging.h"
@@ -48,9 +49,15 @@ QuictunClientDriver::QuictunClientDriver(QuicEventLoop* event_loop,
   // instead checked as an application-layer preamble on the tunnel's
   // stream -- see QuictunClientConnection's constructor and
   // QuictunServerConnection::OnStreamDataAvailable().
+  // QuictunReusableSessionCache, not the stock QuicClientSessionCache: lets
+  // a burst of concurrent connections to the same --remote all use 0-RTT
+  // off the same cached ticket instead of only the first 1-2 of them --
+  // see that class's header comment for the (accepted, for quictun's own
+  // deployment) replay-defense trade-off this makes.
   crypto_config_ = std::make_unique<QuicCryptoClientConfig>(
       std::make_unique<FakeProofVerifier>(),
-      options.zero_rtt ? std::make_shared<QuicClientSessionCache>() : nullptr);
+      options.zero_rtt ? std::make_shared<QuictunReusableSessionCache>()
+                        : nullptr);
 
   if (options.so_txtime) {
     EnableQuictunSoTxTime();
