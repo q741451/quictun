@@ -92,6 +92,15 @@ for qc in 0 1 3; do
   echo "exit=$? for pool_reentrancy_test.py --quic-conn=$qc" | tee -a "$RESULTS"
 done
 
+# Does --quic_conn pooling actually pool -- N concurrent TCP flows really
+# sharing at most N underlying QUIC connections, not just "still working"
+# under pooling (everything above already covers that). No condition
+# variants: this is a structural property of pool_slots_' own selection
+# logic, not something network chaos changes.
+echo "=== pool_cap_test.py ===" | tee -a "$RESULTS"
+python3 -u pool_cap_test.py >> "$RESULTS" 2>&1
+echo "exit=$? for pool_cap_test.py" | tee -a "$RESULTS"
+
 # Deterministic write-block fault injection (see writeblock_fault_test.py's
 # own top-of-file comment for why this exists as a separate, non-network
 # dimension): covers the write-blocked-forever bug fixed by
@@ -109,6 +118,15 @@ echo "=== writeblock_fault_test.py --side=both --so-txtime ===" | tee -a "$RESUL
 python3 -u writeblock_fault_test.py --side=both --so-txtime >> "$RESULTS" 2>&1
 echo "exit=$? for writeblock_fault_test.py --side=both --so-txtime" | tee -a "$RESULTS"
 
+# Same again, pooled: RearmOnBlockPacketWriter's recovery needs to be
+# connection-level, unsticking every stream queued behind the shared
+# writer -- not just whichever one the fault-injection counter happened
+# to land on. Untested until now -- every writeblock scenario above only
+# ever had the one stream.
+echo "=== writeblock_fault_test.py --side=both --quic-conn=1 ===" | tee -a "$RESULTS"
+python3 -u writeblock_fault_test.py --side=both --quic-conn=1 >> "$RESULTS" 2>&1
+echo "exit=$? for writeblock_fault_test.py --side=both --quic-conn=1" | tee -a "$RESULTS"
+
 # --target refusing the TCP connect (ECONNREFUSED) -- another coverage gap
 # (QuictunServerConnection::ConnectComplete()'s failure branch), matching
 # the ordinary operational case of the backend service being down.
@@ -116,12 +134,24 @@ echo "=== target_unreachable_test.py ===" | tee -a "$RESULTS"
 python3 -u target_unreachable_test.py >> "$RESULTS" 2>&1
 echo "exit=$? for target_unreachable_test.py" | tee -a "$RESULTS"
 
+# Same, pooled: does one stream's dial failure wedge/crash the shared
+# connection for the next stream assigned to it? The unpooled run above
+# can't exercise this at all -- every attempt there gets its own fresh
+# connection no matter what happened to the previous one.
+echo "=== target_unreachable_test.py --quic-conn=2 ===" | tee -a "$RESULTS"
+python3 -u target_unreachable_test.py --quic-conn=2 >> "$RESULTS" 2>&1
+echo "exit=$? for target_unreachable_test.py --quic-conn=2" | tee -a "$RESULTS"
+
 # IPv6 dual-stack --listen ([::]) reached by an IPv4 peer -- another
 # coverage gap (AdaptPeerAddressForListenSocket() in
 # quictun_server_driver.cc); every other test's --listen is plain IPv4.
 echo "=== dualstack_ipv6_test.py ===" | tee -a "$RESULTS"
 python3 -u dualstack_ipv6_test.py >> "$RESULTS" 2>&1
 echo "exit=$? for dualstack_ipv6_test.py" | tee -a "$RESULTS"
+
+echo "=== dualstack_ipv6_test.py --quic-conn=2 ===" | tee -a "$RESULTS"
+python3 -u dualstack_ipv6_test.py --quic-conn=2 >> "$RESULTS" 2>&1
+echo "exit=$? for dualstack_ipv6_test.py --quic-conn=2" | tee -a "$RESULTS"
 
 echo "=== MATRIX COMPLETE ===" | tee -a "$RESULTS"
 echo "Full results: $RESULTS"

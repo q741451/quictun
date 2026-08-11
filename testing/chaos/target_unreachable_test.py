@@ -22,6 +22,7 @@ kInvalidSocketFd check):
 
 Usage: python3 target_unreachable_test.py
 """
+import argparse
 import os
 import socket
 import subprocess
@@ -69,9 +70,25 @@ def find_closed_port():
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    # 0 (default): unchanged original behavior -- each attempt is its own
+    # brand-new quictun_client process/connection. >0: all n_attempts run
+    # as sequential streams on ONE pooled client process/connection
+    # instead -- since the target never resolves, the connection itself
+    # never has a reason to close between attempts (ShouldKeepConnectionAlive()
+    # keeps a poolable connection alive regardless of its streams' state),
+    # so this specifically tests whether one stream's dial failure
+    # (StartTunnelForStream()'s error path, tracked per-stream in
+    # stream_targets_) wedges or crashes the shared connection for the
+    # next stream/attempt -- a scenario the unpooled path can't exercise
+    # at all, since there each attempt gets its own fresh connection no
+    # matter what happened to the previous one.
+    ap.add_argument("--quic-conn", type=int, default=0)
+    args = ap.parse_args()
+
     log_dir = "/tmp/quictun_chaos_logs"
     os.makedirs(log_dir, exist_ok=True)
-    tag = "target_unreachable"
+    tag = "target_unreachable" + (f"_qc{args.quic_conn}" if args.quic_conn else "")
 
     dead_target_port = find_closed_port()
     server_listen_port, local_port = 26920, 26921
@@ -91,25 +108,44 @@ def main():
     sampler = chaos_monitor.Sampler(server_proc.pid)
     sampler.sample()
 
-    # A handful of connection attempts against the dead target, each from
-    # its own quictun_client (matching how a real client, e.g. `git push`,
-    # would see it: connect, try to use the tunnel, get told it's closed).
     n_attempts = 5
     torn_down_cleanly = 0
-    for i in range(n_attempts):
-        client_proc = start_proc(
+
+    pooled_client_proc = None
+    if args.quic_conn > 0:
+        pooled_client_proc = start_proc(
             [CLIENT_BIN, f"--local=127.0.0.1:{local_port}",
              f"--remote=127.0.0.1:{server_listen_port}", f"--key={KEY}",
-             "--idle_timeout_seconds=10"],
-            f"{log_dir}/{tag}_client{i}.log")
-        time.sleep(0.5)
+             "--idle_timeout_seconds=10", f"--quic_conn={args.quic_conn}"],
+            f"{log_dir}/{tag}_client.log")
+        time.sleep(1.0)
+        if pooled_client_proc.poll() is not None:
+            print(f"!!! [{tag}] pooled client exited immediately")
+            sys.exit(1)
+        wait_tcp_ready("127.0.0.1", local_port, timeout=3)
+
+    # A handful of connection attempts against the dead target -- each its
+    # own brand-new quictun_client (--quic-conn=0, matching how a real
+    # client, e.g. `git push`, would see it: connect, try to use the
+    # tunnel, get told it's closed) or, under pooling, each its own new
+    # stream on the SAME already-running pooled client/connection (see the
+    # --quic-conn help above).
+    for i in range(n_attempts):
+        client_proc = pooled_client_proc
+        if client_proc is None:
+            client_proc = start_proc(
+                [CLIENT_BIN, f"--local=127.0.0.1:{local_port}",
+                 f"--remote=127.0.0.1:{server_listen_port}", f"--key={KEY}",
+                 "--idle_timeout_seconds=10"],
+                f"{log_dir}/{tag}_client{i}.log")
+            time.sleep(0.5)
         if client_proc.poll() is None:
             wait_tcp_ready("127.0.0.1", local_port, timeout=3)
             # Try to actually use the tunnel -- short_echo either gets a
             # clean failure (connection refused/reset once the server tears
-            # the QUIC connection down) within its own timeout, or hangs.
-            # Either way this must return within a bounded time; a genuine
-            # hang here would mean ConnectComplete()'s failure path isn't
+            # the stream/QUIC connection down) within its own timeout, or
+            # hangs. Either way this must return within a bounded time; a
+            # genuine hang here would mean the dial failure path isn't
             # actually closing anything.
             t0 = time.time()
             try:
@@ -121,11 +157,22 @@ def main():
                 torn_down_cleanly += 1
             print(f"    attempt {i}: torn down after {elapsed:.1f}s "
                   f"(bounded={elapsed < 8})", flush=True)
-        client_proc.terminate()
-        time.sleep(0.2)
-        if client_proc.poll() is None:
-            client_proc.kill()
+        if pooled_client_proc is None:
+            client_proc.terminate()
+            time.sleep(0.2)
+            if client_proc.poll() is None:
+                client_proc.kill()
         sampler.sample()
+
+    if pooled_client_proc is not None:
+        pooled_client_alive = pooled_client_proc.poll() is None
+        print(f"=== [{tag}] pooled_client_alive_after_all_attempts="
+              f"{pooled_client_alive} ===", flush=True)
+        torn_down_cleanly = torn_down_cleanly if pooled_client_alive else 0
+        pooled_client_proc.terminate()
+        time.sleep(0.2)
+        if pooled_client_proc.poll() is None:
+            pooled_client_proc.kill()
 
     server_alive_after_dead_target = server_proc.poll() is None
     print(f"=== [{tag}] server_alive_after_dead_target="

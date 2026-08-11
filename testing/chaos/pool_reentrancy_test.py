@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SERVER_BIN = f"{REPO}/bazel-bin/quiche/quictun_server"
@@ -68,12 +69,27 @@ def wait_tcp_ready(host, port, timeout=5):
 
 
 def short_echo(port, results, idx):
+    # A distinct, per-call random payload -- not a fixed literal -- and a
+    # strict equality check on the echo: this is a multiplexing test, so a
+    # bug that crossed two concurrent tunnels' data (stream id mixed up
+    # somewhere in the delegate/StreamTcp plumbing) needs to be
+    # *detectable* here. Identical fixed payloads across all N concurrent
+    # calls in a burst couldn't tell tunnel A receiving tunnel B's echo
+    # apart from tunnel A receiving its own -- both would just look like
+    # "some bytes came back", which is all the original version of this
+    # function checked.
+    payload = uuid.uuid4().bytes + os.urandom(32)
     try:
         s = socket.create_connection(("127.0.0.1", port), timeout=2)
-        s.sendall(b"echo:hello\n")
-        s.recv(100)
+        s.sendall(payload)
+        got = b""
+        while len(got) < len(payload):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            got += chunk
         s.close()
-        results[idx] = True
+        results[idx] = (got == payload)
     except Exception:
         results[idx] = False
 
