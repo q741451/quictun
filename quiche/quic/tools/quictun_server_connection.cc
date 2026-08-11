@@ -86,6 +86,8 @@ QuictunServerConnection::QuictunServerConnection(
       udp_fd_(std::move(udp_fd)),
       self_address_(self_address),
       peer_address_(peer_address),
+      target_address_(target_address),
+      socket_factory_(socket_factory),
       connection_id_generator_(connection_id_generator),
       expected_psk_(psk),
       idle_timeout_(config.IdleNetworkTimeout()),
@@ -104,10 +106,11 @@ QuictunServerConnection::QuictunServerConnection(
       compressed_certs_cache);
   // Registered before any packet processing (matching QuictunClientConnection's
   // SetCanOpenStreamCallback/CryptoConnect ordering): guarantees this fires
-  // for the incoming stream no matter which of the several packet-delivery
-  // paths below ends up being the one that actually creates it -- see
+  // for every incoming stream no matter which of the several packet-delivery
+  // paths ends up being the one that actually creates it -- see
   // SetStreamCreatedCallback()'s comment.
-  session_->SetStreamCreatedCallback([this] { MaybeStartTunnel(); });
+  session_->SetStreamCreatedCallback(
+      [this](QuicStreamId id) { OnNewStream(id); });
   session_->Initialize();
 
   bool registered = event_loop_->RegisterSocket(
@@ -115,23 +118,25 @@ QuictunServerConnection::QuictunServerConnection(
   QUICHE_DCHECK(registered);
 
   connection_->ProcessUdpPacket(self_address_, peer_address_, first_packet);
-  if (closed_) {
-    // Processing the first packet already synchronously failed the
-    // connection (e.g. a write error) and ran Close(), which invoked
-    // on_closed_ -- the driver has queued this object for destruction.
-    // Don't dial --target for a connection that's already dead: nothing
-    // would ever call Disconnect() on it afterward.
-    return;
-  }
-  MaybeStartTunnel();
-
-  target_socket_ = socket_factory->CreateTcpClientSocket(
-      target_address, /*receive_buffer_size=*/0, /*send_buffer_size=*/0, this);
-  target_socket_->ConnectAsync();
+  // Deliberately no --target dial here (unlike the pre-multiplexing
+  // version): there is no "the" stream yet to dial for, and each stream
+  // that does show up dials independently, once it authenticates -- see
+  // StartTunnelForStream(). If processing first_packet already
+  // synchronously created and authenticated a stream (only possible if the
+  // whole preamble arrived in that first packet, which OnNewStream()
+  // already handled via its own synchronous read), that stream already has
+  // its own dial-out in flight by the time this constructor returns.
 }
 
 QuictunServerConnection::~QuictunServerConnection() {
   event_loop_->UnregisterSocket(*udp_fd_);
+}
+
+void QuictunServerConnection::DisconnectStreamTarget(StreamTarget& target) {
+  if (target.target_socket && !target.target_socket_disconnected) {
+    target.target_socket_disconnected = true;
+    target.target_socket->Disconnect();
+  }
 }
 
 void QuictunServerConnection::Close() {
@@ -144,15 +149,49 @@ void QuictunServerConnection::Close() {
         QUIC_NO_ERROR, "quictun tunnel closed",
         ConnectionCloseBehavior::SEND_CONNECTION_CLOSE_PACKET);
   }
-  if (target_socket_ && !target_socket_disconnected_) {
-    target_socket_disconnected_ = true;
-    target_socket_->Disconnect();
+  // Tear every stream's target down directly rather than going through each
+  // tunnel's own Close() (which would fire each stream's on_closed callback
+  // -- StartTunnelForStream()'s lambda -- reentrantly modifying
+  // stream_targets_ while this loop is iterating it): the whole connection
+  // is going away regardless, so there's nothing for those callbacks to
+  // usefully do here that clearing the map right after doesn't already
+  // cover. See DisconnectStreamTarget() for the guard against
+  // double-disconnecting a target whose tunnel got as far as SetSocket()
+  // (or all the way through its own Close(), if the connection-level close
+  // and a stream's own close raced) -- a stream whose dial-out never got
+  // that far (still nullptr, see QuictunTunnel::HasSocket()) simply has
+  // nothing to disconnect.
+  for (auto& [id, target] : stream_targets_) {
+    DisconnectStreamTarget(target);
   }
+  stream_targets_.clear();
+  key_read_buffers_.clear();
+  // Any ids still pending from a stream's on_closed callback that fired
+  // before this Close() are now moot -- their StreamTarget entries are
+  // already gone via the clear() above, and CollectStreamGarbage() erasing
+  // an already-absent key is a harmless no-op anyway, but clearing here
+  // avoids leaving stale ids sitting in the vector for this (now-closed,
+  // soon to be destroyed by the driver's own deferred cleanup) connection.
+  pending_stream_removal_.clear();
   event_loop_->UnregisterSocket(*udp_fd_);
   std::function<void(QuictunServerConnection*)> on_closed = std::move(on_closed_);
   if (on_closed) {
     on_closed(this);
   }
+}
+
+void QuictunServerConnection::CollectStreamGarbage() {
+  // See pending_stream_removal_'s comment and the on_closed callback in
+  // StartTunnelForStream() for why this can't happen synchronously from
+  // within that callback. This is the actual erase() -- which destroys the
+  // StreamTarget, and with it the QuictunTunnel and target_socket -- now
+  // safely outside any tunnel's own call stack (called from
+  // QuictunServerDriver::CollectGarbage(), once per event-loop iteration,
+  // for every still-live connection).
+  for (QuicStreamId id : pending_stream_removal_) {
+    stream_targets_.erase(id);
+  }
+  pending_stream_removal_.clear();
 }
 
 void QuictunServerConnection::OnConnectionClosed(
@@ -213,7 +252,6 @@ void QuictunServerConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
       event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
     }
   }
-  MaybeStartTunnel();
 }
 
 void QuictunServerConnection::ProcessPacket(
@@ -273,114 +311,145 @@ void QuictunServerConnection::ProcessPacket(
   connection_->ProcessUdpPacket(self_address, peer_address_, packet);
 }
 
-void QuictunServerConnection::ConnectComplete(absl::Status status) {
-  if (tunnel_) {
-    tunnel_->ConnectComplete(status);
+void QuictunServerConnection::OnNewStream(QuicStreamId id) {
+  if (closed_) {
     return;
   }
-  if (!status.ok()) {
-    QUIC_LOG(WARNING) << "Failed to connect to target for " << peer_address_
-                      << ": " << status;
-    // A failed async connect already tears the socket down internally (see
-    // EventLoopConnectingClientSocket::FinishOrRearmAsyncConnect(), which
-    // calls its private Close() before invoking this callback with an error
-    // status) -- calling target_socket_->Disconnect() again from Close()
-    // below would hit a fatal descriptor_ != kInvalidSocketFd check.
-    target_socket_disconnected_ = true;
-    Close();
-    return;
-  }
-  target_connected_ = true;
-  MaybeStartTunnel();
+  key_read_buffers_[id] = "";
+  session_->SetStreamDelegate(id, this);
+  // The stream may already be holding data (e.g. its whole preamble)
+  // buffered by the sequencer from before SetStreamDelegate() attached --
+  // SetStreamDelegate() is a plain pointer assignment with no side effects,
+  // it does not itself re-deliver an OnDataAvailable()-equivalent
+  // notification for already-arrived data. Without this call, that data
+  // would simply never be read until (if ever) more data arrives to
+  // trigger a fresh OnStreamDataAvailable().
+  OnStreamDataAvailable(id);
 }
 
-void QuictunServerConnection::ReceiveComplete(
-    absl::StatusOr<quiche::QuicheMemSlice> data) {
-  QUICHE_DCHECK(tunnel_);
-  tunnel_->ReceiveComplete(std::move(data));
-}
-
-void QuictunServerConnection::SendComplete(absl::Status status) {
-  QUICHE_DCHECK(tunnel_);
-  tunnel_->SendComplete(status);
-}
-
-void QuictunServerConnection::MaybeStartTunnel() {
-  if (tunnel_ || closed_ || session_->stream() == nullptr) {
+void QuictunServerConnection::OnStreamDataAvailable(QuicStreamId id) {
+  auto buffer_it = key_read_buffers_.find(id);
+  if (buffer_it == key_read_buffers_.end() || closed_) {
+    // Already authenticated (this stream now belongs to a QuictunTunnel,
+    // which is its delegate from here on) or the whole connection is on its
+    // way down -- either way, nothing for the auth-phase logic to do.
     return;
   }
-  if (!auth_delegate_attached_) {
-    // First time the stream exists: start reading it ourselves to validate
-    // the key preamble, independently of (and possibly before) the --target
-    // dial-out finishing.
-    auth_delegate_attached_ = true;
-    session_->SetStreamDelegate(this);
-    OnStreamDataAvailable();
+  std::string& key_read_buffer = buffer_it->second;
+  auto stream_it = session_->streams().find(id);
+  if (stream_it == session_->streams().end()) {
+    // Shouldn't happen (a stream with a key_read_buffers_ entry but no
+    // corresponding live stream), but don't crash over it.
     return;
   }
-  if (!authenticated_ || !target_connected_) {
-    return;
-  }
-  tunnel_ = std::make_unique<QuictunTunnel>(
-      session_->stream(), target_socket_.get(), idle_timeout_, [this] {
-        // QuictunTunnel::Close() already disconnected target_socket_ before
-        // invoking this callback -- see the comment on
-        // target_socket_disconnected_.
-        target_socket_disconnected_ = true;
-        Close();
-      });
-  session_->SetStreamDelegate(tunnel_.get());
-  tunnel_->Start(key_read_buffer_);
-  key_read_buffer_.clear();
-}
-
-void QuictunServerConnection::OnStreamDataAvailable() {
-  if (authenticated_ || closed_) {
-    return;
-  }
-  QuictunStream* stream = session_->stream();
+  QuictunStream* stream = stream_it->second;
   char buffer[512];
   bool fin = false;
-  while (!authenticated_) {
+  bool authenticated = false;
+  while (!authenticated) {
     size_t bytes_read = stream->Read(absl::MakeSpan(buffer, sizeof(buffer)), &fin);
     if (bytes_read > 0) {
-      key_read_buffer_.append(buffer, bytes_read);
+      key_read_buffer.append(buffer, bytes_read);
     }
-    if (key_read_buffer_.size() >= 2) {
-      size_t key_length = (static_cast<uint8_t>(key_read_buffer_[0]) << 8) |
-                          static_cast<uint8_t>(key_read_buffer_[1]);
-      if (key_read_buffer_.size() >= 2 + key_length) {
-        absl::string_view received_key(key_read_buffer_.data() + 2, key_length);
+    if (key_read_buffer.size() >= 2) {
+      size_t key_length = (static_cast<uint8_t>(key_read_buffer[0]) << 8) |
+                          static_cast<uint8_t>(key_read_buffer[1]);
+      if (key_read_buffer.size() >= 2 + key_length) {
+        absl::string_view received_key(key_read_buffer.data() + 2, key_length);
         if (received_key != expected_psk_) {
-          QUIC_LOG(WARNING) << "Rejecting connection from " << peer_address_
-                            << ": key mismatch";
-          Close();
+          // Only this one stream is at fault -- reset it and move on rather
+          // than tearing down every other (possibly already-authenticated
+          // and actively tunneling) stream sharing this connection. See the
+          // class comment.
+          QUIC_LOG(WARNING) << "Rejecting stream " << id << " from "
+                            << peer_address_ << ": key mismatch";
+          stream->Reset(QUIC_BAD_APPLICATION_PAYLOAD);
+          key_read_buffers_.erase(id);
           return;
         }
-        authenticated_ = true;
+        authenticated = true;
         // Any bytes already read past the preamble are real payload; hand
-        // them to the tunnel once it's constructed (see MaybeStartTunnel()).
-        key_read_buffer_ = key_read_buffer_.substr(2 + key_length);
-        break;
+        // them to the tunnel once it's constructed.
+        std::string leftover = key_read_buffer.substr(2 + key_length);
+        key_read_buffers_.erase(id);
+        StartTunnelForStream(id, stream, std::move(leftover));
+        return;
       }
     }
     if (bytes_read == 0) {
       break;
     }
   }
-  if (fin && !authenticated_) {
-    QUIC_LOG(WARNING) << "Connection from " << peer_address_
+  if (fin && !authenticated) {
+    QUIC_LOG(WARNING) << "Stream " << id << " from " << peer_address_
                       << " closed before completing authentication";
-    Close();
+    key_read_buffers_.erase(id);
+    // Just let the stream's own natural closure run its course (it already
+    // has, in fact -- sequencer says fin -- so nothing more to do); no
+    // reason to reset it or touch the rest of the connection.
     return;
   }
-  MaybeStartTunnel();
 }
 
-void QuictunServerConnection::OnStreamClosed() {
-  // Only relevant during the pre-tunnel auth phase (once a QuictunTunnel
-  // exists, it -- not this class -- is the stream's delegate).
-  Close();
+void QuictunServerConnection::StartTunnelForStream(QuicStreamId id,
+                                                    QuictunStream* stream,
+                                                    std::string leftover) {
+  StreamTarget& target = stream_targets_[id];
+  // Constructed with no socket yet (see QuictunTunnel::SetSocket()'s
+  // comment): this tunnel is about to become the dial-out's AsyncVisitor,
+  // so the dial-out can't be created until the tunnel already exists.
+  target.tunnel = std::make_unique<QuictunTunnel>(
+      stream, /*socket=*/nullptr, idle_timeout_, [this, id] {
+        // Mirrors the pre-multiplexing on_closed callback, just scoped to
+        // this one stream instead of the whole connection: this stream's
+        // tunnel closed itself (any reason -- stream closed, TCP error,
+        // idle timeout), so clean up its entry. See
+        // QuictunTunnel::HasSocket()'s comment for why this can't just
+        // assume the tunnel already disconnected target_socket the way the
+        // pre-multiplexing version could.
+        //
+        // This callback runs from inside QuictunTunnel::Close() -- a member
+        // function of the very QuictunTunnel that target.tunnel (a
+        // unique_ptr) owns -- which keeps running after this callback
+        // returns (see its own comment). So this must NOT erase() the
+        // StreamTarget here: that would destroy the QuictunTunnel object
+        // out from under its own still-executing Close(), a real
+        // use-after-free (confirmed via direct reproduction -- see
+        // CollectStreamGarbage()'s comment). Only do the parts that don't
+        // destroy `this`'s tunnel; defer the actual erase() to
+        // CollectStreamGarbage(), same pattern as
+        // QuicDispatcher::OnConnectionClosed()/DeleteSessions() in real
+        // QUICHE (quic_dispatcher.cc) and as
+        // QuictunClientDriver::pending_removal_/CollectGarbage().
+        auto it = stream_targets_.find(id);
+        if (it == stream_targets_.end()) {
+          return;
+        }
+        if (!it->second.tunnel->HasSocket()) {
+          DisconnectStreamTarget(it->second);
+        } else {
+          it->second.target_socket_disconnected = true;
+        }
+        pending_stream_removal_.push_back(id);
+      });
+  target.tunnel->SetPendingSeedData(std::move(leftover));
+
+  target.target_socket = socket_factory_->CreateTcpClientSocket(
+      target_address_, /*receive_buffer_size=*/0, /*send_buffer_size=*/0,
+      target.tunnel.get());
+  target.tunnel->SetSocket(target.target_socket.get());
+  session_->SetStreamDelegate(id, target.tunnel.get());
+  target.target_socket->ConnectAsync();
+}
+
+void QuictunServerConnection::OnStreamClosed(QuicStreamId id) {
+  // Only relevant during a stream's pre-tunnel auth phase (once a
+  // QuictunTunnel exists for it, that tunnel -- not this class -- is the
+  // stream's delegate, and handles its own OnStreamClosed()). The stream
+  // closing before finishing authentication needs no further action beyond
+  // dropping its now-pointless read buffer -- there is no --target
+  // dial-out to clean up yet at this stage.
+  key_read_buffers_.erase(id);
 }
 
 }  // namespace quic

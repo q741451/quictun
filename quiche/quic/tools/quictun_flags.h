@@ -47,12 +47,14 @@ struct QuictunTuningOptions {
 
   QuicTime::Delta idle_timeout = QuicTime::Delta::FromSeconds(60);
 
-  // Initial per-stream flow-control window. Since each connection carries
-  // exactly one stream, in practice the smaller of this and
-  // initial_session_flow_control_window_bytes is what actually caps
-  // throughput on high-bandwidth-delay-product paths -- raise both
-  // together. Independently tunable from the session window (unlike
-  // stock QuicConfig, which would default both to the same 16 KB) so an
+  // Initial per-stream flow-control window. With --quic_conn=0 (default,
+  // one stream per connection) the smaller of this and
+  // initial_session_flow_control_window_bytes is, in practice, what caps
+  // throughput on high-bandwidth-delay-product paths; with --quic_conn
+  // pooling multiple streams onto one connection, the session window also
+  // caps their combined total -- raise both together either way.
+  // Independently tunable from the session window (unlike stock
+  // QuicConfig, which would default both to the same 16 KB) so an
   // operator can match them to their own path's BDP instead of guessing.
   QuicByteCount initial_stream_flow_control_window_bytes = 512 * 1024;
 
@@ -97,6 +99,21 @@ struct QuictunTuningOptions {
   // (and/or full_loss_count) past the path's real loss rate to fix that.
   int32_t bbr_startup_loss_threshold_percent = 2;
   int32_t bbr_startup_full_loss_count = 8;
+
+  // Client-only: caps how many QUIC connections quictun_client keeps open
+  // to --remote at once, multiplexing TCP tunnels onto them as streams once
+  // that cap is reached instead of opening one QUIC connection per TCP
+  // connection. 0 (default) means unlimited -- quictun's original
+  // behavior, unchanged: every accepted --local connection gets its own
+  // brand-new QUIC connection, exactly as if this option didn't exist. A
+  // positive value pools: the client keeps at most quic_conn connections
+  // open, round-robining new TCP connections across them (opening a new
+  // stream on whichever one is selected) once all quic_conn slots are
+  // already in use. See quictun_client_driver.h for the actual pooling
+  // logic. Ignored by quictun_server, which is purely reactive to however
+  // many streams a client legitimately opens on a connection -- see
+  // QuictunServerConnection's class comment.
+  int32_t quic_conn = 0;
 };
 
 // Defines --key, --zero_rtt, --congestion_control, --so_txtime,

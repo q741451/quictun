@@ -62,6 +62,14 @@ QuictunClientDriver::QuictunClientDriver(QuicEventLoop* event_loop,
   if (options.so_txtime) {
     EnableQuictunSoTxTime();
   }
+
+  // See pool_slots_'s comment: only exists in pooling mode. A negative
+  // --quic_conn (nothing stops one being passed on the command line) just
+  // takes this same branch as 0 -- harmless, not worth a separate
+  // validation error for what's obviously a typo anyway.
+  if (options.quic_conn > 0) {
+    pool_slots_.resize(options.quic_conn, nullptr);
+  }
 }
 
 absl::Status QuictunClientDriver::Start() {
@@ -125,6 +133,26 @@ void QuictunClientDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
   }
 }
 
+QuictunClientConnection* QuictunClientDriver::CreateNewConnection() {
+  std::unique_ptr<QuictunClientConnection> connection =
+      QuictunClientConnection::Create(
+          event_loop_, &helper_, alarm_factory_.get(),
+          connection_id_generator_, buffer_allocator_, config_template_,
+          server_id_, remote_address_, crypto_config_.get(), options_.psk,
+          congestion_control_, options_.so_txtime,
+          options_.udp_socket_buffer_bytes,
+          [this](QuictunClientConnection* c) { RemoveConnection(c); });
+  if (connection == nullptr) {
+    return nullptr;
+  }
+  SetQuictunStartupBandwidthHint(connection->connection(),
+                                 options_.startup_bandwidth_kbps,
+                                 options_.startup_rtt_ms);
+  QuictunClientConnection* raw = connection.get();
+  connections_.emplace(raw, std::move(connection));
+  return raw;
+}
+
 void QuictunClientDriver::AcceptLoop() {
   while (true) {
     absl::StatusOr<socket_api::AcceptResult> accepted =
@@ -136,24 +164,39 @@ void QuictunClientDriver::AcceptLoop() {
       return;
     }
 
-    std::unique_ptr<QuictunClientConnection> connection =
-        QuictunClientConnection::Create(
-            event_loop_, &helper_, alarm_factory_.get(),
-            connection_id_generator_, buffer_allocator_, config_template_,
-            server_id_, remote_address_, crypto_config_.get(), options_.psk,
-            congestion_control_, options_.so_txtime,
-            options_.udp_socket_buffer_bytes, accepted->fd,
-            accepted->peer_address,
-            [this](QuictunClientConnection* c) { RemoveConnection(c); });
-    if (connection == nullptr) {
-      socket_api::Close(accepted->fd);
+    if (options_.quic_conn == 0) {
+      // Unlimited: quictun's original behavior, completely unchanged --
+      // every accepted TCP connection gets its own brand-new QUIC
+      // connection. See pool_slots_'s comment for why this can't just be
+      // "the pooling path below with a size-0 pool_slots_".
+      QuictunClientConnection* connection = CreateNewConnection();
+      if (connection == nullptr) {
+        socket_api::Close(accepted->fd);
+        continue;
+      }
+      connection->AssignNewTcp(accepted->fd, accepted->peer_address);
       continue;
     }
-    SetQuictunStartupBandwidthHint(connection->connection(),
-                                   options_.startup_bandwidth_kbps,
-                                   options_.startup_rtt_ms);
-    QuictunClientConnection* raw = connection.get();
-    connections_.emplace(raw, std::move(connection));
+
+    // Pooling: kcptun's own --conn algorithm (see pool_slots_'s comment) --
+    // round-robin over a fixed number of slots, lazily creating/replacing
+    // whichever slot round-robin selects only when it's actually that
+    // slot's turn to be used, rather than eagerly tracking liveness
+    // separately. A connection that's still mid-handshake is neither
+    // nullptr nor closed(), so it's treated as available here exactly like
+    // a fully-established one -- AssignNewTcp() below queues the new TCP
+    // if OpenOutgoingStream() isn't possible yet, same as it always does.
+    size_t idx = pool_round_robin_next_ % pool_slots_.size();
+    pool_round_robin_next_++;
+    QuictunClientConnection*& slot = pool_slots_[idx];
+    if (slot == nullptr || slot->closed()) {
+      slot = CreateNewConnection();
+      if (slot == nullptr) {
+        socket_api::Close(accepted->fd);
+        continue;
+      }
+    }
+    slot->AssignNewTcp(accepted->fd, accepted->peer_address);
   }
 }
 
@@ -162,6 +205,12 @@ void QuictunClientDriver::RemoveConnection(QuictunClientConnection* connection) 
 }
 
 void QuictunClientDriver::CollectGarbage() {
+  // Per-stream cleanup first -- see QuictunServerDriver::CollectGarbage()'s
+  // identical comment for why this needs to run for every still-live
+  // connection here, not just the ones about to be erased below.
+  for (const auto& kv : connections_) {
+    kv.first->CollectStreamGarbage();
+  }
   for (QuictunClientConnection* connection : pending_removal_) {
     connections_.erase(connection);
   }

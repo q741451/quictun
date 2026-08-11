@@ -79,19 +79,19 @@ void QuictunStream::OnDataAvailable() {
   if (sequencer()->ReadableBytes() == 0 && !fin_readable) {
     return;
   }
-  delegate_->OnStreamDataAvailable();
+  delegate_->OnStreamDataAvailable(id());
 }
 
 void QuictunStream::OnCanWriteNewData() {
   if (!CanWriteNewData()) {
     return;
   }
-  delegate_->OnStreamCanWriteMore();
+  delegate_->OnStreamCanWriteMore(id());
 }
 
 void QuictunStream::OnClose() {
   QuicStream::OnClose();
-  delegate_->OnStreamClosed();
+  delegate_->OnStreamClosed(id());
 }
 
 size_t QuictunStream::Read(absl::Span<char> buffer, bool* fin) {
@@ -146,26 +146,24 @@ void QuictunSessionBase::OnAlpnSelected(absl::string_view alpn) {
 }
 
 QuicStream* QuictunSessionBase::CreateIncomingStream(QuicStreamId id) {
-  if (stream_ != nullptr) {
-    // quictun is strictly one stream per connection; anything more is
-    // either a misbehaving peer or a protocol bug on our own side.
-    connection()->CloseConnection(
-        QUIC_TOO_MANY_OPEN_STREAMS,
-        "quictun only ever uses a single stream per connection",
-        ConnectionCloseBehavior::SEND_CONNECTION_CLOSE_PACKET);
-    return nullptr;
-  }
+  // No cap here beyond what the QuicSession framework itself already
+  // enforces before ever calling this (a peer that tries to exceed the
+  // max_streams value this side advertised gets rejected at a lower layer,
+  // in GetOrCreateStream() -- CreateIncomingStream() is simply never
+  // invoked for an over-limit stream id). Per-connection stream count
+  // policy (--quic_conn) lives in QuictunClientConnection, on the side
+  // that actually decides to open new streams; the server side is purely
+  // reactive to however many streams a client legitimately opens.
   return CreateStream(id);
 }
 
 QuictunStream* QuictunSessionBase::OpenOutgoingStream() {
-  QUICHE_DCHECK(stream_ == nullptr);
   if (!CanOpenNextOutgoingBidirectionalStream()) {
     // Expected, not a bug: with no cached 0-RTT session, a client can't
-    // open its stream until it has received the peer's transport
-    // parameters (i.e. after the handshake round trip completes) -- the
-    // caller is expected to retry from QuicSession::Visitor::
-    // OnConfigNegotiated(). See QuictunClientConnection.
+    // open a stream until it has received the peer's transport parameters
+    // (i.e. after the handshake round trip completes) -- the caller is
+    // expected to retry from SetCanOpenStreamCallback(). See
+    // QuictunClientConnection.
     return nullptr;
   }
   return CreateStream(GetNextOutgoingBidirectionalStreamId());
@@ -174,34 +172,47 @@ QuictunStream* QuictunSessionBase::OpenOutgoingStream() {
 QuictunStream* QuictunSessionBase::CreateStream(QuicStreamId id) {
   auto stream = std::make_unique<QuictunStream>(id, this, this);
   QuictunStream* stream_ptr = stream.get();
-  stream_ = stream_ptr;
+  streams_[id] = stream_ptr;
   ActivateStream(std::move(stream));
   // Notify after the stream is fully activated (present in the session's own
   // stream map, so anything the callback does -- e.g. SetStreamDelegate(),
-  // stream()->Read() -- sees consistent state), but still synchronously
+  // stream->Read() -- sees consistent state), but still synchronously
   // within whatever caused this stream to be created, exactly once. See the
   // comment on SetStreamCreatedCallback() for why this exists.
   if (stream_created_callback_) {
-    stream_created_callback_();
+    stream_created_callback_(id);
   }
   return stream_ptr;
 }
 
-void QuictunSessionBase::OnStreamDataAvailable() {
-  if (stream_delegate_ != nullptr) {
-    stream_delegate_->OnStreamDataAvailable();
+void QuictunSessionBase::OnStreamDataAvailable(QuicStreamId id) {
+  auto it = stream_delegates_.find(id);
+  if (it != stream_delegates_.end() && it->second != nullptr) {
+    it->second->OnStreamDataAvailable(id);
   }
 }
 
-void QuictunSessionBase::OnStreamCanWriteMore() {
-  if (stream_delegate_ != nullptr) {
-    stream_delegate_->OnStreamCanWriteMore();
+void QuictunSessionBase::OnStreamCanWriteMore(QuicStreamId id) {
+  auto it = stream_delegates_.find(id);
+  if (it != stream_delegates_.end() && it->second != nullptr) {
+    it->second->OnStreamCanWriteMore(id);
   }
 }
 
-void QuictunSessionBase::OnStreamClosed() {
-  if (stream_delegate_ != nullptr) {
-    stream_delegate_->OnStreamClosed();
+void QuictunSessionBase::OnStreamClosed(QuicStreamId id) {
+  auto it = stream_delegates_.find(id);
+  if (it != stream_delegates_.end()) {
+    QuictunStreamDelegate* delegate = it->second;
+    // Erase before notifying: this stream is gone either way, and the
+    // delegate's own OnStreamClosed() is exactly the kind of place that
+    // might turn around and query streams()/try to detach itself again.
+    stream_delegates_.erase(it);
+    streams_.erase(id);
+    if (delegate != nullptr) {
+      delegate->OnStreamClosed(id);
+    }
+  } else {
+    streams_.erase(id);
   }
 }
 

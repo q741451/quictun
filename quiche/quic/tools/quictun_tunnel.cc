@@ -60,6 +60,12 @@ QuictunTunnel::QuictunTunnel(QuictunStream* stream, ConnectingClientSocket* sock
       on_closed_(std::move(on_closed)),
       idle_timeout_(idle_timeout) {}
 
+void QuictunTunnel::SetSocket(ConnectingClientSocket* socket) {
+  QUICHE_DCHECK(socket_ == nullptr) << "SetSocket() called more than once";
+  QUICHE_DCHECK(socket != nullptr);
+  socket_ = socket;
+}
+
 void QuictunTunnel::Start(absl::string_view seed_quic_to_tcp_data) {
   if (!seed_quic_to_tcp_data.empty()) {
     pending_to_tcp_.push_back(std::string(seed_quic_to_tcp_data));
@@ -86,7 +92,7 @@ void QuictunTunnel::Start(absl::string_view seed_quic_to_tcp_data) {
   MaybeFlushQuicToTcp();
 }
 
-void QuictunTunnel::OnStreamDataAvailable() {
+void QuictunTunnel::OnStreamDataAvailable(QuicStreamId /*id*/) {
   if (closed_) {
     return;
   }
@@ -94,7 +100,7 @@ void QuictunTunnel::OnStreamDataAvailable() {
   MaybeFlushQuicToTcp();
 }
 
-void QuictunTunnel::OnStreamCanWriteMore() {
+void QuictunTunnel::OnStreamCanWriteMore(QuicStreamId /*id*/) {
   if (closed_) {
     return;
   }
@@ -121,7 +127,7 @@ void QuictunTunnel::OnStreamCanWriteMore() {
   BeginReadFromTcp();
 }
 
-void QuictunTunnel::OnStreamClosed() {
+void QuictunTunnel::OnStreamClosed(QuicStreamId /*id*/) {
   if (closed_) {
     return;
   }
@@ -131,12 +137,24 @@ void QuictunTunnel::OnStreamClosed() {
   Close("stream closed", /*reset_stream=*/false);
 }
 
-void QuictunTunnel::ConnectComplete(absl::Status /*status*/) {
-  // Never called: the owner is responsible for connecting `socket_` (or, for
-  // an already-accepted TCP connection, there is nothing to connect) before
-  // handing it to this tunnel, exactly as with connect_tunnel.cc's own
-  // ConnectComplete().
-  QUICHE_NOTREACHED();
+void QuictunTunnel::ConnectComplete(absl::Status status) {
+  // Client side: never invoked -- `socket_` (a QuictunAcceptedTcpSocket) is
+  // already connected at construction and the owner calls Start() itself,
+  // never ConnectAsync() on it. Server side (see the class/SetSocket()
+  // comments): this is the completion callback for the owner's ConnectAsync()
+  // dial-out to --target, kicked off after SetSocket() supplied the socket
+  // this tunnel is registered as the AsyncVisitor of.
+  if (closed_) {
+    // Raced with the tunnel already being torn down some other way (e.g.
+    // the QUIC stream closed while the dial-out was still in flight) --
+    // Close() already disconnected socket_, nothing left to do here.
+    return;
+  }
+  if (!status.ok()) {
+    Close("target connect failed", /*reset_stream=*/true);
+    return;
+  }
+  Start(pending_seed_data_);
 }
 
 void QuictunTunnel::ReceiveComplete(
@@ -223,7 +241,12 @@ void QuictunTunnel::FillQueueFromStream() {
 }
 
 void QuictunTunnel::BeginReadFromTcp() {
-  if (closed_ || tcp_receive_in_flight_ || tcp_receive_done_) {
+  if (closed_ || tcp_receive_in_flight_ || tcp_receive_done_ ||
+      socket_ == nullptr) {
+    // socket_ == nullptr: still waiting on SetSocket()/ConnectComplete() on
+    // the server path (see the class comment) -- nothing to read from yet.
+    // Whichever of Start() or SetSocket() actually finishes that wait calls
+    // this again.
     return;
   }
   tcp_receive_in_flight_ = true;
@@ -231,7 +254,10 @@ void QuictunTunnel::BeginReadFromTcp() {
 }
 
 void QuictunTunnel::MaybeFlushQuicToTcp() {
-  if (closed_ || tcp_send_in_flight_) {
+  if (closed_ || tcp_send_in_flight_ || socket_ == nullptr) {
+    // socket_ == nullptr: same as BeginReadFromTcp() above -- whatever's
+    // already in pending_to_tcp_ just stays queued until Start() runs (from
+    // ConnectComplete()) and calls this again.
     return;
   }
   if (pending_to_tcp_.empty()) {
@@ -342,7 +368,15 @@ void QuictunTunnel::Close(absl::string_view reason, bool reset_stream) {
   }
   QUICHE_LOG(INFO) << "Closing quictun tunnel: " << reason
                    << ", reset_stream=" << reset_stream;
-  socket_->Disconnect();
+  // socket_ can still be null here on the server path (see the constructor/
+  // SetSocket()'s comments): a tunnel can close for reasons unrelated to the
+  // target dial-out (e.g. the QUIC stream itself resetting) before that
+  // dial-out was ever wired in. HasSocket() lets the owner's on_closed
+  // callback know it still needs to disconnect its own copy in that case --
+  // see that callback's comment.
+  if (socket_ != nullptr) {
+    socket_->Disconnect();
+  }
 
   // on_closed_ before stream_->Reset(), not after: on_closed_ synchronously
   // runs the owner's own Close() (QuictunServerConnection::Close() /

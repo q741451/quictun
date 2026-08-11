@@ -32,8 +32,7 @@ std::unique_ptr<QuictunClientConnection> QuictunClientConnection::Create(
     const QuicServerId& server_id, const QuicSocketAddress& remote_address,
     QuicCryptoClientConfig* crypto_config, const std::string& psk,
     CongestionControlType congestion_control, bool so_txtime_enabled,
-    QuicByteCount udp_socket_buffer_bytes, SocketFd accepted_tcp_fd,
-    const QuicSocketAddress& tcp_peer_address,
+    QuicByteCount udp_socket_buffer_bytes,
     std::function<void(QuictunClientConnection*)> on_closed) {
   absl::StatusOr<OwnedSocketFd> fd =
       CreateQuicUdpSocket(remote_address, udp_socket_buffer_bytes);
@@ -64,7 +63,7 @@ std::unique_ptr<QuictunClientConnection> QuictunClientConnection::Create(
       event_loop, std::move(udp_fd), *self_address, remote_address, helper,
       alarm_factory, connection_id_generator, buffer_allocator, config,
       server_id, crypto_config, psk, congestion_control, so_txtime_enabled,
-      accepted_tcp_fd, tcp_peer_address, std::move(on_closed)));
+      std::move(on_closed)));
 }
 
 QuictunClientConnection::QuictunClientConnection(
@@ -76,16 +75,13 @@ QuictunClientConnection::QuictunClientConnection(
     quiche::QuicheBufferAllocator* buffer_allocator, const QuicConfig& config,
     const QuicServerId& server_id, QuicCryptoClientConfig* crypto_config,
     const std::string& psk, CongestionControlType congestion_control,
-    bool so_txtime_enabled, SocketFd accepted_tcp_fd,
-    const QuicSocketAddress& tcp_peer_address,
+    bool so_txtime_enabled,
     std::function<void(QuictunClientConnection*)> on_closed)
     : event_loop_(event_loop),
       udp_fd_(std::move(udp_fd)),
       self_address_(self_address),
       psk_(psk),
       buffer_allocator_(buffer_allocator),
-      accepted_tcp_fd_(accepted_tcp_fd),
-      tcp_peer_address_(tcp_peer_address),
       idle_timeout_(config.IdleNetworkTimeout()),
       on_closed_(std::move(on_closed)) {
   std::unique_ptr<QuicPacketWriter> writer =
@@ -101,7 +97,7 @@ QuictunClientConnection::QuictunClientConnection(
   session_ = std::make_unique<QuictunClientSession>(
       connection_.get(), /*owner=*/this, config, "quictun/1", server_id,
       crypto_config);
-  session_->SetCanOpenStreamCallback([this] { MaybeOpenStream(); });
+  session_->SetCanOpenStreamCallback([this] { MaybeOpenStreams(); });
   session_->Initialize();
 
   bool registered = event_loop_->RegisterSocket(
@@ -109,27 +105,39 @@ QuictunClientConnection::QuictunClientConnection(
   QUICHE_DCHECK(registered);
 
   session_->CryptoConnect();
-  // Try to open the tunnel's one stream right away -- this succeeds
-  // immediately when a cached 0-RTT session already supplied a max_streams
-  // value. Otherwise this is a no-op and the SetCanOpenStreamCallback above
-  // retries once QuicSession actually applies a max_streams value (from the
-  // negotiated transport parameters, for a fresh non-0-RTT connection).
-  MaybeOpenStream();
 }
 
-void QuictunClientConnection::MaybeOpenStream() {
-  if (stream_opened_ || closed_) {
+void QuictunClientConnection::AssignNewTcp(
+    SocketFd accepted_tcp_fd, const QuicSocketAddress& tcp_peer_address) {
+  if (closed_) {
+    socket_api::Close(accepted_tcp_fd);
     return;
   }
-  QuictunStream* stream = session_->OpenOutgoingStream();
-  if (stream == nullptr) {
-    return;
-  }
-  stream_opened_ = true;
-  StartTunnel(stream);
+  pending_tcps_.push_back({accepted_tcp_fd, tcp_peer_address});
+  // Try right away -- succeeds immediately when a cached 0-RTT session (or,
+  // under pooling, this connection's own already-confirmed handshake) has
+  // already supplied a max_streams value allowing it. Otherwise this is a
+  // no-op and MaybeOpenStreams() gets retried from
+  // SetCanOpenStreamCallback() once QuicSession actually applies one (from
+  // the negotiated transport parameters, for a fresh non-0-RTT connection,
+  // or a later MAX_STREAMS frame).
+  MaybeOpenStreams();
 }
 
-void QuictunClientConnection::StartTunnel(QuictunStream* stream) {
+void QuictunClientConnection::MaybeOpenStreams() {
+  while (!closed_ && !pending_tcps_.empty()) {
+    QuictunStream* stream = session_->OpenOutgoingStream();
+    if (stream == nullptr) {
+      return;
+    }
+    PendingTcp pending = pending_tcps_.front();
+    pending_tcps_.pop_front();
+    StartTunnel(stream, pending);
+  }
+}
+
+void QuictunClientConnection::StartTunnel(QuictunStream* stream,
+                                          PendingTcp pending) {
   // quictun's own authentication: --key, sent as a length-prefixed preamble
   // (2-byte big-endian length + key bytes) that must always be the very
   // first bytes on the stream. This exists because
@@ -143,29 +151,67 @@ void QuictunClientConnection::StartTunnel(QuictunStream* stream) {
   // handshake with the client -- the client never validates the server's
   // certificate at all, see FakeProofVerifier), but matches this tool's
   // explicitly low security bar: it rejects any connection that doesn't
-  // know the shared secret. See QuictunServerConnection::OnStreamDataAvailable
-  // for the server-side check.
+  // know the shared secret. Sent fresh on every stream (not just this
+  // connection's first), one per TCP tunnel -- see
+  // QuictunServerConnection::OnStreamDataAvailable for the server-side
+  // check, done the same way, once per stream.
   std::string preamble;
   preamble.push_back(static_cast<char>((psk_.size() >> 8) & 0xff));
   preamble.push_back(static_cast<char>(psk_.size() & 0xff));
   preamble.append(psk_);
   stream->WriteToStream(preamble, /*fin=*/false);
 
+  QuicStreamId id = stream->id();
+  StreamTcp& entry = stream_tcps_[id];
   // QuictunTunnel and QuictunAcceptedTcpSocket each need a pointer to the
   // other at construction (tunnel needs the socket to pump through; the
   // socket needs the tunnel as its AsyncVisitor) -- construct the socket
   // with no visitor yet, then wire it up once the tunnel exists.
-  tcp_socket_ = std::make_unique<QuictunAcceptedTcpSocket>(
-      accepted_tcp_fd_, tcp_peer_address_, event_loop_, buffer_allocator_,
+  entry.tcp_socket = std::make_unique<QuictunAcceptedTcpSocket>(
+      pending.fd, pending.peer_address, event_loop_, buffer_allocator_,
       /*async_visitor=*/nullptr);
-  tunnel_ = std::make_unique<QuictunTunnel>(stream, tcp_socket_.get(),
-                                            idle_timeout_, [this] {
-                                              tcp_socket_disconnected_ = true;
-                                              Close();
-                                            });
-  tcp_socket_->SetAsyncVisitor(tunnel_.get());
-  session_->SetStreamDelegate(tunnel_.get());
-  tunnel_->Start();
+  entry.tunnel = std::make_unique<QuictunTunnel>(
+      stream, entry.tcp_socket.get(), idle_timeout_, [this, id] {
+        // This stream's tunnel closed itself -- scoped to just this one
+        // TCP, same reasoning as the server-side mirror of this callback
+        // (QuictunServerConnection::StartTunnelForStream()): other streams
+        // sharing this connection (--quic_conn pooling) may still be
+        // actively tunneling and shouldn't be torn down just because one
+        // of them finished. QuictunTunnel::Close() always disconnects
+        // tcp_socket_ itself when it has one (unlike the server's
+        // dial-out, this one is always already connected by the time the
+        // tunnel exists -- see the constructor -- so HasSocket() is always
+        // true here; no need for QuictunServerConnection's extra check).
+        //
+        // Same use-after-free hazard as the server-side mirror (see
+        // QuictunServerConnection::StartTunnelForStream()'s comment): this
+        // callback runs from inside QuictunTunnel::Close(), a member
+        // function of the very QuictunTunnel that entry.tunnel owns, which
+        // keeps executing after this callback returns. Erasing here would
+        // destroy that QuictunTunnel out from under its own still-running
+        // Close(). Only mark-and-defer; CollectStreamGarbage() does the
+        // actual erase() later, outside any tunnel's call stack.
+        auto it = stream_tcps_.find(id);
+        if (it == stream_tcps_.end()) {
+          return;
+        }
+        it->second.tcp_socket_disconnected = true;
+        pending_stream_removal_.push_back(id);
+      });
+  entry.tcp_socket->SetAsyncVisitor(entry.tunnel.get());
+  session_->SetStreamDelegate(id, entry.tunnel.get());
+  entry.tunnel->Start();
+}
+
+void QuictunClientConnection::CollectStreamGarbage() {
+  // See QuictunServerConnection::CollectStreamGarbage()'s comment -- same
+  // deferred-destruction pattern, one class over. Actually erase()s (and so
+  // destroys the StreamTcp -- QuictunTunnel and tcp_socket included) now
+  // safely outside any tunnel's own call stack.
+  for (QuicStreamId id : pending_stream_removal_) {
+    stream_tcps_.erase(id);
+  }
+  pending_stream_removal_.clear();
 }
 
 QuictunClientConnection::~QuictunClientConnection() {
@@ -184,10 +230,27 @@ void QuictunClientConnection::Close() {
         QUIC_NO_ERROR, "quictun tunnel closed",
         ConnectionCloseBehavior::SEND_CONNECTION_CLOSE_PACKET);
   }
-  if (tcp_socket_ && !tcp_socket_disconnected_) {
-    tcp_socket_disconnected_ = true;
-    tcp_socket_->Disconnect();
+  // Every stream's TCP side: disconnect (see the identical reasoning in
+  // QuictunServerConnection::Close() for why this doesn't go through each
+  // tunnel's own Close() instead -- reentrant modification of stream_tcps_
+  // while iterating it).
+  for (auto& [id, entry] : stream_tcps_) {
+    if (entry.tcp_socket && !entry.tcp_socket_disconnected) {
+      entry.tcp_socket_disconnected = true;
+      entry.tcp_socket->Disconnect();
+    }
   }
+  stream_tcps_.clear();
+  // See QuictunServerConnection::Close()'s identical comment: entries
+  // already gone via the clear() above, this just avoids leaving stale ids
+  // sitting around in a connection that's about to be destroyed anyway.
+  pending_stream_removal_.clear();
+  // Any TCPs that never even got a stream opened for them yet: nothing
+  // owns these but this queue, so close the raw fd directly.
+  for (const PendingTcp& pending : pending_tcps_) {
+    socket_api::Close(pending.fd);
+  }
+  pending_tcps_.clear();
   event_loop_->UnregisterSocket(*udp_fd_);
   std::function<void(QuictunClientConnection*)> on_closed =
       std::move(on_closed_);

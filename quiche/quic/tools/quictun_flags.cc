@@ -37,6 +37,18 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "paths. Disable with --zero_rtt=false.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, quic_conn, 0,
+    "Client-only (accepted but unused by quictun_server -- see "
+    "QuictunServerConnection). Caps how many QUIC connections "
+    "quictun_client keeps open to --remote at once; once that many are "
+    "open, new TCP connections are multiplexed as additional streams on "
+    "an existing one (picked round-robin) instead of opening another QUIC "
+    "connection. 0 (default) means unlimited: every accepted TCP "
+    "connection gets its own brand-new QUIC connection, quictun's "
+    "original behavior, completely unchanged from before this flag "
+    "existed.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
     std::string, congestion_control, "cubic",
     "Congestion control algorithm for this endpoint's own send direction: "
     "one of cubic, bbr, bbr2, bbr3.");
@@ -54,10 +66,12 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, initial_stream_flow_control_window_kb, 512,
     "Initial per-stream flow-control window advertised to the peer, in "
-    "KiB. Independent of --initial_session_flow_control_window_kb -- the "
-    "smaller of the two is what actually caps throughput in practice, "
-    "since each connection carries exactly one stream. Raise both "
-    "together for high-bandwidth-delay-product paths.");
+    "KiB. Independent of --initial_session_flow_control_window_kb -- with "
+    "--quic_conn=0 (default, one stream per connection) the smaller of "
+    "the two is what actually caps throughput in practice; with "
+    "--quic_conn pooling multiple streams, the session window also caps "
+    "their combined total. Raise both together for high-bandwidth-delay-"
+    "product paths.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, initial_session_flow_control_window_kb, 512,
@@ -119,6 +133,7 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
   QuictunTuningOptions options;
   options.psk = quiche::GetQuicheCommandLineFlag(FLAGS_key);
   options.zero_rtt = quiche::GetQuicheCommandLineFlag(FLAGS_zero_rtt);
+  options.quic_conn = quiche::GetQuicheCommandLineFlag(FLAGS_quic_conn);
   options.congestion_control =
       quiche::GetQuicheCommandLineFlag(FLAGS_congestion_control);
   options.so_txtime = quiche::GetQuicheCommandLineFlag(FLAGS_so_txtime);
@@ -193,6 +208,9 @@ void PrintQuictunStartupBanner(
   lines.push_back(
       {"key", absl::StrCat("<redacted, ", options.psk.size(), " bytes>")});
   lines.push_back({"zero_rtt", options.zero_rtt ? "true" : "false"});
+  lines.push_back(
+      {"quic_conn", options.quic_conn > 0 ? absl::StrCat(options.quic_conn)
+                                          : "0 (unlimited)"});
   lines.push_back({"congestion_control", options.congestion_control});
   lines.push_back({"so_txtime", options.so_txtime ? "true" : "false"});
   lines.push_back({"idle_timeout_seconds",

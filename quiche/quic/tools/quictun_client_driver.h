@@ -27,13 +27,14 @@
 
 namespace quic {
 
-// Owns the --local TCP listener; for each accepted connection, builds a new
-// QuictunClientConnection (its own dedicated UDP socket + QUIC connection).
-// Owns the state shared by every such connection: the crypto config (with
-// PSK and, if 0-RTT is enabled, a session cache shared across all
-// connections made to the same --remote within this process's lifetime),
-// the connection helper/alarm factory/connection-ID generator, and the
-// QuicConfig template.
+// Owns the --local TCP listener; for each accepted connection, either builds
+// a new QuictunClientConnection (its own dedicated UDP socket + QUIC
+// connection) or, under --quic_conn pooling, assigns it as one more stream
+// on an existing one -- see AcceptLoop()/pool_slots_. Owns the state shared
+// by every connection: the crypto config (with PSK and, if 0-RTT is
+// enabled, a session cache shared across all connections made to the same
+// --remote within this process's lifetime), the connection helper/alarm
+// factory/connection-ID generator, and the QuicConfig template.
 class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener {
  public:
   QuictunClientDriver(QuicEventLoop* event_loop,
@@ -59,6 +60,14 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener {
  private:
   void AcceptLoop();
   void RemoveConnection(QuictunClientConnection* connection);
+
+  // Creates a brand-new QuictunClientConnection, taking ownership via
+  // connections_ (same as quictun's original, --quic_conn=0 behavior), and
+  // returns the raw (non-owning) pointer -- for AcceptLoop() to either use
+  // directly (--quic_conn=0) or drop into a freshly-(re)claimed pool_slots_
+  // entry (--quic_conn>0). Returns nullptr if the new connection's UDP
+  // socket couldn't be created -- see QuictunClientConnection::Create().
+  QuictunClientConnection* CreateNewConnection();
 
   QuicEventLoop* const event_loop_;
   const QuicSocketAddress local_address_;
@@ -88,6 +97,28 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener {
   // the stack -- so actual destruction is deferred until CollectGarbage()
   // runs at the top level, between event-loop iterations.
   std::vector<QuictunClientConnection*> pending_removal_;
+
+  // --quic_conn>0 connection pool: a fixed-size (== options_.quic_conn)
+  // array of slots, each either empty (nullptr) or pointing at one of this
+  // driver's own connections_ entries (non-owning -- the same reentrancy/
+  // deferred-destruction rules as pending_removal_ above apply; a slot can
+  // point at an already-closed connection that's merely waiting for
+  // CollectGarbage() to actually free it). Modeled directly on kcptun's own
+  // --conn pool (github.com/xtaci/kcptun, client/main.go): fixed slots +
+  // check-and-lazily-replace at the moment a slot is selected, rather than
+  // eagerly maintaining a separate "which slots are still alive" set in
+  // sync with every connection's own close. AcceptLoop() is the only
+  // reader/writer, always from the same single-threaded event loop, so
+  // there's no locking here, matching kcptun's own single-goroutine accept
+  // loop for the same reason.
+  //
+  // Deliberately never constructed/touched at all when options_.quic_conn
+  // == 0 (see AcceptLoop()) -- unlimited pooling isn't "a pool of size 0",
+  // it's a structurally different mode (a fixed-size array of size 0 would
+  // make the round-robin's modulo undefined behavior, quite apart from not
+  // making semantic sense).
+  std::vector<QuictunClientConnection*> pool_slots_;
+  size_t pool_round_robin_next_ = 0;
 };
 
 }  // namespace quic

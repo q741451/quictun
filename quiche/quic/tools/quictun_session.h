@@ -2,12 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
-// A non-HTTP QUIC session/stream pair for quictun: exactly one bidirectional
-// QUIC stream carries one TCP connection's raw byte stream, with no HTTP/3
-// or WebTransport framing on top. This deliberately does not build on
+// A non-HTTP QUIC session/stream pair for quictun: each bidirectional QUIC
+// stream carries one TCP connection's raw byte stream, with no HTTP/3 or
+// WebTransport framing on top. This deliberately does not build on
 // QuicGenericSessionBase (quic_generic_session.h): that class exists to
-// expose a full WebTransport session (datagrams, multi-stream accept
-// queues, stream priorities), none of which quictun needs.
+// expose a full WebTransport session (datagrams, stream priorities), none
+// of which quictun needs.
+//
+// A session may carry more than one such stream at once -- see
+// --quic_conn in quictun_flags.h: by default (--quic_conn=0) each
+// QuictunClientConnection/QuictunServerConnection ever creates exactly one
+// stream, unchanged from quictun's original one-stream-per-connection
+// design, but when connection pooling is enabled a single session can be
+// assigned many concurrent TCP tunnels, each as its own stream.
 
 #ifndef QUICHE_QUIC_TOOLS_QUICTUN_SESSION_H_
 #define QUICHE_QUIC_TOOLS_QUICTUN_SESSION_H_
@@ -17,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "quiche/quic/core/crypto/quic_crypto_client_config.h"
@@ -39,24 +47,30 @@ namespace quic {
 // negotiation code path to worry about.
 QUICHE_EXPORT ParsedQuicVersionVector GetQuictunVersions();
 
-// Receives events from the tunnel's one QuictunStream. Implemented by
-// QuictunTunnel (see quictun_tunnel.h); QuictunSessionBase itself implements
-// this interface too and forwards to whichever delegate has been attached,
-// so stream events that arrive before a tunnel exists are simply dropped.
+// Receives events for one QuictunStream. Implemented by QuictunTunnel (see
+// quictun_tunnel.h) -- which is always scoped to exactly one stream/tunnel,
+// so it ignores `id` -- and, on the server, by QuictunServerConnection
+// itself during a stream's pre-tunnel authentication phase, when one
+// connection object is fielding this callback for however many of its
+// streams haven't finished the --key preamble check yet and does need `id`
+// to know which one. QuictunSessionBase itself implements this interface
+// too and forwards each call to whichever delegate has been attached to
+// that particular stream id, so events for a stream with no delegate
+// attached yet are simply dropped.
 class QUICHE_EXPORT QuictunStreamDelegate {
  public:
   virtual ~QuictunStreamDelegate() = default;
 
-  // New bytes are readable on the stream (or the peer's FIN is readable).
+  // New bytes are readable on stream `id` (or its peer's FIN is readable).
   // The delegate should call QuictunStream::Read() to consume them.
-  virtual void OnStreamDataAvailable() = 0;
+  virtual void OnStreamDataAvailable(QuicStreamId id) = 0;
 
-  // The stream can accept more written data after being write-blocked.
-  virtual void OnStreamCanWriteMore() = 0;
+  // Stream `id` can accept more written data after being write-blocked.
+  virtual void OnStreamCanWriteMore(QuicStreamId id) = 0;
 
-  // The stream has closed (FIN both ways, reset, or the connection closed).
-  // The delegate must not touch the stream afterward.
-  virtual void OnStreamClosed() = 0;
+  // Stream `id` has closed (FIN both ways, reset, or the connection
+  // closed). The delegate must not touch that stream afterward.
+  virtual void OnStreamClosed(QuicStreamId id) = 0;
 };
 
 // A QUIC stream carrying exactly one TCP connection's raw byte stream --
@@ -94,8 +108,12 @@ class QUICHE_EXPORT QuictunStream : public QuicStream {
 };
 
 // Shared logic for quictun's client and server sessions: custom ALPN (never
-// "h3"), exactly one stream ever created, and forwarding of that stream's
-// events to whatever QuictunStreamDelegate has been attached.
+// "h3"), and forwarding of each stream's events to whichever
+// QuictunStreamDelegate has been attached to that stream. Tracks every
+// stream this session has ever created (see streams()); does not itself
+// limit how many -- that policy (default: unlimited, but see --quic_conn)
+// lives in QuictunClientConnection/QuictunServerConnection, closer to
+// where the actual TCP-tunnel-per-stream bookkeeping already is.
 class QUICHE_EXPORT QuictunSessionBase : public QuicSession,
                                           public QuictunStreamDelegate {
  public:
@@ -110,55 +128,67 @@ class QUICHE_EXPORT QuictunSessionBase : public QuicSession,
   bool ShouldKeepConnectionAlive() const override { return true; }
   QuicStream* CreateIncomingStream(QuicStreamId id) override;
 
-  // Opens the tunnel's one outgoing stream. Only ever called once, by
-  // whichever side is responsible for starting the tunnel (currently always
-  // the client -- see quictun_client_connection.cc). Safe to call
-  // immediately after CryptoConnect(), even before the handshake is
-  // confirmed: if a 0-RTT session is available, QuicStream buffers/sends the
-  // data at whatever encryption level is ready, same as any other 0-RTT
-  // QUIC client (e.g. QuicSpdyClientBase).
+  // Opens a new outgoing stream for one more TCP tunnel on this session.
+  // Safe to call immediately after CryptoConnect(), even before the
+  // handshake is confirmed: if a 0-RTT session is available, QuicStream
+  // buffers/sends the data at whatever encryption level is ready, same as
+  // any other 0-RTT QUIC client (e.g. QuicSpdyClientBase). Returns nullptr
+  // if the session can't open a new outgoing stream right now (no 0-RTT
+  // session yet and the handshake hasn't supplied a max_streams value, or
+  // the peer's advertised max_streams is already exhausted) -- the caller
+  // is expected to retry, see QuictunClientConnection.
   QuictunStream* OpenOutgoingStream();
 
-  QuictunStream* stream() const { return stream_; }
-
-  // Attaches/detaches the delegate that stream events get forwarded to.
-  // Must be set before any tunnel traffic can be usefully acted upon; events
-  // that arrive with no delegate attached are simply dropped.
-  void SetStreamDelegate(QuictunStreamDelegate* delegate) {
-    stream_delegate_ = delegate;
+  // All streams this session currently has open, in no particular order.
+  // Empty for a freshly-constructed session or one whose last stream has
+  // since closed -- callers that need "do I have any active tunnel left"
+  // should check this, not any single stream() accessor (removed: with
+  // more than one stream possible, "the" stream no longer means anything).
+  const absl::flat_hash_map<QuicStreamId, QuictunStream*>& streams() const {
+    return streams_;
   }
 
-  // Invoked synchronously, exactly once, the moment CreateStream() actually
-  // creates quictun's one stream -- whether that's an incoming stream (the
-  // server side, via CreateIncomingStream() below, itself called
-  // synchronously by the QuicSession framework from inside
+  // Attaches/detaches the delegate that stream `id`'s events get forwarded
+  // to. Must be set before that stream's traffic can be usefully acted
+  // upon; events for a stream with no delegate attached are simply
+  // dropped. `id` must currently be a live stream of this session.
+  void SetStreamDelegate(QuicStreamId id, QuictunStreamDelegate* delegate) {
+    stream_delegates_[id] = delegate;
+  }
+
+  // Invoked synchronously, exactly once per stream, the moment
+  // CreateStream() actually creates it -- whether that's an incoming
+  // stream (the server side, via CreateIncomingStream() below, itself
+  // called synchronously by the QuicSession framework from inside
   // ProcessUdpPacket() no matter which socket delivered the packet -- see
-  // QuictunServerConnection::MaybeStartTunnel(), which used to instead be
-  // re-polled ("has stream() gone non-null yet?") from several different
-  // packet-delivery call sites and had one -- QuictunServerDriver's
-  // rendezvous-socket forwarding path -- that forgot to poll it at all) or
-  // an outgoing one (the client side, via OpenOutgoingStream(), called
-  // directly by its caller, which already knows the stream now exists
-  // without needing this). Registering this is the same idea as
-  // QuicSimpleServerSession wiring its own request-handling logic directly
-  // into CreateIncomingStream()/the stream object itself, rather than some
-  // external owner re-checking session state from arbitrary call sites.
-  void SetStreamCreatedCallback(std::function<void()> callback) {
+  // QuictunServerConnection::MaybeStartTunnelForStream(), which used to
+  // instead be re-polled ("has stream() gone non-null yet?") from several
+  // different packet-delivery call sites and had one --
+  // QuictunServerDriver's rendezvous-socket forwarding path -- that forgot
+  // to poll it at all) or an outgoing one (the client side, via
+  // OpenOutgoingStream(), called directly by its caller, which already
+  // knows the stream now exists without needing this). Registering this is
+  // the same idea as QuicSimpleServerSession wiring its own request-
+  // handling logic directly into CreateIncomingStream()/the stream object
+  // itself, rather than some external owner re-checking session state from
+  // arbitrary call sites.
+  void SetStreamCreatedCallback(std::function<void(QuicStreamId)> callback) {
     stream_created_callback_ = std::move(callback);
   }
 
  private:
   QuictunStream* CreateStream(QuicStreamId id);
 
-  // QuictunStreamDelegate, implemented by forwarding to stream_delegate_.
-  void OnStreamDataAvailable() override;
-  void OnStreamCanWriteMore() override;
-  void OnStreamClosed() override;
+  // QuictunStreamDelegate, implemented by forwarding to whichever delegate
+  // (if any) is attached to the stream the event is actually for.
+  void OnStreamDataAvailable(QuicStreamId id) override;
+  void OnStreamCanWriteMore(QuicStreamId id) override;
+  void OnStreamClosed(QuicStreamId id) override;
 
   std::string alpn_;
-  QuictunStream* stream_ = nullptr;
-  QuictunStreamDelegate* stream_delegate_ = nullptr;
-  std::function<void()> stream_created_callback_;
+  absl::flat_hash_map<QuicStreamId, QuictunStream*> streams_;
+  absl::flat_hash_map<QuicStreamId, QuictunStreamDelegate*> stream_delegates_;
+  std::function<void(QuicStreamId)> stream_created_callback_;
 };
 
 class QUICHE_EXPORT QuictunClientSession final : public QuictunSessionBase {
@@ -181,14 +211,20 @@ class QUICHE_EXPORT QuictunClientSession final : public QuictunSessionBase {
     return crypto_stream_->EarlyDataReason();
   }
 
-  // Invoked once the client is actually allowed to open a new outgoing
+  // Invoked every time the client is (re-)allowed to open a new outgoing
   // bidirectional stream -- i.e. once QuicSession's own
   // ietf_streamid_manager_ has applied a max_streams value (from a 0-RTT
-  // cache or the negotiated transport parameters). NOT the same moment as
+  // cache or the negotiated transport parameters) or the peer has raised
+  // it further via a MAX_STREAMS frame. NOT the same moment as
   // QuicSession::Visitor::OnConfigNegotiated(): that visitor callback fires
   // from inside QuicSession::OnConfigNegotiated() *before* it updates
   // ietf_streamid_manager_ (see quic_session.cc), so retrying
   // OpenOutgoingStream() from there is one step too early and still fails.
+  // The callback takes no arguments -- unlike SetStreamCreatedCallback(),
+  // this isn't about any one stream, it's "you may now call
+  // OpenOutgoingStream() again", and the caller (QuictunClientConnection)
+  // is the one that knows whether it still has a pending TCP waiting for a
+  // stream.
   void SetCanOpenStreamCallback(std::function<void()> callback) {
     can_open_stream_callback_ = std::move(callback);
   }

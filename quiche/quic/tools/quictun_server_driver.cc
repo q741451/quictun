@@ -234,6 +234,20 @@ void QuictunServerDriver::RemoveConnection(QuictunServerConnection* connection) 
 }
 
 void QuictunServerDriver::CollectGarbage() {
+  // Per-stream cleanup first: sweeps every still-live connection's own
+  // pending_stream_removal_ (see QuictunServerConnection::
+  // CollectStreamGarbage()'s comment for why that can't happen
+  // synchronously from within a tunnel's own on_closed callback). Must run
+  // before the erase() below -- a connection about to be removed here was
+  // itself only reachable via its own on_closed callback (from
+  // QuicConnectionClosed()/Close()), which already clears its
+  // pending_stream_removal_ directly (see QuictunServerConnection::Close()),
+  // so this is a no-op for those, but every connection that's merely lost
+  // one or more streams (and is otherwise still very much alive) needs this
+  // pass to actually free them.
+  for (const auto& kv : connections_) {
+    kv.second->CollectStreamGarbage();
+  }
   for (const QuicSocketAddress& peer_address : pending_removal_) {
     connections_.erase(peer_address);
   }
