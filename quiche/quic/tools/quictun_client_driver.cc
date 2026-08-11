@@ -205,12 +205,11 @@ void QuictunClientDriver::RemoveConnection(QuictunClientConnection* connection) 
 }
 
 void QuictunClientDriver::CollectGarbage() {
-  // Per-stream cleanup first -- see QuictunServerDriver::CollectGarbage()'s
-  // identical comment for why this needs to run for every still-live
-  // connection here, not just the ones about to be erased below.
-  for (const auto& kv : connections_) {
-    kv.first->CollectStreamGarbage();
-  }
+  // Per-stream cleanup no longer needs anything from here: each
+  // QuictunClientConnection now drives its own stream_garbage_alarm_ (see
+  // its class comment), mirroring how real QUICHE's QuicSession cleans up
+  // closed_streams_ via its own alarm rather than something external
+  // polling it. This method only ever handled whole-connection removal.
   for (QuictunClientConnection* connection : pending_removal_) {
     connections_.erase(connection);
   }

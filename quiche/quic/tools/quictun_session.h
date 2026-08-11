@@ -156,6 +156,23 @@ class QUICHE_EXPORT QuictunSessionBase : public QuicSession,
     stream_delegates_[id] = delegate;
   }
 
+  // Detaches whatever delegate is currently attached to stream `id`, if
+  // any. Must be called synchronously, as part of the same step that takes
+  // that delegate out of whatever container owns it (e.g.
+  // QuictunClientConnection::stream_tcps_) -- not deferred to some later
+  // poll -- so there is never a window where this session's own routing
+  // table still points at a delegate whose owner has already decided to
+  // destroy it. Mirrors real QUICHE's own QuicSession: stream_map_ (the
+  // routing table) and the QuicStream objects it routes to are the exact
+  // same data -- moving a stream out via PrepareStreamForDestruction()
+  // removes it from stream_map_ in that same call, so there's no separate
+  // "routing table entry" that could ever go stale. QuictunSessionBase
+  // can't quite match that structurally (the delegate here is a distinct
+  // object from the QuictunStream that owns the map entry -- QuictunTunnel
+  // vs QuictunStream), but achieves the same invariant by requiring this
+  // call at the same synchronous point.
+  void ClearStreamDelegate(QuicStreamId id) { stream_delegates_.erase(id); }
+
   // Invoked synchronously, exactly once per stream, the moment
   // CreateStream() actually creates it -- whether that's an incoming
   // stream (the server side, via CreateIncomingStream() below, itself

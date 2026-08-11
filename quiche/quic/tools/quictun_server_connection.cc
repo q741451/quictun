@@ -26,6 +26,28 @@
 
 namespace quic {
 
+namespace {
+
+// Fires stream_garbage_alarm_ -- see that member's comment. Mirrors
+// DeleteSessionsAlarm in quic_dispatcher.cc exactly, one level down
+// (per-connection stream cleanup instead of per-dispatcher session
+// cleanup).
+class StreamGarbageAlarmDelegate : public QuicAlarm::DelegateWithoutContext {
+ public:
+  explicit StreamGarbageAlarmDelegate(QuictunServerConnection* connection)
+      : connection_(connection) {}
+  StreamGarbageAlarmDelegate(const StreamGarbageAlarmDelegate&) = delete;
+  StreamGarbageAlarmDelegate& operator=(const StreamGarbageAlarmDelegate&) =
+      delete;
+
+  void OnAlarm() override { connection_->CollectStreamGarbage(); }
+
+ private:
+  QuictunServerConnection* const connection_;
+};
+
+}  // namespace
+
 std::unique_ptr<QuictunServerConnection> QuictunServerConnection::Create(
     QuicEventLoop* event_loop, QuicConnectionHelperInterface* helper,
     QuicAlarmFactory* alarm_factory, SocketFactory* socket_factory,
@@ -113,6 +135,11 @@ QuictunServerConnection::QuictunServerConnection(
       [this](QuicStreamId id) { OnNewStream(id); });
   session_->Initialize();
 
+  // See closed_stream_targets_/stream_garbage_alarm_'s comments -- mirrors
+  // QuicSession's own closed_streams_clean_up_alarm_ construction exactly.
+  stream_garbage_alarm_.reset(
+      alarm_factory->CreateAlarm(new StreamGarbageAlarmDelegate(this)));
+
   bool registered = event_loop_->RegisterSocket(
       *udp_fd_, kSocketEventReadable | kSocketEventWritable, this);
   QUICHE_DCHECK(registered);
@@ -166,13 +193,13 @@ void QuictunServerConnection::Close() {
   }
   stream_targets_.clear();
   key_read_buffers_.clear();
-  // Any ids still pending from a stream's on_closed callback that fired
-  // before this Close() are now moot -- their StreamTarget entries are
-  // already gone via the clear() above, and CollectStreamGarbage() erasing
-  // an already-absent key is a harmless no-op anyway, but clearing here
-  // avoids leaving stale ids sitting in the vector for this (now-closed,
-  // soon to be destroyed by the driver's own deferred cleanup) connection.
-  pending_stream_removal_.clear();
+  // Same idea as QuicSession::OnConnectionClosed() cancelling its own
+  // closed_streams_clean_up_alarm_: whatever's sitting in
+  // closed_stream_targets_ is destroyed right here (this whole connection,
+  // and everything it owns, is going away regardless), so there's no
+  // further need for the alarm to fire and do it again.
+  closed_stream_targets_.clear();
+  stream_garbage_alarm_->Cancel();
   event_loop_->UnregisterSocket(*udp_fd_);
   std::function<void(QuictunServerConnection*)> on_closed = std::move(on_closed_);
   if (on_closed) {
@@ -181,17 +208,11 @@ void QuictunServerConnection::Close() {
 }
 
 void QuictunServerConnection::CollectStreamGarbage() {
-  // See pending_stream_removal_'s comment and the on_closed callback in
-  // StartTunnelForStream() for why this can't happen synchronously from
-  // within that callback. This is the actual erase() -- which destroys the
-  // StreamTarget, and with it the QuictunTunnel and target_socket -- now
-  // safely outside any tunnel's own call stack (called from
-  // QuictunServerDriver::CollectGarbage(), once per event-loop iteration,
-  // for every still-live connection).
-  for (QuicStreamId id : pending_stream_removal_) {
-    stream_targets_.erase(id);
-  }
-  pending_stream_removal_.clear();
+  // See closed_stream_targets_'s comment. This is the actual destruction --
+  // of the StreamTarget, and with it the QuictunTunnel and target_socket --
+  // now safely outside any tunnel's own call stack (this only ever runs
+  // from stream_garbage_alarm_ firing).
+  closed_stream_targets_.clear();
 }
 
 void QuictunServerConnection::OnConnectionClosed(
@@ -411,16 +432,30 @@ void QuictunServerConnection::StartTunnelForStream(QuicStreamId id,
         // This callback runs from inside QuictunTunnel::Close() -- a member
         // function of the very QuictunTunnel that target.tunnel (a
         // unique_ptr) owns -- which keeps running after this callback
-        // returns (see its own comment). So this must NOT erase() the
-        // StreamTarget here: that would destroy the QuictunTunnel object
-        // out from under its own still-executing Close(), a real
-        // use-after-free (confirmed via direct reproduction -- see
-        // CollectStreamGarbage()'s comment). Only do the parts that don't
-        // destroy `this`'s tunnel; defer the actual erase() to
-        // CollectStreamGarbage(), same pattern as
-        // QuicDispatcher::OnConnectionClosed()/DeleteSessions() in real
-        // QUICHE (quic_dispatcher.cc) and as
-        // QuictunClientDriver::pending_removal_/CollectGarbage().
+        // returns (see its own comment). So this must NOT synchronously
+        // destroy the StreamTarget here: that would destroy the
+        // QuictunTunnel object out from under its own still-executing
+        // Close(), a real use-after-free (confirmed via direct
+        // reproduction). Mirrors QuicSession::PrepareStreamForDestruction()
+        // exactly (quic_session.cc): move the StreamTarget out of the live
+        // map into closed_stream_targets_ (ownership transferred, object
+        // not destroyed yet) and arm stream_garbage_alarm_ to actually
+        // destroy it outside this call stack.
+        //
+        // ClearStreamDelegate() happens in this exact same step, not
+        // deferred alongside the real destruction: a second, independent
+        // bug (found via a real core dump on real hardware, not just code
+        // reading) was that session_->stream_delegates_[id] kept pointing
+        // at this StreamTarget's QuictunTunnel after CollectStreamGarbage()
+        // destroyed it, with nothing to synchronize the two -- any QUIC
+        // frame for this stream id arriving in that window (a late
+        // retransmission, the peer still writing) called
+        // QuictunSessionBase::OnStreamDataAvailable() straight into freed
+        // memory. Clearing the delegate synchronously here, at the same
+        // point the StreamTarget leaves the live map, closes that window
+        // entirely: from this line on, session_ no longer has any route to
+        // this tunnel at all, regardless of when (or whether) the alarm
+        // below actually gets to fire.
         auto it = stream_targets_.find(id);
         if (it == stream_targets_.end()) {
           return;
@@ -430,7 +465,12 @@ void QuictunServerConnection::StartTunnelForStream(QuicStreamId id,
         } else {
           it->second.target_socket_disconnected = true;
         }
-        pending_stream_removal_.push_back(id);
+        session_->ClearStreamDelegate(id);
+        closed_stream_targets_.push_back(std::move(it->second));
+        stream_targets_.erase(it);
+        if (!stream_garbage_alarm_->IsSet()) {
+          stream_garbage_alarm_->Set(event_loop_->GetClock()->ApproximateNow());
+        }
       });
   target.tunnel->SetPendingSeedData(std::move(leftover));
 

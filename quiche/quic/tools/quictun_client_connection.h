@@ -17,6 +17,7 @@
 #include "quiche/quic/core/crypto/quic_crypto_client_config.h"
 #include "quiche/quic/core/io/quic_event_loop.h"
 #include "quiche/quic/core/io/socket.h"
+#include "quiche/quic/core/quic_alarm.h"
 #include "quiche/quic/core/quic_alarm_factory.h"
 #include "quiche/quic/core/quic_config.h"
 #include "quiche/quic/core/quic_connection.h"
@@ -95,15 +96,11 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   QuicConnection* connection() const { return connection_.get(); }
   bool closed() const { return closed_; }
 
-  // Destroys the StreamTcp (and thus the QuictunTunnel and tcp_socket) for
-  // any stream whose tunnel closed itself since the last call -- mirrors
-  // QuictunServerConnection::CollectStreamGarbage() exactly (see its
-  // comment for why this can't happen synchronously from within a tunnel's
-  // own on_closed callback). Must be called once per event-loop iteration,
-  // from outside any callback originating from this connection or any of
-  // its tunnels -- see QuictunClientDriver::CollectGarbage(), which is what
-  // actually calls this, once per iteration, for every still-live
-  // connection.
+  // Actually destroys every StreamTcp sitting in closed_stream_tcps_ -- see
+  // that member's comment. Called only from stream_garbage_alarm_ (public
+  // for the same reason real QUICHE's QuicDispatcher::DeleteSessions() is:
+  // its own alarm delegate, a plain top-level class, needs to call it).
+  // Never called directly by anything else.
   void CollectStreamGarbage();
 
   // QuicSession::Visitor:
@@ -191,9 +188,22 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   quiche::QuicheBufferAllocator* const buffer_allocator_;
   std::deque<PendingTcp> pending_tcps_;
   absl::flat_hash_map<QuicStreamId, StreamTcp> stream_tcps_;
-  // See QuictunServerConnection::pending_stream_removal_'s comment --
-  // identical rationale, mirrored one class over.
-  std::vector<QuicStreamId> pending_stream_removal_;
+
+  // StreamTcps moved out of stream_tcps_ once their tunnel has called its
+  // on_closed callback (from StartTunnel()), still fully alive (ownership
+  // merely transferred, not destroyed) until stream_garbage_alarm_ fires
+  // and actually clears this vector. See
+  // QuictunServerConnection::closed_stream_targets_'s comment -- identical
+  // rationale, mirrored one class over (and, in turn, mirrors real
+  // QUICHE's own QuicSession::closed_streams_/
+  // closed_streams_clean_up_alarm_ in quic_session.cc).
+  std::vector<StreamTcp> closed_stream_tcps_;
+
+  // Fires once, immediately but outside the current call stack, to run
+  // CollectStreamGarbage() and actually destroy whatever's sitting in
+  // closed_stream_tcps_. See QuictunServerConnection::
+  // stream_garbage_alarm_'s comment.
+  std::unique_ptr<QuicAlarm> stream_garbage_alarm_;
 
   // Passed to each stream's QuictunTunnel (see its own idle_alarm_ comment)
   // -- read from `config` at construction time since it isn't otherwise
