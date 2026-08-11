@@ -13,8 +13,9 @@ bazel build -c opt //quiche:quictun_client //quiche:quictun_server
 
 | Script | Covers |
 | --- | --- |
-| `server_chaos_test.py` | Long-running server vs. many chaotic clients, across 5 network conditions. |
-| `client_chaos_test.py` | Long-running client while the server gets killed/restarted underneath it. |
+| `server_chaos_test.py` | Long-running server vs. many chaotic clients, across 5 network conditions. `--quic-conn=N` (default 0) runs every "real" client pooled. |
+| `client_chaos_test.py` | Long-running client while the server gets killed/restarted underneath it. `--quic-conn=N` (default 0) runs the observed + noise clients pooled. |
+| `pool_reentrancy_test.py` | Deterministic (not incidental) regression for the three `--quic_conn` pooling reentrancy crashes fixed in `715a5f926`: concurrent TCP bursts through one `quictun_client` while `quictun_server` gets killed mid-burst, repeatedly. `--quic-conn=N` (default 1). |
 | `writeblock_fault_test.py` | Deterministic fault injection for the write-blocked-forever bug (`RearmOnBlockPacketWriter`). Needs `-DQUICTUN_TEST_BUILD` (see below) to mean anything. |
 | `target_unreachable_test.py` | `--target` refusing the TCP connect. |
 | `dualstack_ipv6_test.py` | IPv6 dual-stack `--listen=[::]` reached by an IPv4 peer. |

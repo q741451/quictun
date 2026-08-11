@@ -42,6 +42,56 @@ for cond in $CONDITIONS; do
   echo "exit=$? for client_chaos_test.py --condition=$cond" | tee -a "$RESULTS"
 done
 
+# --quic_conn pooling, interleaved into a deliberately adversarial subset
+# of conditions rather than the full 5x2 cross (keeps the matrix's run
+# time sane) -- each pairing targets a specific pooling-path risk area:
+#   clean+1, clean+3          baseline pooling sanity, light vs. heavy
+#   quic_bad+3                loss/retransmission storms while several
+#                              tunnels genuinely share one connection
+#                              (heaviest fan-in for the reentrant-Close()
+#                              paths fixed in 715a5f926)
+#   client_tcp_bad+1          TCP-side resets while pooled (StartTunnel()
+#                              reentrancy fix's exact territory)
+#   server_tcp_bad+3          target-side flakiness while heavily pooled
+#                              (started_ flag's async-dial-out race)
+#   combo_all_bad+1/3         everything bad at once, light and heavy
+#                              pooling both
+CLIENT_POOL_COMBOS="clean:1 clean:3 quic_bad:3 client_tcp_bad:1 server_tcp_bad:3 combo_all_bad:1 combo_all_bad:3"
+for combo in $CLIENT_POOL_COMBOS; do
+  cond="${combo%%:*}"
+  qc="${combo##*:}"
+  echo "=== client_chaos_test.py --condition=$cond --quic-conn=$qc ===" | tee -a "$RESULTS"
+  python3 -u client_chaos_test.py --condition="$cond" --quic-conn="$qc" >> "$RESULTS" 2>&1
+  echo "exit=$? for client_chaos_test.py --condition=$cond --quic-conn=$qc" | tee -a "$RESULTS"
+done
+
+# Same pooling dimension on the server side, a smaller sample (each
+# server_chaos_test.py round already fans multiple concurrent TCP flows
+# into every "real" client, so pooling's effect shows up even with fewer
+# condition pairings than the client side needed).
+SERVER_POOL_COMBOS="clean:1 quic_bad:3 combo_all_bad:1"
+for combo in $SERVER_POOL_COMBOS; do
+  cond="${combo%%:*}"
+  qc="${combo##*:}"
+  echo "=== server_chaos_test.py --condition=$cond --quic-conn=$qc ===" | tee -a "$RESULTS"
+  python3 -u server_chaos_test.py --condition="$cond" --quic-conn="$qc" >> "$RESULTS" 2>&1
+  echo "exit=$? for server_chaos_test.py --condition=$cond --quic-conn=$qc" | tee -a "$RESULTS"
+done
+
+# Deterministic reentrancy regression, targeted (not incidental like the
+# chaos suites above) at the exact crashes fixed in 715a5f926: concurrent
+# TCP bursts through quictun_client while quictun_server gets killed mid-
+# burst, repeatedly -- see pool_reentrancy_test.py's own top comment.
+# quic-conn=0 is a control (same trigger mechanism, but no sibling tunnel
+# for the cross-tunnel reentrancy class of those fixes to even be
+# possible against) -- 1 and 3 are two different pool sizes actually
+# exercising it.
+for qc in 0 1 3; do
+  echo "=== pool_reentrancy_test.py --quic-conn=$qc ===" | tee -a "$RESULTS"
+  python3 -u pool_reentrancy_test.py --quic-conn="$qc" >> "$RESULTS" 2>&1
+  echo "exit=$? for pool_reentrancy_test.py --quic-conn=$qc" | tee -a "$RESULTS"
+done
+
 # Deterministic write-block fault injection (see writeblock_fault_test.py's
 # own top-of-file comment for why this exists as a separate, non-network
 # dimension): covers the write-blocked-forever bug fixed by

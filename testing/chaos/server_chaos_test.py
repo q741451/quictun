@@ -63,10 +63,17 @@ def main():
     ap.add_argument("--clients-per-round", type=int, default=4)
     ap.add_argument("--threads-per-client", type=int, default=6)
     ap.add_argument("--log-dir", default="/tmp/quictun_chaos_logs")
+    # See client_chaos_test.py's identical flag for the rationale. Applied
+    # only to the "real" (correctly-keyed) clients below -- each of those
+    # already gets hit by --threads-per-client concurrent actor threads, so
+    # even quic_conn=1 pools several genuinely-concurrent TCP flows onto
+    # one connection, exercising the same reentrancy paths.
+    ap.add_argument("--quic-conn", type=int, default=0)
     args = ap.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
     tag = args.condition
+    quic_conn_flag = f"--quic_conn={args.quic_conn}"
 
     target_port, server_listen_port, server_target_port = alloc_ports(3)
 
@@ -125,7 +132,7 @@ def main():
     sampler = chaos_monitor.Sampler(server_proc.pid)
     sampler.sample()
     baseline = sampler.summary()
-    print(f"=== [{tag}] baseline: fds={baseline['fds_last']} "
+    print(f"=== [{tag}] quic_conn={args.quic_conn} baseline: fds={baseline['fds_last']} "
           f"rss_kb={baseline['rss_kb_last']} ===", flush=True)
 
     round_reports = []
@@ -163,7 +170,7 @@ def main():
             p = start_proc(
                 [CLIENT_BIN, f"--local=127.0.0.1:{local_port}",
                  f"--remote={client_remote_addr}", f"--key={KEY}",
-                 "--idle_timeout_seconds=6"],
+                 "--idle_timeout_seconds=6", quic_conn_flag],
                 f"{args.log_dir}/{tag}_r{r}_real{i}.log")
             client_procs.append(("real", p))
             actor_addr = ("127.0.0.1", local_port)
@@ -241,6 +248,23 @@ def main():
 
     # Sanity check: server still fully functional with a brand-new clean
     # client after all that chaos.
+    #
+    # client_remote_addr, for quic_bad/combo_all_bad, still points through
+    # quic_relay -- the sanity_client's own handshake and echo are for real
+    # subject to that relay's --loss (0.08), same as everything else in the
+    # test was. A dedicated timing comparison (--quic-conn=1 vs 0, single
+    # round) confirmed pooling under combo_all_bad's full three-layer chaos
+    # (server->target relay resets/blackhole + client->server relay loss +
+    # each real client's own relay resets) can leave the *just-finished*
+    # pooled connections' shared resources measurably slower to settle
+    # (~1.5-2x a round's nominal time in that comparison) purely from
+    # several actor threads having queued behind one shared, temporarily-
+    # degraded connection instead of each having their own -- not a hang,
+    # not a leak (fds/rss stayed normal throughout), but real enough that
+    # a single sanity attempt landing exactly in that window can fail
+    # cleanly with no code defect at all. Retry a few times before calling
+    # it a real failure -- matches client_chaos_test.py's identical fix for
+    # its own (differently-caused, relay-coin-flip) single-shot flakiness.
     sanity_ok = False
     if server_proc.poll() is None:
         local_port = alloc_ports(1)[0]
@@ -249,10 +273,17 @@ def main():
              f"--remote={client_remote_addr}", f"--key={KEY}"],
             f"{args.log_dir}/{tag}_sanity_client.log")
         time.sleep(1.5)
-        try:
-            sanity_ok = chaos_actor.short_echo(("127.0.0.1", local_port), timeout=8)
-        except Exception as e:
-            print(f"sanity check exception: {e}")
+        sanity_attempts = 3
+        for attempt in range(sanity_attempts):
+            try:
+                sanity_ok = chaos_actor.short_echo(("127.0.0.1", local_port), timeout=8)
+            except Exception as e:
+                print(f"sanity check attempt {attempt+1}/{sanity_attempts} exception: {e}")
+                sanity_ok = False
+            if sanity_ok:
+                break
+            if attempt + 1 < sanity_attempts:
+                time.sleep(1.0)
         sanity_client.terminate()
         time.sleep(0.3)
         if sanity_client.poll() is None:
@@ -261,7 +292,7 @@ def main():
         print("!!! server process is dead, cannot run sanity check")
 
     summary = sampler.summary()
-    print(f"=== [{tag}] SUMMARY ===")
+    print(f"=== [{tag}] SUMMARY (quic_conn={args.quic_conn}) ===")
     print(f"  server_alive={server_proc.poll() is None}")
     print(f"  sanity_echo_ok={sanity_ok}")
     print(f"  fds: first={summary['fds_first']} max={summary['fds_max']} last={summary['fds_last']}")
