@@ -121,13 +121,32 @@ void QuictunTunnel::OnStreamCanWriteMore(QuicStreamId /*id*/) {
   // see ReceiveComplete()'s empty-data branch, which no longer needs to
   // assume there might be unflushed data sitting around from a *previous*
   // read (flush_close_alarm_ still guards the *current*, just-written fin).
+  //
+  // A looser CanWriteNewData()-based check (QUICHE's own ~8KiB buffered_
+  // data_threshold_, reused instead of this stricter "fully drained" rule)
+  // was tried during a --quic_conn pooling stall investigation, on the
+  // theory that this strict rule's higher re-enqueue churn was starving
+  // other streams sharing a connection. It wasn't -- the stall's actual
+  // cause turned out to be unrelated (see QuictunStreamDelegate::
+  // OnStreamGone()'s comment in quictun_session.h) -- and the looser check
+  // was reverted: ReceiveAsync() (quictun_accepted_tcp_socket.cc) isn't
+  // purely event-driven, it calls back into ReceiveComplete() synchronously
+  // inline whenever the kernel's TCP receive buffer already has data ready,
+  // so BeginReadFromTcp() -> ReceiveComplete() -> BeginReadFromTcp() forms a
+  // real synchronous recursion, not just a chain of event-loop turns. This
+  // strict, harder-to-satisfy check breaks that recursion sooner (needs the
+  // whole just-written chunk fully off the stream's own buffer, not just
+  // under an 8KiB cushion); the looser one let it run measurably longer per
+  // burst, on a low-RTT/high-throughput path more than this session's own
+  // real-network testing exercised -- not worth the risk for a check that
+  // was never actually fixing anything.
   if (tcp_receive_in_flight_ || stream_->HasBufferedData()) {
     return;
   }
   BeginReadFromTcp();
 }
 
-void QuictunTunnel::OnStreamClosed(QuicStreamId /*id*/) {
+void QuictunTunnel::OnStreamGone(QuicStreamId /*id*/) {
   if (closed_) {
     return;
   }
@@ -310,13 +329,44 @@ void QuictunTunnel::MaybeFinalizeClose() {
     // close anyway, same tradeoff idle_timeout makes at a coarser grain.
     QUICHE_LOG(WARNING) << "Giving up waiting for stream flush after "
                         << kMaxFlushCloseWait << ", closing anyway"
-                        << " (HasBufferedData=" << stream_->HasBufferedData()
+                        << " (stream_id=" << stream_->id()
+                        << ", HasBufferedData=" << stream_->HasBufferedData()
                         << ", IsWaitingForAcks=" << stream_->IsWaitingForAcks()
                         << ")";
     if (flush_close_alarm_) {
       flush_close_alarm_->Cancel();
     }
-    Close("tunnel finished (flush wait exceeded)", /*reset_stream=*/false);
+    // reset_stream=true, not false: unlike the clean-finish branch above,
+    // this stream never actually finished -- HasBufferedData() is still
+    // true here. Closing without a real QUIC-level Reset() would leave
+    // this stream's already-sent-but-never-consumed bytes permanently
+    // counted against this connection's session-level flow control
+    // window -- nothing on either end ever tells the peer those bytes can
+    // be released, because a clean FIN never completed and no RST_STREAM
+    // was ever sent either. Real QUICHE's QuicStream::OnStreamReset() has
+    // the peer advance its flow control to the RST frame's Final Size
+    // field the moment it arrives, even though it never got (and now
+    // never will get) the rest of the data -- freeing the corresponding
+    // session-level window on this end once the peer's resulting
+    // WINDOW_UPDATE arrives, exactly the mechanism IETF QUIC's RST_STREAM
+    // Final Size field exists for. (smux, kcptun's own mux layer, enforces
+    // the identical invariant from a different angle: Stream.Close()
+    // synchronously calls session.streamClosed(), which immediately
+    // returns that stream's still-held tokens to the session's shared
+    // bucket -- a stream ending and the session-level resources it held
+    // are never allowed to disagree about the stream's fate, in either
+    // implementation.) This is a real, independent correctness fix worth
+    // keeping on its own merits -- but investigation later showed it is
+    // NOT what was causing a separate, reproduced --quic_conn pooling
+    // stall (some streams on a shared connection permanently starved of
+    // write opportunities while the connection's own session-level flow
+    // control and congestion window both stayed healthy). That stall's
+    // actual cause was a QuictunSessionBase::OnStreamClosed(QuicStreamId)
+    // silently colliding with, and shadowing, QuicSession's own unrelated
+    // same-signature virtual of the same name -- see
+    // QuictunStreamDelegate::OnStreamGone()'s comment in quictun_session.h
+    // for the full story and the actual fix.
+    Close("tunnel finished (flush wait exceeded)", /*reset_stream=*/true);
     return;
   }
   if (!flush_close_alarm_) {
@@ -368,6 +418,35 @@ void QuictunTunnel::Close(absl::string_view reason, bool reset_stream) {
   }
   QUICHE_LOG(INFO) << "Closing quictun tunnel: " << reason
                    << ", reset_stream=" << reset_stream;
+  // Tell the sequencer to give up on any not-yet-Read() bytes it's still
+  // holding for this stream, whichever way this Close() is happening --
+  // mirrors real QUICHE's own pattern for abandoning a stream early (e.g.
+  // QuicSimpleServerStream::SendErrorResponse(): "if (!reading_stopped())
+  // StopReading();" before closing). Without this, those buffered-but-
+  // unread bytes are never counted as consumed
+  // (QuicStreamSequencer::FlushBufferedFrames(), only reachable via
+  // StopReading(), is the only path that calls QuicStream::
+  // AddBytesConsumed() for data the application itself never actually
+  // Read() -- plain CloseReadSide(), which is all Reset() below triggers
+  // on its own, only ReleaseBuffer()s the memory, without ever advancing
+  // that accounting) -- permanently starving this connection's own
+  // session-level flow control of the credit those bytes represent, since
+  // nothing ever tells the peer they can stop being counted against it.
+  // A real, independent correctness fix worth keeping on its own merits
+  // (see the reset_stream=true comment above for the matching send-side
+  // half of the same invariant) -- but not, per later investigation, what
+  // was causing a separate, reproduced --quic_conn pooling stall; see that
+  // comment for where the actual cause -- and fix -- ended up being.
+  // Harmless to call unconditionally here (covers the reset_stream=false
+  // paths too, e.g. TCP-side errors that still leave unread QUIC-side data
+  // sitting in the sequencer): a no-op if this stream already finished
+  // reading (FlushBufferedFrames() flushes zero bytes), and StopReading()
+  // itself is purely local bookkeeping, not a network write, so it doesn't
+  // need connection()->connected() guarding the way stream_->Reset() below
+  // does.
+  if (!stream_->reading_stopped()) {
+    stream_->StopReading();
+  }
   // socket_ can still be null here on the server path (see the constructor/
   // SetSocket()'s comments): a tunnel can close for reasons unrelated to the
   // target dial-out (e.g. the QUIC stream itself resetting) before that

@@ -70,7 +70,32 @@ class QUICHE_EXPORT QuictunStreamDelegate {
 
   // Stream `id` has closed (FIN both ways, reset, or the connection
   // closed). The delegate must not touch that stream afterward.
-  virtual void OnStreamClosed(QuicStreamId id) = 0;
+  //
+  // Deliberately not named OnStreamClosed(QuicStreamId): QuicSession
+  // itself already declares a *different*, unrelated virtual
+  // OnStreamClosed(QuicStreamId stream_id) (quic_session.h) -- real
+  // QUICHE's own per-stream-close bookkeeping hook (stream_map_ cleanup,
+  // zombie-stream tracking, and critically,
+  // InsertLocallyClosedStreamsHighestOffset(), the entry point for
+  // OnFinalByteOffsetReceived()'s connection-level flow control
+  // self-heal). QuictunSessionBase inherits both QuicSession and this
+  // interface; before this rename, an identically-named-and-signatured
+  // override here satisfied both base classes' virtual slots at once,
+  // silently shadowing QuicSession's real implementation -- confirmed via
+  // a real repro (TEMP_DIAG counters: InsertLocallyClosedStreamsHighestOffset
+  // called 0 times, every OnFinalByteOffsetReceived() self-heal attempt
+  // missing its bookkeeping entry) that this was the actual cause of a
+  // --quic_conn pooling stall: session-level flow control credit for
+  // data already in flight when a stream is locally abandoned (e.g. the
+  // client giving up mid-download) was never reconciled once the peer's
+  // own RST_STREAM later arrived with the true final size, permanently
+  // leaking a little credit per early-abandoned stream until the whole
+  // connection's shared window was exhausted. Introduced by the
+  // --quic_conn commit itself (f3e76043d) -- the original quictun design
+  // had this take no arguments at all (one stream per session, no `id`
+  // needed), which didn't collide; adding pooling required threading
+  // `id` through, and that's what made the signature collide.
+  virtual void OnStreamGone(QuicStreamId id) = 0;
 };
 
 // A QUIC stream carrying exactly one TCP connection's raw byte stream --
@@ -200,7 +225,7 @@ class QUICHE_EXPORT QuictunSessionBase : public QuicSession,
   // (if any) is attached to the stream the event is actually for.
   void OnStreamDataAvailable(QuicStreamId id) override;
   void OnStreamCanWriteMore(QuicStreamId id) override;
-  void OnStreamClosed(QuicStreamId id) override;
+  void OnStreamGone(QuicStreamId id) override;
 
   std::string alpn_;
   absl::flat_hash_map<QuicStreamId, QuictunStream*> streams_;

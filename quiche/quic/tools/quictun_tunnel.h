@@ -91,7 +91,7 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   // these are invoked with is always stream_->id() -- ignored.
   void OnStreamDataAvailable(QuicStreamId id) override;
   void OnStreamCanWriteMore(QuicStreamId id) override;
-  void OnStreamClosed(QuicStreamId id) override;
+  void OnStreamGone(QuicStreamId id) override;
 
   // ConnectingClientSocket::AsyncVisitor (TCP -> QUIC direction). On the
   // client side, where `socket` is already connected at construction and
@@ -219,7 +219,7 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   // connect_tunnel.cc treats OnClientStreamClose(). Without this, a peer
   // that closes first while the TCP target is itself waiting for us to hang
   // up (e.g. any simple request/response service) leaves both ends open
-  // forever: nothing ever half-closes, so OnStreamClosed() never fires, and
+  // forever: nothing ever half-closes, so OnStreamGone() never fires, and
   // the connection accumulates as a leaked UDP+TCP socket pair -- this is
   // what caused permanently-100%-CPU-under-bursty-load, since short-lived
   // connections routinely have the local side finish first.

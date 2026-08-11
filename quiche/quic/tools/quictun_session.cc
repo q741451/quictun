@@ -16,6 +16,7 @@
 #include "quiche/quic/core/quic_crypto_client_stream.h"
 #include "quiche/quic/core/quic_crypto_server_stream_base.h"
 #include "quiche/quic/core/quic_error_codes.h"
+#include "quiche/quic/core/quic_stream_priority.h"
 #include "quiche/quic/core/quic_stream_sequencer.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/quic_utils.h"
@@ -72,6 +73,25 @@ QuictunStream::QuictunStream(QuicStreamId id, QuicSession* session,
                                           session->version())),
       delegate_(delegate) {
   sequencer()->set_level_triggered(true);
+  // incremental=true, not the RFC 9218 default (false): a quictun stream is
+  // raw TCP bytes arriving continuously for as long as the tunnel lives --
+  // there's no "whole resource" that only becomes useful once fully
+  // delivered (what incremental=false/HTTP's default is actually for, e.g.
+  // a page's critical CSS/JS) -- matching the intent RFC 9218 defines this
+  // field for, the same way real QUICHE's own WebTransportStreamAdapter
+  // sidesteps this same "arbitrary continuous byte stream" question
+  // entirely with its own non-HTTP priority scheme. A correctness/intent
+  // fix on its own merits, kept even though it turned out NOT to be what
+  // actually mattered for a real, reproduced --quic_conn pooling stall
+  // (some streams enqueued into write_blocked_streams_ exactly once and
+  // never dequeued again): QuicWriteBlockedList only actually looks at
+  // this field when --quic_priority_respect_incremental is enabled, which
+  // it isn't here by default, so this alone changes no runtime behavior
+  // today. See quictun_tunnel.cc's BeginReadFromTcp()/ReceiveComplete()
+  // for the change that actually fixed that stall.
+  SetPriority(QuicStreamPriority(
+      HttpStreamPriority{HttpStreamPriority::kDefaultUrgency,
+                         /*incremental=*/true}));
 }
 
 void QuictunStream::OnDataAvailable() {
@@ -91,7 +111,7 @@ void QuictunStream::OnCanWriteNewData() {
 
 void QuictunStream::OnClose() {
   QuicStream::OnClose();
-  delegate_->OnStreamClosed(id());
+  delegate_->OnStreamGone(id());
 }
 
 size_t QuictunStream::Read(absl::Span<char> buffer, bool* fin) {
@@ -199,17 +219,17 @@ void QuictunSessionBase::OnStreamCanWriteMore(QuicStreamId id) {
   }
 }
 
-void QuictunSessionBase::OnStreamClosed(QuicStreamId id) {
+void QuictunSessionBase::OnStreamGone(QuicStreamId id) {
   auto it = stream_delegates_.find(id);
   if (it != stream_delegates_.end()) {
     QuictunStreamDelegate* delegate = it->second;
     // Erase before notifying: this stream is gone either way, and the
-    // delegate's own OnStreamClosed() is exactly the kind of place that
+    // delegate's own OnStreamGone() is exactly the kind of place that
     // might turn around and query streams()/try to detach itself again.
     stream_delegates_.erase(it);
     streams_.erase(id);
     if (delegate != nullptr) {
-      delegate->OnStreamClosed(id);
+      delegate->OnStreamGone(id);
     }
   } else {
     streams_.erase(id);

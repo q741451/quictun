@@ -143,7 +143,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   // the QuictunTunnel that owns it from then on.
   void OnStreamDataAvailable(QuicStreamId id) override;
   void OnStreamCanWriteMore(QuicStreamId /*id*/) override {}
-  void OnStreamClosed(QuicStreamId id) override;
+  void OnStreamGone(QuicStreamId id) override;
 
  private:
   // Per-stream state from the moment a stream authenticates onward: the

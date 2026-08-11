@@ -482,10 +482,10 @@ void QuictunServerConnection::StartTunnelForStream(QuicStreamId id,
   target.target_socket->ConnectAsync();
 }
 
-void QuictunServerConnection::OnStreamClosed(QuicStreamId id) {
+void QuictunServerConnection::OnStreamGone(QuicStreamId id) {
   // Only relevant during a stream's pre-tunnel auth phase (once a
   // QuictunTunnel exists for it, that tunnel -- not this class -- is the
-  // stream's delegate, and handles its own OnStreamClosed()). The stream
+  // stream's delegate, and handles its own OnStreamGone()). The stream
   // closing before finishing authentication needs no further action beyond
   // dropping its now-pointless read buffer -- there is no --target
   // dial-out to clean up yet at this stage.
