@@ -140,7 +140,7 @@ QuictunClientConnection* QuictunClientDriver::CreateNewConnection() {
           connection_id_generator_, buffer_allocator_, config_template_,
           server_id_, remote_address_, crypto_config_.get(), options_.psk,
           congestion_control_, options_.so_txtime,
-          options_.udp_socket_buffer_bytes,
+          options_.udp_socket_buffer_bytes, /*poolable=*/options_.quic_conn > 0,
           [this](QuictunClientConnection* c) { RemoveConnection(c); });
   if (connection == nullptr) {
     return nullptr;

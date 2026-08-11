@@ -67,6 +67,7 @@ void QuictunTunnel::SetSocket(ConnectingClientSocket* socket) {
 }
 
 void QuictunTunnel::Start(absl::string_view seed_quic_to_tcp_data) {
+  started_ = true;
   if (!seed_quic_to_tcp_data.empty()) {
     pending_to_tcp_.push_back(std::string(seed_quic_to_tcp_data));
   }
@@ -93,7 +94,27 @@ void QuictunTunnel::Start(absl::string_view seed_quic_to_tcp_data) {
 }
 
 void QuictunTunnel::OnStreamDataAvailable(QuicStreamId /*id*/) {
-  if (closed_) {
+  if (closed_ || !started_) {
+    // !started_: real repro, real crash -- on the server, this tunnel
+    // becomes stream_'s active delegate (StartTunnelForStream()) before
+    // the --target dial-out it's also the AsyncVisitor for has actually
+    // finished connecting (a real async operation, can take real time --
+    // see the class comment). If the peer sends more stream data before
+    // that dial-out's ConnectComplete() fires Start(), this fires first:
+    // MaybeFlushQuicToTcp() below only checks `socket_ == nullptr` to
+    // decide whether it's safe to use socket_ -- true for the client
+    // (whose socket_, once non-null, is by construction already
+    // connected -- see the constructor's comment) but *not* true here,
+    // where socket_ is set (SetSocket()) well before it's actually
+    // connected. Confirmed via a real repro (killing the server
+    // mid-restart under sustained connection churn) that falling through
+    // crashes on a QUICHE_CHECK in
+    // EventLoopConnectingClientSocket::SendInternal()
+    // (connect_status_ == ConnectStatus::kConnected). Safe to just wait:
+    // Start()'s own FillQueueFromStream() call (see its comment) already
+    // catches up on anything that arrived in this window, exactly the
+    // same way it already does for data that arrives even earlier, before
+    // this tunnel exists as stream_'s delegate at all.
     return;
   }
   FillQueueFromStream();
@@ -101,7 +122,15 @@ void QuictunTunnel::OnStreamDataAvailable(QuicStreamId /*id*/) {
 }
 
 void QuictunTunnel::OnStreamCanWriteMore(QuicStreamId /*id*/) {
-  if (closed_) {
+  if (closed_ || !started_) {
+    // !started_: same reasoning as OnStreamDataAvailable()'s identical
+    // check -- this can also reach BeginReadFromTcp() below, which has
+    // the same socket_==nullptr-isn't-enough gap on the server side.
+    // Nothing to catch up on here the way Start()'s own
+    // FillQueueFromStream() call does for OnStreamDataAvailable(): once
+    // Start() actually runs, BeginReadFromTcp()/MaybeFlushQuicToTcp()
+    // (called from Start() itself) pick up wherever things stand from
+    // scratch.
     return;
   }
   if (tcp_receive_done_) {

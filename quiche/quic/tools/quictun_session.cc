@@ -241,13 +241,21 @@ QuictunClientSession::QuictunClientSession(QuicConnection* connection,
                                            const QuicConfig& config,
                                            std::string alpn,
                                            const QuicServerId& server_id,
-                                           QuicCryptoClientConfig* crypto_config)
-    : QuictunSessionBase(connection, owner, config, std::move(alpn)) {
+                                           QuicCryptoClientConfig* crypto_config,
+                                           bool poolable)
+    : QuictunSessionBase(connection, owner, config, std::move(alpn)),
+      poolable_(poolable) {
   static NoOpProofHandler* handler = new NoOpProofHandler();
   crypto_stream_ = std::make_unique<QuicCryptoClientStream>(
       server_id, this, crypto_config->proof_verifier()->CreateDefaultContext(),
       crypto_config, /*proof_handler=*/handler,
       /*has_application_state=*/false);
+  // See ever_had_stream_'s comment/ShouldKeepConnectionAlive(). Internal to
+  // this class -- QuictunClientConnection doesn't use
+  // SetStreamCreatedCallback() itself, so this doesn't collide with
+  // anything an owner might also want to set here.
+  SetStreamCreatedCallback(
+      [this](QuicStreamId /*id*/) { ever_had_stream_ = true; });
 }
 
 QuictunServerSession::QuictunServerSession(

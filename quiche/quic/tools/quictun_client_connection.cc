@@ -54,7 +54,7 @@ std::unique_ptr<QuictunClientConnection> QuictunClientConnection::Create(
     const QuicServerId& server_id, const QuicSocketAddress& remote_address,
     QuicCryptoClientConfig* crypto_config, const std::string& psk,
     CongestionControlType congestion_control, bool so_txtime_enabled,
-    QuicByteCount udp_socket_buffer_bytes,
+    QuicByteCount udp_socket_buffer_bytes, bool poolable,
     std::function<void(QuictunClientConnection*)> on_closed) {
   absl::StatusOr<OwnedSocketFd> fd =
       CreateQuicUdpSocket(remote_address, udp_socket_buffer_bytes);
@@ -85,7 +85,7 @@ std::unique_ptr<QuictunClientConnection> QuictunClientConnection::Create(
       event_loop, std::move(udp_fd), *self_address, remote_address, helper,
       alarm_factory, connection_id_generator, buffer_allocator, config,
       server_id, crypto_config, psk, congestion_control, so_txtime_enabled,
-      std::move(on_closed)));
+      poolable, std::move(on_closed)));
 }
 
 QuictunClientConnection::QuictunClientConnection(
@@ -97,7 +97,7 @@ QuictunClientConnection::QuictunClientConnection(
     quiche::QuicheBufferAllocator* buffer_allocator, const QuicConfig& config,
     const QuicServerId& server_id, QuicCryptoClientConfig* crypto_config,
     const std::string& psk, CongestionControlType congestion_control,
-    bool so_txtime_enabled,
+    bool so_txtime_enabled, bool poolable,
     std::function<void(QuictunClientConnection*)> on_closed)
     : event_loop_(event_loop),
       udp_fd_(std::move(udp_fd)),
@@ -118,7 +118,7 @@ QuictunClientConnection::QuictunClientConnection(
 
   session_ = std::make_unique<QuictunClientSession>(
       connection_.get(), /*owner=*/this, config, "quictun/1", server_id,
-      crypto_config);
+      crypto_config, poolable);
   session_->SetCanOpenStreamCallback([this] { MaybeOpenStreams(); });
   session_->Initialize();
 
@@ -187,6 +187,40 @@ void QuictunClientConnection::StartTunnel(QuictunStream* stream,
   preamble.push_back(static_cast<char>(psk_.size() & 0xff));
   preamble.append(psk_);
   stream->WriteToStream(preamble, /*fin=*/false);
+  // WriteToStream() above can synchronously tear down this whole
+  // connection: a failing UDP write (e.g. --remote unreachable right this
+  // instant, routine during a peer restart) is something
+  // QuicConnection::OnWriteError() reacts to by synchronously closing the
+  // connection then and there, reentrantly, all the way up through
+  // OnConnectionClosed() -> Close() -- the identical mechanism already
+  // described in detail on QuictunTunnel::Close()'s own on_closed_-before-
+  // Reset() ordering comment. Close() (which sets closed_) always runs to
+  // completion before control returns here -- QuicConnection has its own
+  // in_close_connection_ reentrancy guard, so this can't recurse further
+  // -- including already queuing *this* connection for destruction via
+  // on_closed_. But it ran with stream_tcps_ exactly as it looked before
+  // this call (this stream's entry doesn't exist yet), so it has no way
+  // to know about -- and so no way to clean up -- the TCP this call was
+  // in the middle of setting up. Bail out here instead of falling
+  // through to add a stray entry into a stream_tcps_ a Close() already
+  // ran against and assumed was fully accounted for: confirmed via a
+  // real repro (killing the server mid-restart under sustained
+  // connection churn) that falling through crashes on a QUICHE_DCHECK in
+  // ~QuictunAcceptedTcpSocket() ("Must call Disconnect() before
+  // destruction") once CollectGarbage() actually destroys this
+  // already-queued-for-removal connection with that stray entry still
+  // sitting in stream_tcps_, its tcp_socket never Disconnect()ed.
+  // Matches real QUICHE's own idiom for this exact class of hazard --
+  // re-checking state immediately after anything that writes, before
+  // trusting it's still valid to keep going -- see e.g. quic_session.cc's
+  // dozens of "if (!connection_->connected())" checks following writes;
+  // closed_ here is the narrower, already-latched equivalent (Close() is
+  // the only thing that could have just run reentrantly, and it's what
+  // sets this).
+  if (closed_) {
+    socket_api::Close(pending.fd);
+    return;
+  }
 
   QuicStreamId id = stream->id();
   StreamTcp& entry = stream_tcps_[id];
@@ -266,14 +300,24 @@ void QuictunClientConnection::Close() {
         QUIC_NO_ERROR, "quictun tunnel closed",
         ConnectionCloseBehavior::SEND_CONNECTION_CLOSE_PACKET);
   }
-  // Every stream's TCP side: disconnect (see the identical reasoning in
-  // QuictunServerConnection::Close() for why this doesn't go through each
-  // tunnel's own Close() instead -- reentrant modification of stream_tcps_
-  // while iterating it).
+  // Snapshot every live tunnel's pointer into a separate vector before
+  // touching any of them -- see the identical reasoning (and the real
+  // crash it was found from) in QuictunServerConnection::Close()'s
+  // matching comment; mirrors real QUICHE's own QuicSession::
+  // PerformActionOnActiveStreams() (quic_session.cc). Matters most under
+  // --quic_conn pooling (more than one tunnel sharing this connection --
+  // --quic_conn=0 only ever has the one, so there's no *sibling* tunnel
+  // for this loop's own reentrancy to reach) but applied here
+  // unconditionally to match the server side exactly rather than special-
+  // casing quic_conn==0.
+  std::vector<QuictunTunnel*> tunnels;
+  tunnels.reserve(stream_tcps_.size());
   for (auto& [id, entry] : stream_tcps_) {
-    if (entry.tcp_socket && !entry.tcp_socket_disconnected) {
-      entry.tcp_socket_disconnected = true;
-      entry.tcp_socket->Disconnect();
+    tunnels.push_back(entry.tunnel.get());
+  }
+  for (QuictunTunnel* tunnel : tunnels) {
+    if (!tunnel->closed()) {
+      tunnel->Close("connection closed", /*reset_stream=*/false);
     }
   }
   stream_tcps_.clear();

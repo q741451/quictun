@@ -58,7 +58,12 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   // QuictunClientConnection the driver creates and must outlive this
   // object; `config` is copied. Does not itself accept any TCP connection --
   // call AssignNewTcp() once (--quic_conn=0) or repeatedly (pooling) after
-  // construction.
+  // construction. `poolable` is whether the driver is holding this
+  // connection in one of its own pool_slots_ (--quic_conn > 0) for
+  // possible reuse by a later TCP -- see ShouldKeepConnectionAlive()'s
+  // comment in quictun_session.h for why this needs to be known this
+  // early (it's latched into the session at construction, not something
+  // that can be flipped later).
   static std::unique_ptr<QuictunClientConnection> Create(
       QuicEventLoop* event_loop, QuicConnectionHelperInterface* helper,
       QuicAlarmFactory* alarm_factory,
@@ -67,7 +72,7 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
       const QuicServerId& server_id, const QuicSocketAddress& remote_address,
       QuicCryptoClientConfig* crypto_config, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
-      QuicByteCount udp_socket_buffer_bytes,
+      QuicByteCount udp_socket_buffer_bytes, bool poolable,
       std::function<void(QuictunClientConnection*)> on_closed);
 
   ~QuictunClientConnection() override;
@@ -155,7 +160,7 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
       quiche::QuicheBufferAllocator* buffer_allocator, const QuicConfig& config,
       const QuicServerId& server_id, QuicCryptoClientConfig* crypto_config,
       const std::string& psk, CongestionControlType congestion_control,
-      bool so_txtime_enabled,
+      bool so_txtime_enabled, bool poolable,
       std::function<void(QuictunClientConnection*)> on_closed);
 
   // Opens outgoing streams for as many of pending_tcps_ as currently

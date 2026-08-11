@@ -235,12 +235,76 @@ class QUICHE_EXPORT QuictunSessionBase : public QuicSession,
 
 class QUICHE_EXPORT QuictunClientSession final : public QuictunSessionBase {
  public:
+  // `poolable`: whether QuictunClientConnection's owner is holding this
+  // connection in a --quic_conn pool slot for possible reuse by a later
+  // TCP, rather than the original one-QUIC-connection-per-TCP design
+  // (--quic_conn=0) where a connection is single-use and disposable. Only
+  // affects ShouldKeepConnectionAlive() below; latched at construction
+  // since QuictunClientConnection itself never changes which regime it's
+  // in after being created.
   QuictunClientSession(QuicConnection* connection, Visitor* owner,
                         const QuicConfig& config, std::string alpn,
                         const QuicServerId& server_id,
-                        QuicCryptoClientConfig* crypto_config);
+                        QuicCryptoClientConfig* crypto_config, bool poolable);
 
   void CryptoConnect() { crypto_stream_->CryptoConnect(); }
+
+  // QuicSession: overrides QuictunSessionBase's own unconditional `true`
+  // (correct for the server -- see its class comment: closing on empty is
+  // entirely the client's call, not the server's to make). On the client,
+  // real QUICHE's own doc comment on this method is exactly the design
+  // question here ("kept alive... if there are outstanding application
+  // transactions expecting a response") -- and its own real consumers
+  // (QuicConnection::OnKeepAliveTimeout()/OnRetransmittableOnWireTimeout(),
+  // quic_connection.cc: both skip sending a keepalive PING entirely when
+  // this is false) are the exact, already-built mechanism for "let this
+  // connection's own idle timeout fire on schedule instead of being
+  // artificially propped open forever" -- no separate close-when-idle
+  // logic needed in QuictunClientConnection itself, just answering this
+  // correctly:
+  //   - Has an active stream right now: always true, obviously.
+  //   - No active stream, but poolable (--quic_conn > 0): still true --
+  //     this connection is deliberately meant to sit idle between TCPs,
+  //     waiting to be reused by the driver's pool_slots_, exactly the
+  //     "outstanding application transaction" the doc comment describes
+  //     one level up (not this exact request, but this pool slot's next
+  //     one).
+  //   - No active stream, not poolable (--quic_conn=0): false. This
+  //     connection was always exactly one TCP's worth, that TCP is done,
+  //     nothing will ever open another stream on it -- matches the
+  //     original pre-pooling design's Close()-the-instant-the-one-tunnel-
+  //     finishes behavior, just reached by letting the idle timeout fire
+  //     promptly instead of an explicit call. Confirmed via a real
+  //     bisection (testing/chaos/client_chaos_test.py) that --quic_conn=0
+  //     connections were, before this fix, sitting open for a full idle
+  //     timeout after their one tunnel finished instead of closing
+  //     immediately like the pre-pooling design did -- a real, measurable
+  //     fd/resource pileup under connection churn faster than the idle
+  //     timeout, introduced by the same commit that added --quic_conn
+  //     (its per-stream close callback stopped calling Close() on the
+  //     whole connection, correctly for pooling, but with no equivalent
+  //     put back for the non-pooling case).
+  //
+  // `|| !ever_had_stream_`, not just `poolable_ || !streams().empty()`:
+  // a freshly-created --quic_conn=0 connection also has an empty streams()
+  // for as long as its handshake is still in flight (OpenOutgoingStream()
+  // can't succeed -- see its own comment -- until either a cached 0-RTT
+  // session or the real handshake round trip supplies a max_streams
+  // value), which is a real, ordinary, non-idle window, not "done and
+  // nothing left to do here" -- confirmed by a real repro of exactly this
+  // race after first landing this fix without the extra check: mass
+  // ConnectionRefusedError/observed_client_alive=False, from
+  // ShouldKeepConnectionAlive() going false (and so QUIC's own keepalive
+  // PING mechanism switching off, per the comment above) the instant a
+  // brand-new connection was constructed, before it had ever gotten the
+  // chance to open the one stream it exists for. ever_had_stream_ (set
+  // once, via SetStreamCreatedCallback() below, and never reset) is what
+  // actually distinguishes "empty because nothing has happened yet
+  // (still keep alive)" from "empty because the one thing that was ever
+  // going to happen here already did (fine to let this die now)".
+  bool ShouldKeepConnectionAlive() const override {
+    return poolable_ || !streams().empty() || !ever_had_stream_;
+  }
 
   // Whether the server accepted this connection's 0-RTT early data (only
   // meaningful once the handshake has been confirmed).
@@ -289,6 +353,12 @@ class QUICHE_EXPORT QuictunClientSession final : public QuictunSessionBase {
  private:
   std::unique_ptr<QuicCryptoClientStream> crypto_stream_;
   std::function<void()> can_open_stream_callback_;
+  const bool poolable_;
+  // See ShouldKeepConnectionAlive()'s comment. Set once, via
+  // SetStreamCreatedCallback() (constructor), the first time this
+  // session's one-and-only-if-not-poolable_ stream is actually created;
+  // never reset back to false afterward.
+  bool ever_had_stream_ = false;
 };
 
 class QUICHE_EXPORT QuictunServerSession final : public QuictunSessionBase {

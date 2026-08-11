@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "absl/memory/memory.h"
 #include "absl/status/status.h"
@@ -176,20 +177,45 @@ void QuictunServerConnection::Close() {
         QUIC_NO_ERROR, "quictun tunnel closed",
         ConnectionCloseBehavior::SEND_CONNECTION_CLOSE_PACKET);
   }
-  // Tear every stream's target down directly rather than going through each
-  // tunnel's own Close() (which would fire each stream's on_closed callback
-  // -- StartTunnelForStream()'s lambda -- reentrantly modifying
-  // stream_targets_ while this loop is iterating it): the whole connection
-  // is going away regardless, so there's nothing for those callbacks to
-  // usefully do here that clearing the map right after doesn't already
-  // cover. See DisconnectStreamTarget() for the guard against
-  // double-disconnecting a target whose tunnel got as far as SetSocket()
-  // (or all the way through its own Close(), if the connection-level close
-  // and a stream's own close raced) -- a stream whose dial-out never got
-  // that far (still nullptr, see QuictunTunnel::HasSocket()) simply has
-  // nothing to disconnect.
+  // Snapshot every live tunnel's pointer into a separate vector before
+  // touching any of them -- mirrors real QUICHE's own
+  // QuicSession::PerformActionOnActiveStreams() (quic_session.cc), the
+  // established pattern for exactly this problem: calling each tunnel's
+  // own Close() while iterating stream_targets_ directly would reenter
+  // through StartTunnelForStream()'s on_closed_ lambda (itself erasing
+  // from stream_targets_), invalidating the very map this loop is
+  // iterating. A previous version of this code sidestepped that by
+  // calling DisconnectStreamTarget() directly instead of going through
+  // each tunnel's own Close() -- but that skips ever telling the tunnel
+  // itself it's closed (its own closed_ never gets set), so a stream
+  // still mid-callback on the same call stack (e.g. servicing a
+  // just-received packet for a *different* stream on this connection,
+  // itself what triggered this Close() -- QuicConnection::
+  // ProcessUdpPacket() reentering all the way back into here the same
+  // way a failing write does, see QuictunClientConnection::StartTunnel()'s
+  // comment for that mechanism in detail) can still go on to try using
+  // its own now-disconnected socket afterward. Confirmed via a real
+  // repro (killing the server mid-restart under sustained connection
+  // churn) that this crashes on a QUICHE_CHECK in
+  // EventLoopConnectingClientSocket::SendInternal(). Snapshotting first,
+  // like real QUICHE does, lets every tunnel go through its own real
+  // Close() (setting its own closed_, so any still-in-flight reentrant
+  // callback correctly no-ops via the check that already guards it --
+  // e.g. OnStreamDataAvailable()'s own `if (closed_) return;`) while
+  // staying completely safe against stream_targets_ itself changing
+  // underneath this loop. closed()-checked before each call since this
+  // loop's own reentrancy (one tunnel's Close() closing another one
+  // still left in this same snapshot) is exactly what QuictunTunnel::
+  // Close()'s own `QUICHE_DCHECK(!closed_)` would otherwise catch.
+  std::vector<QuictunTunnel*> tunnels;
+  tunnels.reserve(stream_targets_.size());
   for (auto& [id, target] : stream_targets_) {
-    DisconnectStreamTarget(target);
+    tunnels.push_back(target.tunnel.get());
+  }
+  for (QuictunTunnel* tunnel : tunnels) {
+    if (!tunnel->closed()) {
+      tunnel->Close("connection closed", /*reset_stream=*/false);
+    }
   }
   stream_targets_.clear();
   key_read_buffers_.clear();

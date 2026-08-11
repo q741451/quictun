@@ -76,6 +76,14 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   // was about to hand over via SetSocket().
   bool HasSocket() const { return socket_ != nullptr; }
 
+  // Whether Close() has already run (for any reason) on this tunnel.
+  // Exposed for an owner that needs to tear down several tunnels at once
+  // and wants to safely call Close() on each -- Close() itself DCHECKs
+  // !closed_, so an owner whose own cleanup can reenter (a tunnel's own
+  // on_closed callback closing a sibling tunnel, say) needs a way to skip
+  // ones already handled rather than hitting that DCHECK a second time.
+  bool closed() const { return closed_; }
+
   // Begins pumping in both directions. `stream` must already be open and
   // `socket` (whether supplied at construction or via SetSocket()) must
   // already be connected. `seed_quic_to_tcp_data`, if non-empty, is queued
@@ -122,10 +130,27 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   void OnFlushCloseAlarm();
   void OnIdleAlarm();
 
+  // Tears this tunnel down: disconnects socket_ (if it has one) and, if
+  // `reset_stream`, resets stream_ -- see the .cc definition's own
+  // extensive comments for exactly what this does and why. Public so an
+  // owner tearing down several tunnels at once (QuictunClientConnection::
+  // Close() / QuictunServerConnection::Close()) can call this directly on
+  // each -- see those methods' own comments for why going through this
+  // real Close() (rather than a shortcut that only disconnects the
+  // socket) matters: it's what sets closed_, which is what makes this
+  // tunnel correctly no-op any of its own callbacks that are still
+  // in-flight higher up the same call stack (e.g. a reentrant Close()
+  // triggered while servicing a *different* stream's just-received
+  // packet on the same connection). Must not be called a second time on
+  // the same tunnel (QUICHE_DCHECK(!closed_) below) -- check closed()
+  // first if that's possible (e.g. iterating a snapshot where an
+  // earlier entry's own Close() might have reentrantly closed a later
+  // one too).
+  void Close(absl::string_view reason, bool reset_stream);
+
  private:
   void BeginReadFromTcp();
   void MaybeFlushQuicToTcp();
-  void Close(absl::string_view reason, bool reset_stream);
 
   // Rearms idle_alarm_ for idle_timeout_ from now -- called on any real
   // progress on either leg (see idle_alarm_'s comment).
@@ -226,6 +251,19 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   bool quic_receive_done_ = false;
 
   bool closed_ = false;
+
+  // Whether Start() has actually run yet. On the client, always true
+  // essentially immediately (the owner calls Start() synchronously right
+  // after construction -- `socket` is already connected there). On the
+  // server, this tunnel already becomes stream_'s active delegate before
+  // the (async, can take real time) --target dial-out is even initiated
+  // -- see the class comment -- and false here (not HasSocket(), which
+  // this class used to rely on for this, see OnStreamDataAvailable()'s
+  // comment for why that's wrong) is what OnStreamDataAvailable() checks
+  // to know it's not safe yet to call BeginReadFromTcp()/
+  // MaybeFlushQuicToTcp() -- both of which assume socket_ is not just
+  // non-null but actually connected.
+  bool started_ = false;
 
   // Mirrors shadowsocks-libev's server_t: ONE shared idle timer for the
   // whole tunnel (not per-direction), reset by ResetIdleAlarm() on any real
