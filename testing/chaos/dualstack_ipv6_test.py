@@ -34,6 +34,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos_actor
+import chaos_monitor
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))  # repo root, two levels up from testing/chaos/
 SERVER_BIN = f"{REPO}/bazel-bin/quiche/quictun_server"
@@ -100,6 +101,9 @@ def run_one(remote_host, target_port, server_listen_port, local_port,
         return False
 
     wait_tcp_ready("127.0.0.1", local_port)
+    server_sampler = chaos_monitor.Sampler(server_proc.pid)
+    server_sampler.sample()
+    server_baseline = server_sampler.summary()
     ok = False
     try:
         ok = chaos_actor.short_echo(("127.0.0.1", local_port), timeout=8)
@@ -116,6 +120,17 @@ def run_one(remote_host, target_port, server_listen_port, local_port,
     except Exception as e:
         print(f"    exception: {e}", flush=True)
     print(f"=== [{tag}] echo+download ok={ok} ===", flush=True)
+
+    server_sampler.sample()
+    server_summary = server_sampler.summary()
+    fds_ok = (server_summary['fds_last'] is not None and server_baseline['fds_last'] is not None and
+              server_summary['fds_last'] <= server_baseline['fds_last'] + 10)
+    rss_ok = (server_summary['rss_kb_last'] is not None and server_baseline['rss_kb_last'] is not None and
+              server_summary['rss_kb_last'] <= server_baseline['rss_kb_last'] + 100000)
+    print(f"=== [{tag}] server fds: {server_baseline['fds_last']}->{server_summary['fds_last']} "
+          f"rss_kb: {server_baseline['rss_kb_last']}->{server_summary['rss_kb_last']} "
+          f"ok={fds_ok and rss_ok} ===", flush=True)
+    ok = ok and fds_ok and rss_ok
 
     for p in (client_proc, server_proc, target_proc):
         if p.poll() is None:

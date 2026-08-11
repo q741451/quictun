@@ -92,6 +92,19 @@ for qc in 0 1 3; do
   echo "exit=$? for pool_reentrancy_test.py --quic-conn=$qc" | tee -a "$RESULTS"
 done
 
+# Sustained-duration leak check: everything above compares one before/
+# after snapshot from a run lasting well under a minute, long enough to
+# catch a leak that's large per-cycle but not one that's merely nonzero
+# per-cycle -- the harder, more realistic case for a feature specifically
+# about keeping connections open and reused over time. 120s here (shorter
+# than the script's own 180s default) to keep this matrix's total runtime
+# sane; run pool_soak_test.py directly with a much longer --duration
+# (e.g. 1800) for a deeper check when actually chasing a suspected slow
+# leak.
+echo "=== pool_soak_test.py --duration=120 ===" | tee -a "$RESULTS"
+python3 -u pool_soak_test.py --duration=120 >> "$RESULTS" 2>&1
+echo "exit=$? for pool_soak_test.py --duration=120" | tee -a "$RESULTS"
+
 # Does --quic_conn pooling actually pool -- N concurrent TCP flows really
 # sharing at most N underlying QUIC connections, not just "still working"
 # under pooling (everything above already covers that). No condition

@@ -215,9 +215,22 @@ def main():
           f"{sanity_ok} ===", flush=True)
 
     summary = sampler.summary()
-    print(f"=== [{tag}] first server fds: first={summary['fds_first']} "
+    print(f"=== [{tag}] server fds: first={summary['fds_first']} "
           f"max={summary['fds_max']} last={summary['fds_last']} ===",
           flush=True)
+    print(f"=== [{tag}] server rss_kb: first={summary['rss_kb_first']} "
+          f"max={summary['rss_kb_max']} last={summary['rss_kb_last']} ===",
+          flush=True)
+    # Sampled all along but never actually gated on before -- see
+    # client_chaos_test.py's identical fix for why that matters. Repeated
+    # dead-target dial failures (per stream, under pooling) are exactly
+    # the kind of per-attempt cleanup path most likely to leak a target
+    # ConnectingClientSocket or StreamTarget entry if StartTunnelForStream()'s
+    # error handling ever regressed.
+    fds_ok = (summary['fds_last'] is not None and summary['fds_first'] is not None and
+              summary['fds_last'] <= summary['fds_first'] + 10)
+    rss_ok = (summary['rss_kb_last'] is not None and summary['rss_kb_first'] is not None and
+              summary['rss_kb_last'] <= summary['rss_kb_first'] + 100000)
 
     for p in (client2_proc, server2_proc, target_proc, server_proc):
         if p.poll() is None:
@@ -230,8 +243,11 @@ def main():
     verdict = "PASS" if (
         server_alive_after_dead_target and
         torn_down_cleanly == n_attempts and
-        sanity_ok
+        sanity_ok and
+        fds_ok and
+        rss_ok
     ) else "FAIL"
+    print(f"  fds_ok={fds_ok} rss_ok={rss_ok}")
     print(f"=== [{tag}] VERDICT: {verdict} ===", flush=True)
     sys.exit(0 if verdict == "PASS" else 1)
 

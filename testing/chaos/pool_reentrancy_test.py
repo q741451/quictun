@@ -35,6 +35,9 @@ import threading
 import time
 import uuid
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import chaos_monitor
+
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SERVER_BIN = f"{REPO}/bazel-bin/quiche/quictun_server"
 CLIENT_BIN = f"{REPO}/bazel-bin/quiche/quictun_client"
@@ -133,6 +136,17 @@ def main():
 
     wait_tcp_ready("127.0.0.1", client_local_port)
 
+    # This test's whole point is stressing the pooling machinery's
+    # cleanup paths (StreamTcp/StartTunnel/Close()) as hard as possible --
+    # exactly where a leak in the new code would show up. Sampled all
+    # along conceptually but never actually checked until now; see
+    # client_chaos_test.py's identical gating for the rationale/threshold.
+    sampler = chaos_monitor.Sampler(client_proc.pid)
+    sampler.sample()
+    baseline = sampler.summary()
+    print(f"=== [{tag}] baseline: fds={baseline['fds_last']} "
+          f"rss_kb={baseline['rss_kb_last']} ===", flush=True)
+
     results = [None] * 10
     threads = [threading.Thread(target=short_echo, args=(client_local_port, results, i))
                for i in range(10)]
@@ -185,10 +199,28 @@ def main():
         t.join(timeout=5)
     sanity_ok = bool(sanity_results[0])
 
+    fds_ok = True
+    rss_ok = True
+    final_summary = None
+    if final_alive:
+        # Wait past idle_timeout_seconds (6, hardcoded above) so any
+        # connection still inside its own idle-timeout grace window isn't
+        # mistaken for a leak -- see client_chaos_test.py's identical fix.
+        time.sleep(8)
+        sampler.sample()
+        final_summary = sampler.summary()
+        fds_ok = (final_summary['fds_last'] is not None and baseline['fds_last'] is not None and
+                  final_summary['fds_last'] <= baseline['fds_last'] + 10)
+        rss_ok = (final_summary['rss_kb_last'] is not None and baseline['rss_kb_last'] is not None and
+                  final_summary['rss_kb_last'] <= baseline['rss_kb_last'] + 100000)
+        print(f"=== [{tag}] final: fds={final_summary['fds_last']} "
+              f"rss_kb={final_summary['rss_kb_last']} ===", flush=True)
+
     print(f"=== [{tag}] SUMMARY ===")
     print(f"  client_alive={final_alive}")
     print(f"  client_exit_code={client_proc.returncode if not final_alive else None}")
     print(f"  sanity_echo_ok={sanity_ok}")
+    print(f"  fds_ok={fds_ok} rss_ok={rss_ok}")
 
     for p in [client_proc, server_proc, target_proc]:
         try:
@@ -196,7 +228,7 @@ def main():
         except Exception:
             pass
 
-    ok = final_alive and sanity_ok
+    ok = final_alive and sanity_ok and fds_ok and rss_ok
     print(f"=== [{tag}] VERDICT: {'PASS' if ok else 'FAIL'} ===")
     sys.exit(0 if ok else 1)
 

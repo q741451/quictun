@@ -56,6 +56,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import chaos_monitor
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))  # repo root, two levels up from testing/chaos/
 SERVER_BIN = f"{REPO}/bazel-bin/quiche/quictun_server"
@@ -226,6 +227,19 @@ def main():
 
     wait_tcp_ready("127.0.0.1", local_port)
 
+    # Sampled all along conceptually but never actually gated on -- see
+    # client_chaos_test.py's identical addition for the rationale. The
+    # injected block + RearmOnBlockPacketWriter's recovery path is exactly
+    # the kind of not-quite-ordinary code path most likely to leak
+    # something if it doesn't clean up right (a stuck write buffer, an
+    # alarm never cancelled).
+    client_sampler = chaos_monitor.Sampler(client_proc.pid)
+    client_sampler.sample()
+    client_baseline = client_sampler.summary()
+    server_sampler = chaos_monitor.Sampler(server_proc.pid)
+    server_sampler.sample()
+    server_baseline = server_sampler.summary()
+
     # Under pooling, a second connection to the same --local port becomes a
     # sibling stream sharing the SAME underlying (pooled) connection as the
     # big transfer below -- see --quic-conn's help. Runs concurrently with
@@ -274,6 +288,25 @@ def main():
     print(f"=== [{tag}] post-transfer sanity short_echo ok={sanity_ok} ===",
           flush=True)
 
+    client_sampler.sample()
+    client_summary = client_sampler.summary()
+    server_sampler.sample()
+    server_summary = server_sampler.summary()
+    client_fds_ok = (client_summary['fds_last'] is not None and client_baseline['fds_last'] is not None and
+                      client_summary['fds_last'] <= client_baseline['fds_last'] + 10)
+    client_rss_ok = (client_summary['rss_kb_last'] is not None and client_baseline['rss_kb_last'] is not None and
+                      client_summary['rss_kb_last'] <= client_baseline['rss_kb_last'] + 100000)
+    server_fds_ok = (server_summary['fds_last'] is not None and server_baseline['fds_last'] is not None and
+                      server_summary['fds_last'] <= server_baseline['fds_last'] + 10)
+    server_rss_ok = (server_summary['rss_kb_last'] is not None and server_baseline['rss_kb_last'] is not None and
+                      server_summary['rss_kb_last'] <= server_baseline['rss_kb_last'] + 100000)
+    print(f"=== [{tag}] client fds: {client_baseline['fds_last']}->{client_summary['fds_last']} "
+          f"rss_kb: {client_baseline['rss_kb_last']}->{client_summary['rss_kb_last']} "
+          f"ok={client_fds_ok and client_rss_ok} ===", flush=True)
+    print(f"=== [{tag}] server fds: {server_baseline['fds_last']}->{server_summary['fds_last']} "
+          f"rss_kb: {server_baseline['rss_kb_last']}->{server_summary['rss_kb_last']} "
+          f"ok={server_fds_ok and server_rss_ok} ===", flush=True)
+
     for p in (client_proc, server_proc, target_proc):
         if p.poll() is None:
             p.terminate()
@@ -282,7 +315,11 @@ def main():
         if p.poll() is None:
             p.kill()
 
-    verdict = "PASS" if (ok and sanity_ok) else "FAIL"
+    verdict = "PASS" if (
+        ok and sanity_ok and
+        client_fds_ok and client_rss_ok and
+        server_fds_ok and server_rss_ok
+    ) else "FAIL"
     print(f"=== [{tag}] VERDICT: {verdict} ===", flush=True)
     sys.exit(0 if verdict == "PASS" else 1)
 

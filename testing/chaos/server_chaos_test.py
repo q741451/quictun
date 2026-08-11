@@ -307,9 +307,14 @@ def main():
             except Exception:
                 pass
 
-    ok = (server_proc.poll() is None or True) and sanity_ok and \
-         (summary['fds_last'] is not None and baseline['fds_last'] is not None and
-          summary['fds_last'] <= baseline['fds_last'] + 10)
+    # See client_chaos_test.py's identical addition for why rss_kb needed
+    # to actually be gated, not just sampled/printed.
+    fds_ok = (summary['fds_last'] is not None and baseline['fds_last'] is not None and
+              summary['fds_last'] <= baseline['fds_last'] + 10)
+    rss_ok = (summary['rss_kb_last'] is not None and baseline['rss_kb_last'] is not None and
+              summary['rss_kb_last'] <= baseline['rss_kb_last'] + 100000)
+    ok = (server_proc.poll() is None or True) and sanity_ok and fds_ok and rss_ok
+    print(f"  fds_ok={fds_ok} rss_ok={rss_ok}")
     print(f"=== [{tag}] VERDICT: {'PASS' if ok else 'FAIL'} ===")
     sys.exit(0 if ok else 1)
 
