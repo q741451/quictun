@@ -24,6 +24,7 @@ Modes:
 """
 import argparse
 import asyncio
+import os
 import random
 import socket
 import sys
@@ -61,12 +62,24 @@ class UdpRelayProtocol(asyncio.DatagramProtocol):
         self.jitter_ms = jitter_ms
         self.stats = stats
         self.transport = None
+        # Flipped by UdpListener.blackhole_flow() -- see its own comment.
+        # Checked here (not just on the c2s/UdpListener side) so a
+        # blackholed flow drops BOTH directions: a real "this specific
+        # already-established session's path just vanished" needs the
+        # server's own still-arriving replies silently eaten too, not
+        # just future client sends -- an asymmetric block (only one
+        # direction silently failing) isn't what a real network
+        # partition/middlebox black hole looks like.
+        self.blackholed = False
 
     def connection_made(self, transport):
         self.transport = transport
 
     def datagram_received(self, data, addr):
         # upstream -> client direction
+        if self.blackholed:
+            self.stats["s2c_dropped"] += 1
+            return
         if random.random() < self.loss:
             self.stats["s2c_dropped"] += 1
             return
@@ -89,6 +102,13 @@ class UdpListener(asyncio.DatagramProtocol):
         self.stats = stats
         self.transport = None
         self.flows = {}  # client_addr -> (transport, protocol, last_seen)
+        # client_addr, in the order each was first seen -- lets a test
+        # driver ask for "the Nth distinct flow" by simple connection
+        # order (matching quictun's own deterministic round-robin pool
+        # assignment -- see AcceptLoop() in quictun_client_driver.cc)
+        # without needing to know real port numbers ahead of time.
+        self.flow_order = []
+        self.blackholed_addrs = set()
         # addr -> list of pending datagrams, reserved as soon as flow setup
         # starts (synchronously, before the first `await`) so a retransmit
         # arriving while setup is still in flight queues onto the SAME
@@ -109,6 +129,9 @@ class UdpListener(asyncio.DatagramProtocol):
         self.transport = transport
 
     def datagram_received(self, data, addr):
+        if addr in self.blackholed_addrs:
+            self.stats["c2s_dropped"] += 1
+            return
         if random.random() < self.loss:
             self.stats["c2s_dropped"] += 1
             return
@@ -125,6 +148,9 @@ class UdpListener(asyncio.DatagramProtocol):
             self.pending[addr].append(data)
             return
         self.pending[addr] = []
+        self.flow_order.append(addr)
+        print(f"[udp-relay] new flow index {len(self.flow_order) - 1} "
+              f"(addr={addr})", flush=True)
         loop = asyncio.get_event_loop()
         coro = loop.create_datagram_endpoint(
             lambda: UdpRelayProtocol(addr, self.transport, self.loss,
@@ -139,6 +165,25 @@ class UdpListener(asyncio.DatagramProtocol):
         await self._forward_to_upstream(transport, first_data)
         for data in queued:
             await self._forward_to_upstream(transport, data)
+
+    def blackhole_flow(self, index):
+        """Starts silently dropping all further traffic, both directions,
+        for the `index`-th distinct client flow seen so far (0-indexed, by
+        connection order -- see flow_order's comment). Deliberately not
+        available for a flow that hasn't been seen yet: this simulates an
+        already-established session's path vanishing, not a handshake
+        that never starts -- a test driver that wants the latter should
+        just not start that client in the first place. Returns False (does
+        nothing) if `index` isn't in range yet."""
+        if index < 0 or index >= len(self.flow_order):
+            return False
+        addr = self.flow_order[index]
+        self.blackholed_addrs.add(addr)
+        flow = self.flows.get(addr)
+        if flow is not None:
+            _, protocol, _ = flow
+            protocol.blackholed = True
+        return True
 
     async def _forward_to_upstream(self, transport, data):
         await maybe_delay(self.delay_ms, self.jitter_ms)
@@ -155,6 +200,30 @@ class UdpListener(asyncio.DatagramProtocol):
                 t.close()
 
 
+async def blackhole_trigger_loop(listener, trigger_file):
+    """Polls `trigger_file` for a flow index to blackhole -- lets an
+    external test driver (a separate process; this relay is normally
+    launched as its own subprocess, same as everywhere else in this
+    suite) tell an already-running relay "blackhole flow N now" without
+    needing a control socket. The file is deleted once acted on, so a
+    repeated/stale trigger doesn't re-fire; a request for a flow that
+    hasn't connected yet is retried on the next poll rather than
+    consumed, in case the driver's own request raced its own connect()
+    -- see blackhole_flow()'s own comment for why an unseen index is
+    otherwise a no-op."""
+    while True:
+        await asyncio.sleep(0.1)
+        try:
+            with open(trigger_file) as f:
+                index = int(f.read().strip())
+        except (FileNotFoundError, ValueError):
+            continue
+        if listener.blackhole_flow(index):
+            os.remove(trigger_file)
+            print(f"[udp-relay] blackholing flow index {index} "
+                  f"(addr={listener.flow_order[index]})", flush=True)
+
+
 async def run_udp(args):
     loop = asyncio.get_event_loop()
     listener = UdpListener(args.upstream, args.loss, args.delay_ms,
@@ -164,6 +233,9 @@ async def run_udp(args):
     transport, _ = await loop.create_datagram_endpoint(
         lambda: listener, local_addr=args.listen)
     asyncio.ensure_future(listener.gc_loop())
+    if args.blackhole_trigger_file:
+        asyncio.ensure_future(
+            blackhole_trigger_loop(listener, args.blackhole_trigger_file))
     print(f"[udp-relay] {args.listen} -> {args.upstream} "
           f"loss={args.loss} delay={args.delay_ms}ms jitter={args.jitter_ms}ms",
           flush=True)
@@ -308,6 +380,11 @@ def main():
                    help="tcp only: probability a connection goes silently "
                         "dark forever (no FIN, no RST -- see the comment "
                         "on handle_tcp_conn)")
+    p.add_argument("--blackhole-trigger-file", default=None,
+                   help="udp only: path polled for an externally-written "
+                        "flow index to blackhole on demand -- see "
+                        "blackhole_trigger_loop()'s comment. Not used "
+                        "unless a test driver actually writes to it.")
     args = p.parse_args()
 
     if args.mode == "udp":
