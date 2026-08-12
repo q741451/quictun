@@ -67,6 +67,7 @@ quictun_server  (built 2026/08/06 20:14:23)
   udp_socket_buffer_kb                   = 1024
   bbr_startup_loss_threshold_percent     = 2
   bbr_startup_full_loss_count            = 8
+  max_streams_per_connection             = 100
 ==================================================================
 ```
 
@@ -90,6 +91,7 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | `--startup_rtt_ms` | `0` | Assumed starting RTT in milliseconds, paired with `--startup_bandwidth_kbps` -- only used, and only meaningful, if that flag is also `> 0`. `0` falls back to QUICHE's own initial RTT guess (100ms). |
 | `--bbr_startup_loss_threshold_percent` | `2` | Process-wide (applies to every connection the process makes, not just one). BBRv1's startup phase gives up probing for more bandwidth -- settling for whatever it's already reached -- once a round sees enough packet-loss events *and* the lost bytes exceed this percentage of bytes in flight. The default (`2`, i.e. 2%) is QUICHE's own real default -- quictun applies no override unless you change this. On a path with genuine baseline loss above 2% that can still sustain a much higher real bandwidth once ramped (e.g. a long-haul, moderately lossy link), the default fires prematurely and the connection settles for far less than the path can actually do; raise this past the path's real loss rate to fix that. A value here is a percent (e.g. `50` for 50%), not a fraction. Pairs with `--bbr_startup_full_loss_count`. |
 | `--bbr_startup_full_loss_count` | `8` | Process-wide. The other threshold paired with `--bbr_startup_loss_threshold_percent` -- minimum number of distinct loss-detection events (not lost packets) in one round before that percentage check even applies. The default (`8`) is QUICHE's own real default -- quictun applies no override unless you change this. |
+| `--max_streams_per_connection` | `100` | Max concurrent bidirectional streams this endpoint will accept as incoming from its peer at once. quictun's streams are always client-initiated, so in practice only the *server's* value does anything -- the client's own copy is accepted for symmetry but has nothing to bite, since the server never opens a stream to the client. Matters for `--quic_conn` pooling: with `N` pool slots round-robining accepted TCP connections, one pooled connection's concurrently-open stream count is the pool's live TCP count divided across those `N` slots, not `N` itself -- a *small* `--quic_conn` concentrates more load onto fewer connections, making this cap more likely to matter than a large one does. The default (`100`) is QUICHE's own real default -- quictun applies no override unless you change this. Not a hard lifetime cap: it's a sliding window that grows back by one every time an existing stream closes, so it only blocks new streams while this many are open *at once*, not after this many have ever been opened in total. A peer that opens a stream beyond what's currently granted anyway is a protocol violation -- not a per-stream rejection but the *whole connection* closing, taking every other stream sharing it down too. |
 
 ### `quictun_server`-only
 

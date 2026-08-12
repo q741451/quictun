@@ -127,6 +127,25 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "count). Default here (8) is QUICHE's own real default -- quictun "
     "applies no override unless you change this.");
 
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, max_streams_per_connection, 100,
+    "Max concurrent bidirectional streams this endpoint will accept as "
+    "incoming from its peer at once -- in practice only the server's "
+    "value does anything, since quictun's streams are always client-"
+    "initiated. Matters for --quic_conn pooling: with N pool slots "
+    "round-robining accepted TCPs, a single pooled connection's "
+    "concurrently-open stream count is the pool's live TCP count divided "
+    "across those N slots, not N itself -- a small --quic_conn "
+    "concentrates more load onto fewer connections, making this cap more "
+    "likely to matter than a large one does. Default (100) matches "
+    "QUICHE's own real default -- quictun applies no override unless you "
+    "change this. Not a hard lifetime cap: it's a sliding window that "
+    "grows back by one every time an existing stream closes, so it only "
+    "blocks new streams while this many are open at once. A peer that "
+    "opens a stream beyond what's currently granted anyway is a protocol "
+    "violation -- not a per-stream rejection but the whole connection "
+    "closing, taking every other stream sharing it down too.");
+
 namespace quic {
 
 QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
@@ -159,6 +178,8 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
       FLAGS_bbr_startup_loss_threshold_percent);
   options.bbr_startup_full_loss_count =
       quiche::GetQuicheCommandLineFlag(FLAGS_bbr_startup_full_loss_count);
+  options.max_streams_per_connection =
+      quiche::GetQuicheCommandLineFlag(FLAGS_max_streams_per_connection);
   return options;
 }
 
@@ -242,6 +263,8 @@ void PrintQuictunStartupBanner(
                     absl::StrCat(options.bbr_startup_loss_threshold_percent)});
   lines.push_back({"bbr_startup_full_loss_count",
                     absl::StrCat(options.bbr_startup_full_loss_count)});
+  lines.push_back({"max_streams_per_connection",
+                    absl::StrCat(options.max_streams_per_connection)});
 
   size_t name_width = 0;
   for (const QuictunConfigLine& line : lines) {

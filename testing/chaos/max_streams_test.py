@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """Coverage-gap test: --quic_conn pooling against QUIC's own real,
-protocol-level max_streams-per-connection ceiling (quictun never touches
-this -- see QUICTUN_TEST_MAX_STREAMS's own comment in
-quictun_server_driver.cc). Verifies TCP flows beyond the cap queue
-cleanly (via pending_tcps_/MaybeOpenStreams()) rather than erroring or
-wedging the connection, and get serviced once an earlier stream closes
-and frees MAX_STREAMS credit -- exercising the full server-side
-OnStreamClosed() -> SendMaxStreamsFrame() -> client-side
+protocol-level max_streams-per-connection ceiling (--max_streams_per_connection,
+quictun_flags.h -- see its own comment). Verifies TCP flows beyond the
+cap queue cleanly (via pending_tcps_/MaybeOpenStreams()) rather than
+erroring or wedging the connection, and get serviced once an earlier
+stream closes and frees MAX_STREAMS credit -- exercising the full
+server-side OnStreamClosed() -> SendMaxStreamsFrame() -> client-side
 MaybeAllowNewOutgoingStreams() -> OnCanCreateNewOutgoingStream() ->
 MaybeOpenStreams() chain end to end.
 
-REQUIRES bazel-bin's quictun_client/quictun_server to be built with
--DQUICTUN_TEST_BUILD -- QUICTUN_TEST_MAX_STREAMS is compiled out entirely
-otherwise (not just runtime-inert), so a normal build's server would
-silently use the real 100-stream default and this test would just never
-hit the cap it's trying to exercise.
+Uses a real flag (not a test-only hook), so this runs against any
+build -- no -DQUICTUN_TEST_BUILD requirement.
 
 Usage: python3 max_streams_test.py
 """
@@ -124,8 +120,9 @@ def main():
     server_proc = start_proc(
         [SERVER_BIN, f"--listen=127.0.0.1:{server_port}",
          f"--target=127.0.0.1:{target_port}", f"--key={KEY}",
-         "--idle_timeout_seconds=20"],
-        f"{log_dir}/{tag}_server.log", env={"QUICTUN_TEST_MAX_STREAMS": str(MAX_STREAMS)})
+         "--idle_timeout_seconds=20",
+         f"--max_streams_per_connection={MAX_STREAMS}"],
+        f"{log_dir}/{tag}_server.log")
     time.sleep(1.0)
     if server_proc.poll() is not None:
         print(f"!!! [{tag}] server exited immediately")

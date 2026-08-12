@@ -115,16 +115,12 @@ python3 -u pool_cap_test.py >> "$RESULTS" 2>&1
 echo "exit=$? for pool_cap_test.py" | tee -a "$RESULTS"
 
 # --quic_conn pooling against QUIC's own real, protocol-level
-# max_streams-per-connection ceiling (quictun never touches this --
-# QUICTUN_TEST_MAX_STREAMS's own comment in quictun_server_driver.cc):
-# streams beyond the cap should queue cleanly and get serviced once an
-# earlier one closes and frees credit, not error or wedge the connection.
-# Needs -DQUICTUN_TEST_BUILD the same way writeblock_fault_test.py below
-# does -- but unlike that one, this fails loudly rather than silently
-# passing without it (QUICTUN_TEST_MAX_STREAMS compiled out means the
-# server falls back to the real 100-stream default, so all 12 held
-# connections below would succeed immediately instead of 5, failing
-# PHASE 1's assertion).
+# max_streams-per-connection ceiling (--max_streams_per_connection --
+# see its own comment in quictun_flags.h): streams beyond the cap
+# should queue cleanly and get serviced once an earlier one closes and
+# frees credit, not error or wedge the connection. A real flag, not a
+# test-only hook -- runs against any build, no -DQUICTUN_TEST_BUILD
+# needed.
 echo "=== max_streams_test.py ===" | tee -a "$RESULTS"
 python3 -u max_streams_test.py >> "$RESULTS" 2>&1
 echo "exit=$? for max_streams_test.py" | tee -a "$RESULTS"

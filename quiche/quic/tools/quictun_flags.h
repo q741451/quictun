@@ -100,6 +100,36 @@ struct QuictunTuningOptions {
   int32_t bbr_startup_loss_threshold_percent = 2;
   int32_t bbr_startup_full_loss_count = 8;
 
+  // Max concurrent bidirectional streams this endpoint will accept as
+  // incoming from its peer -- i.e. what governs how many streams the
+  // OTHER side can have open on one connection at once (see
+  // QuicConfig::SetMaxBidirectionalStreamsToSend()). quictun's own
+  // streams are always client-initiated, so in practice only the
+  // SERVER's value actually constrains anything -- the client's own
+  // copy of this flag is accepted for symmetry/documentation clarity
+  // but never has anything to bite, since the server never opens a
+  // stream to the client. Relevant specifically for --quic_conn pooling:
+  // with quic_conn=N pool slots round-robining accepted TCPs, a single
+  // pooled connection's concurrently-open stream count is the whole
+  // pool's live TCP count divided across those N slots, not N itself --
+  // a small N concentrates more of that load onto fewer connections,
+  // making the shared per-connection cap more likely to matter than a
+  // large N does. 100 matches QuicConfig's own real default
+  // (kDefaultMaxStreamsPerConnection, quic_constants.h) -- quictun
+  // otherwise never touches this at all, so this flag existing at its
+  // default changes nothing from before it existed. Not a hard lifetime
+  // cap: it's a sliding window that grows back by one every time an
+  // existing stream closes (QuicStreamIdManager::OnStreamClosed()), so
+  // it only actually blocks new streams while this many are open at
+  // once, not after this many have ever been opened in total. A peer
+  // that opens a stream beyond what's currently granted is treated as a
+  // protocol violation -- not a per-stream rejection, but the *whole*
+  // connection closing (QUIC_INVALID_STREAM_ID), taking every other
+  // stream sharing it down too; confirmed via a real repro (see
+  // testing/chaos/max_streams_test.py) that this fires correctly and
+  // both endpoints survive it cleanly.
+  int32_t max_streams_per_connection = 100;
+
   // Client-only: caps how many QUIC connections quictun_client keeps open
   // to --remote at once, multiplexing TCP tunnels onto them as streams once
   // that cap is reached instead of opening one QUIC connection per TCP
@@ -120,9 +150,10 @@ struct QuictunTuningOptions {
 // --idle_timeout_seconds, --initial_stream_flow_control_window_kb,
 // --initial_session_flow_control_window_kb, --udp_socket_buffer_kb,
 // --startup_bandwidth_kbps, --startup_rtt_ms,
-// --bbr_startup_loss_threshold_percent, --bbr_startup_full_loss_count and
-// reads their current values into a QuictunTuningOptions. Must be called
-// after quiche::QuicheParseCommandLineFlags().
+// --bbr_startup_loss_threshold_percent, --bbr_startup_full_loss_count,
+// --max_streams_per_connection and reads their current values into a
+// QuictunTuningOptions. Must be called after
+// quiche::QuicheParseCommandLineFlags().
 QuictunTuningOptions GetQuictunTuningOptionsFromFlags();
 
 // Parses `value` as "host:port" or "[ipv6-literal]:port" into a

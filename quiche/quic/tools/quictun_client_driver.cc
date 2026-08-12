@@ -40,6 +40,13 @@ QuictunClientDriver::QuictunClientDriver(QuicEventLoop* event_loop,
       options.initial_stream_flow_control_window_bytes);
   config_template_.SetInitialSessionFlowControlWindowToSend(
       options.initial_session_flow_control_window_bytes);
+  // See --max_streams_per_connection's own comment (quictun_flags.h) --
+  // set here for symmetry/consistency with the server side, but in
+  // practice never has anything to bite: quictun's streams are always
+  // client-initiated, so the server never opens a stream to the client
+  // for this (the client's own incoming limit) to ever gate.
+  config_template_.SetMaxBidirectionalStreamsToSend(
+      options.max_streams_per_connection);
 
   // NOTE: QuicCryptoClientConfig::set_pre_shared_key() is *not* used here --
   // it's an unimplemented stub for TLS-based QUIC in this snapshot
