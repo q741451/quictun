@@ -18,6 +18,7 @@ bazel build -c opt //quiche:quictun_client //quiche:quictun_server
 | `pool_reentrancy_test.py` | `--quic_conn` pooling reentrancy-crash regression. |
 | `pool_cap_test.py` | `--quic_conn` actually caps connection count. |
 | `pool_soak_test.py` | Sustained-duration fd/RSS leak trend check. |
+| `max_streams_test.py` | `--quic_conn` pooling vs. QUIC's own real max_streams-per-connection ceiling. Needs `-DQUICTUN_TEST_BUILD`. |
 | `writeblock_fault_test.py` | Fault injection for the write-blocked-forever bug. Needs `-DQUICTUN_TEST_BUILD`. |
 | `target_unreachable_test.py` | `--target` refusing the TCP connect. |
 | `dualstack_ipv6_test.py` | IPv6 dual-stack `--listen=[::]` reached by an IPv4 peer. |
