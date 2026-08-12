@@ -29,6 +29,11 @@ namespace quic {
 
 namespace {
 
+// See SetQuictunStartupBandwidthHint()'s comment for why this exists.
+// Matches QUICHE's own real quic_max_congestion_window default (2000
+// packets, ~2.9 MB at the default 1460-byte MSS).
+constexpr int32_t kStartupBandwidthHintMaxCongestionWindowPackets = 2000;
+
 // See MakeQuictunPacketWriter()'s comment for why this exists. Generalizes
 // quic_client_default_network_helper.h's QuicLevelTriggeredPacketWriter
 // (which only wraps QuicDefaultPacketWriter) into a decorator around any
@@ -278,6 +283,15 @@ void SetQuictunStartupBandwidthHint(QuicConnection* connection,
       QuicBandwidth::FromKBitsPerSecond(bandwidth_kbps),
       QuicTime::Delta::FromMilliseconds(rtt_ms > 0 ? rtt_ms : kInitialRttMs),
       /*allow_cwnd_to_decrease=*/false);
+  // Bug fix: max_initial_congestion_window defaults to 0 in NetworkParams,
+  // and 0 means "don't touch the ceiling" (see AdjustNetworkParameters()'s
+  // own `if (params.max_initial_congestion_window > 0)` guard) -- so
+  // without this, the bootstrapped window silently clamps to BbrSender's
+  // own built-in default ceiling (kMaxInitialCongestionWindow, 200
+  // packets, ~285 KB at the default MSS), regardless of how high
+  // `bandwidth_kbps` is.
+  params.max_initial_congestion_window =
+      kStartupBandwidthHintMaxCongestionWindowPackets;
   connection->AdjustNetworkParameters(params);
 }
 

@@ -84,6 +84,14 @@ void SetQuictunCongestionControl(QuicConnection* connection,
 // SendAlgorithmInterface::NetworkParams and, for BBR2 specifically,
 // Bbr2Sender::AdjustNetworkParameters -- it only has an effect while
 // still in STARTUP). No-op if `bandwidth_kbps <= 0`.
+//
+// Also sets NetworkParams::max_initial_congestion_window (see the .cc) --
+// without it, the bootstrapped window silently clamps to BbrSender's own
+// built-in 200-packet (~285 KB) default ceiling, regardless of how high
+// `bandwidth_kbps` is: a real gap found while tracing through
+// bbr_sender.cc's AdjustNetworkParameters(), since
+// max_initial_congestion_window defaults to 0 in NetworkParams and 0
+// means "don't touch the ceiling".
 void SetQuictunStartupBandwidthHint(QuicConnection* connection,
                                     int32_t bandwidth_kbps, int32_t rtt_ms);
 
