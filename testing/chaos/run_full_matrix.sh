@@ -116,11 +116,14 @@ echo "exit=$? for pool_cap_test.py" | tee -a "$RESULTS"
 
 # --quic_conn pooling against QUIC's own real, protocol-level
 # max_streams-per-connection ceiling (--max_streams_per_connection --
-# see its own comment in quictun_flags.h): streams beyond the cap
-# should queue cleanly and get serviced once an earlier one closes and
-# frees credit, not error or wedge the connection. A real flag, not a
-# test-only hook -- runs against any build, no -DQUICTUN_TEST_BUILD
-# needed.
+# see its own comment in quictun_flags.h), at several actual configured
+# values: streams beyond the cap should queue cleanly and get serviced
+# once an earlier one closes and frees credit, not error or wedge the
+# connection; and two independent, real (never forced to misbehave)
+# client processes against the same server each get their own full
+# cap's worth of streams, proving the cap is per-connection, not
+# shared/global. A real flag, not a test-only hook -- runs against any
+# build, no -DQUICTUN_TEST_BUILD needed.
 echo "=== max_streams_test.py ===" | tee -a "$RESULTS"
 python3 -u max_streams_test.py >> "$RESULTS" 2>&1
 echo "exit=$? for max_streams_test.py" | tee -a "$RESULTS"
