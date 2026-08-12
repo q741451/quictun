@@ -4,6 +4,7 @@
 
 #include "quiche/quic/tools/quictun_server_driver.h"
 
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -80,6 +81,23 @@ QuictunServerDriver::QuictunServerDriver(QuicEventLoop* event_loop,
       options.initial_stream_flow_control_window_bytes);
   config_template_.SetInitialSessionFlowControlWindowToSend(
       options.initial_session_flow_control_window_bytes);
+
+#ifdef QUICTUN_TEST_BUILD
+  // Test-only override of QuicConfig's own default (kDefaultMaxStreamsPerConnection,
+  // 100 -- quictun otherwise never touches this at all) for exercising the
+  // "many concurrent TCP flows pooled onto one --quic_conn connection hit
+  // the real QUIC-level max_streams ceiling" scenario without actually
+  // needing ~100 real concurrent connections. Bidi streams are always
+  // client-initiated in quictun, so it's the SERVER's advertised incoming
+  // max that gates how many streams the CLIENT can have open at once --
+  // see QuicStreamIdManager::MaybeAllowNewOutgoingStreams(), driven by
+  // this value's negotiation. Same env-var-gated, compiled-out-in-normal-
+  // builds pattern as QUICTUN_INJECT_WRITE_BLOCK_AFTER in
+  // quictun_connection_factory.cc.
+  if (const char* max_streams = std::getenv("QUICTUN_TEST_MAX_STREAMS")) {
+    config_template_.SetMaxBidirectionalStreamsToSend(std::atoi(max_streams));
+  }
+#endif  // QUICTUN_TEST_BUILD
 
   // NOTE: QuicCryptoServerConfig::set_pre_shared_key() is deliberately not
   // called here -- see quictun_client_driver.cc's comment on the client
