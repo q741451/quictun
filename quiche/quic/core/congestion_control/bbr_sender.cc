@@ -841,6 +841,19 @@ void BbrSender::CalculateRecoveryWindow(QuicByteCount bytes_acked,
   // Set up the initial recovery window.
   if (recovery_window_ == 0) {
     recovery_window_ = unacked_packets_->bytes_in_flight() + bytes_acked;
+    // Bug fix: bytes_in_flight() at the exact instant a loss is detected can
+    // be a poor proxy for what the connection was actually sustaining --
+    // e.g. the sender had briefly nothing new to send, or the rest of the
+    // in-flight data had already drained via other acks by the time this
+    // (possibly stale/reordered) loss was processed. Bootstrapping purely
+    // from that instantaneous snapshot can crash recovery_window_ down to
+    // a handful of packets even though congestion_window_ shows the path
+    // was healthy a moment ago, forcing a needless slow re-climb. Floor it
+    // at three-quarters of the already-established congestion_window_
+    // instead so a momentary lull in bytes_in_flight can't manufacture a
+    // collapse far below real capacity.
+    QuicByteCount floor = congestion_window_ * 3 / 4;
+    recovery_window_ = std::max(recovery_window_, floor);
     recovery_window_ = std::max(min_congestion_window_, recovery_window_);
     return;
   }
