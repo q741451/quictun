@@ -8,6 +8,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -63,7 +64,11 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   // possible reuse by a later TCP -- see ShouldKeepConnectionAlive()'s
   // comment in quictun_session.h for why this needs to be known this
   // early (it's latched into the session at construction, not something
-  // that can be flipped later).
+  // that can be flipped later). `transparent` mirrors --transparent --
+  // when true, every AssignNewTcp() call on this connection must supply a
+  // captured_dest (see that method's comment); StartTunnel() sends it as
+  // an address header right after the --key preamble instead of quictun's
+  // normal zero-framing wire format.
   static std::unique_ptr<QuictunClientConnection> Create(
       QuicEventLoop* event_loop, QuicConnectionHelperInterface* helper,
       QuicAlarmFactory* alarm_factory,
@@ -72,7 +77,7 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
       const QuicServerId& server_id, const QuicSocketAddress& remote_address,
       QuicCryptoClientConfig* crypto_config, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
-      QuicByteCount udp_socket_buffer_bytes, bool poolable,
+      QuicByteCount udp_socket_buffer_bytes, bool poolable, bool transparent,
       std::function<void(QuictunClientConnection*)> on_closed);
 
   ~QuictunClientConnection() override;
@@ -90,9 +95,15 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   // never more than one pending at a time there). No-op (closes
   // `accepted_tcp_fd` immediately) if this connection is already closed --
   // callers doing their own pooling should check closed()/query state
-  // through the driver, not rely on this to signal that.
+  // through the driver, not rely on this to signal that. `captured_dest`
+  // is the original destination captured off `accepted_tcp_fd` via
+  // SO_ORIGINAL_DST (see quictun_client_driver.cc's AcceptLoop()) --
+  // required (must have a value) iff this connection was constructed with
+  // `transparent`, since StartTunnel() has no --target fallback to send
+  // instead in that mode; ignored, and should always be nullopt, otherwise.
   void AssignNewTcp(SocketFd accepted_tcp_fd,
-                    const QuicSocketAddress& tcp_peer_address);
+                    const QuicSocketAddress& tcp_peer_address,
+                    std::optional<QuicSocketAddress> captured_dest);
 
   // Exposed for QuictunClientDriver to apply per-connection startup tuning
   // (see SetQuictunStartupBandwidthHint()) right after construction, and
@@ -141,6 +152,8 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   struct PendingTcp {
     SocketFd fd;
     QuicSocketAddress peer_address;
+    // See AssignNewTcp()'s comment -- has a value iff transparent_.
+    std::optional<QuicSocketAddress> captured_dest;
   };
 
   // One stream's TCP-pumping state, from the moment its stream opens
@@ -160,7 +173,7 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
       quiche::QuicheBufferAllocator* buffer_allocator, const QuicConfig& config,
       const QuicServerId& server_id, QuicCryptoClientConfig* crypto_config,
       const std::string& psk, CongestionControlType congestion_control,
-      bool so_txtime_enabled, bool poolable,
+      bool so_txtime_enabled, bool poolable, bool transparent,
       std::function<void(QuictunClientConnection*)> on_closed);
 
   // Opens outgoing streams for as many of pending_tcps_ as currently
@@ -190,6 +203,7 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   std::unique_ptr<QuictunClientSession> session_;
 
   const std::string psk_;
+  const bool transparent_;
   quiche::QuicheBufferAllocator* const buffer_allocator_;
   std::deque<PendingTcp> pending_tcps_;
   absl::flat_hash_map<QuicStreamId, StreamTcp> stream_tcps_;

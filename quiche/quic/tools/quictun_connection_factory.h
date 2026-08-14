@@ -12,12 +12,14 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "quiche/quic/core/io/quic_event_loop.h"
 #include "quiche/quic/core/io/socket.h"
 #include "quiche/quic/core/quic_connection.h"
 #include "quiche/quic/core/quic_packet_writer.h"
+#include "quiche/quic/platform/api/quic_socket_address.h"
 
 namespace quic {
 
@@ -116,6 +118,21 @@ void SetQuictunStartupBandwidthHint(QuicConnection* connection,
 // this with those defaults is a harmless no-op.
 void ApplyQuictunBbrStartupLossOverrides(int32_t loss_threshold_percent,
                                          int32_t full_loss_count);
+
+// --transparent (Linux only, quictun_client_driver.cc's AcceptLoop()): the
+// original destination a freshly-accepted TCP connection was heading to
+// before an external iptables/nftables REDIRECT rule sent it to --local
+// instead (SO_ORIGINAL_DST) -- quictun itself never touches netfilter
+// config, this only reads what a rule the operator set up separately
+// already did. Tries the IPv6 variant (IP6T_SO_ORIGINAL_DST) first, then
+// IPv4 (SO_ORIGINAL_DST) -- mirrors shadowsocks-libev's redir.c exactly,
+// including its own reasoning for trying both rather than picking one
+// upfront: there's no cheap way to know in advance which family a given
+// fd's REDIRECT rule matched as. Returns nullopt (after logging why, at
+// WARNING) if both fail -- most commonly because `fd` was connected to
+// --local directly, never actually redirected by any rule at all.
+std::optional<QuicSocketAddress> CaptureQuictunOriginalDestination(
+    SocketFd fd);
 
 }  // namespace quic
 

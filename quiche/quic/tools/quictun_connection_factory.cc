@@ -6,9 +6,28 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <memory>
+#include <optional>
 #include <string>
+
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <linux/netfilter_ipv4.h>
+
+// Deliberately not #include <linux/netfilter_ipv6/ip6_tables.h> -- unlike
+// netfilter_ipv4.h, it isn't valid C++ (pointer arithmetic on void*, a
+// GNU C extension clang rejects here), confirmed by trying it. The one
+// constant needed from it is hardcoded instead -- numerically 80 on every
+// real Linux kernel (verified against this build's own sysroot headers),
+// the same value as SO_ORIGINAL_DST, just read at a different socket
+// level (SOL_IPV6 vs. SOL_IP). shadowsocks-libev's redir.c carries an
+// identical `#ifndef IP6T_SO_ORIGINAL_DST` fallback-define for older/
+// minimal kernel headers, for the same reason.
+#ifndef IP6T_SO_ORIGINAL_DST
+#define IP6T_SO_ORIGINAL_DST 80
+#endif
 
 #include "quiche/quic/core/batch_writer/quic_gso_batch_writer.h"
 #include "quiche/quic/core/congestion_control/send_algorithm_interface.h"
@@ -307,6 +326,33 @@ void ApplyQuictunBbrStartupLossOverrides(int32_t loss_threshold_percent,
   // no-op that re-sets the flags to what they already were.
   SetQuicFlag(quic_bbr2_default_loss_threshold, loss_threshold_percent / 100.0);
   SetQuicFlag(quic_bbr2_default_startup_full_loss_count, full_loss_count);
+}
+
+std::optional<QuicSocketAddress> CaptureQuictunOriginalDestination(
+    SocketFd fd) {
+  struct sockaddr_storage dest_storage;
+  socklen_t dest_len = sizeof(dest_storage);
+  memset(&dest_storage, 0, sizeof(dest_storage));
+  // Mirrors shadowsocks-libev's redir.c getdestaddr(): try the IPv6 variant
+  // first, then IPv4 on failure -- its own comment explains why (no cheap
+  // way to know in advance which family a given fd's REDIRECT rule matched
+  // as).
+  if (getsockopt(fd, SOL_IPV6, IP6T_SO_ORIGINAL_DST, &dest_storage,
+                 &dest_len) != 0) {
+    dest_len = sizeof(dest_storage);
+    if (getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, &dest_storage, &dest_len) !=
+        0) {
+      QUIC_LOG(WARNING)
+          << "SO_ORIGINAL_DST/IP6T_SO_ORIGINAL_DST both failed for fd " << fd
+          << " (errno=" << errno
+          << ") -- was this connection actually redirected via an "
+             "iptables/nftables REDIRECT rule, or connected to --local "
+             "directly?";
+      return std::nullopt;
+    }
+  }
+  return QuicSocketAddress(reinterpret_cast<const sockaddr*>(&dest_storage),
+                           dest_len);
 }
 
 }  // namespace quic

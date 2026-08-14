@@ -47,6 +47,55 @@ class StreamGarbageAlarmDelegate : public QuicAlarm::DelegateWithoutContext {
   QuictunServerConnection* const connection_;
 };
 
+// Result of trying to parse a --transparent address header (ss-server-style
+// ATYP+addr+port, IPv4/IPv6 only -- no domain-name ATYP, since a
+// transparent proxy only ever captures a concrete IP off SO_ORIGINAL_DST,
+// never a hostname) out of whatever's been buffered so far.
+enum class TransparentHeaderParseResult {
+  kIncomplete,  // Need more bytes; buffer holds a valid-so-far prefix.
+  kInvalid,     // Bad ATYP or corrupt bytes -- reject the stream outright.
+  kComplete,
+};
+
+struct ParsedTransparentHeader {
+  TransparentHeaderParseResult result = TransparentHeaderParseResult::kIncomplete;
+  size_t header_length = 0;  // Valid only if result == kComplete.
+  QuicSocketAddress destination;  // Valid only if result == kComplete.
+};
+
+ParsedTransparentHeader ParseQuictunTransparentHeader(absl::string_view buf) {
+  if (buf.empty()) {
+    return {TransparentHeaderParseResult::kIncomplete};
+  }
+  uint8_t atyp = static_cast<uint8_t>(buf[0]);
+  size_t addr_len;
+  if (atyp == 1) {
+    addr_len = 4;  // IPv4.
+  } else if (atyp == 4) {
+    addr_len = 16;  // IPv6.
+  } else {
+    // Includes ATYP 3 (domain name) -- deliberately unsupported (see this
+    // function's own comment) -- and anything else, e.g. a --target-mode
+    // client accidentally talking to a --transparent-mode server: its raw
+    // TCP payload's first byte is very unlikely to happen to be exactly 1
+    // or 4, so mode mismatches like that get caught here, not silently
+    // misparsed.
+    return {TransparentHeaderParseResult::kInvalid};
+  }
+  size_t header_length = 1 + addr_len + 2;
+  if (buf.size() < header_length) {
+    return {TransparentHeaderParseResult::kIncomplete};
+  }
+  QuicIpAddress ip;
+  if (!ip.FromPackedString(buf.data() + 1, addr_len)) {
+    return {TransparentHeaderParseResult::kInvalid};
+  }
+  uint16_t port = (static_cast<uint8_t>(buf[1 + addr_len]) << 8) |
+                  static_cast<uint8_t>(buf[1 + addr_len + 1]);
+  return {TransparentHeaderParseResult::kComplete, header_length,
+          QuicSocketAddress(ip, port)};
+}
+
 }  // namespace
 
 std::unique_ptr<QuictunServerConnection> QuictunServerConnection::Create(
@@ -57,7 +106,8 @@ std::unique_ptr<QuictunServerConnection> QuictunServerConnection::Create(
     QuicCompressedCertsCache* compressed_certs_cache,
     const QuicSocketAddress& listen_address, const QuicSocketAddress& self_address,
     const QuicSocketAddress& peer_address,
-    const QuicSocketAddress& target_address, QuicConnectionId server_connection_id,
+    std::optional<QuicSocketAddress> target_address, bool transparent,
+    QuicConnectionId server_connection_id,
     const std::string& psk, CongestionControlType congestion_control,
     bool so_txtime_enabled, QuicByteCount udp_socket_buffer_bytes,
     const QuicReceivedPacket& first_packet,
@@ -88,7 +138,7 @@ std::unique_ptr<QuictunServerConnection> QuictunServerConnection::Create(
   return absl::WrapUnique(new QuictunServerConnection(
       event_loop, std::move(udp_fd), self_address, peer_address, helper,
       alarm_factory, socket_factory, connection_id_generator, config,
-      crypto_config, compressed_certs_cache, target_address,
+      crypto_config, compressed_certs_cache, target_address, transparent,
       server_connection_id, psk, congestion_control, so_txtime_enabled,
       first_packet, std::move(on_closed)));
 }
@@ -101,7 +151,8 @@ QuictunServerConnection::QuictunServerConnection(
     ConnectionIdGeneratorInterface& connection_id_generator,
     const QuicConfig& config, const QuicCryptoServerConfig* crypto_config,
     QuicCompressedCertsCache* compressed_certs_cache,
-    const QuicSocketAddress& target_address, QuicConnectionId server_connection_id,
+    std::optional<QuicSocketAddress> target_address, bool transparent,
+    QuicConnectionId server_connection_id,
     const std::string& psk, CongestionControlType congestion_control,
     bool so_txtime_enabled, const QuicReceivedPacket& first_packet,
     std::function<void(QuictunServerConnection*)> on_closed)
@@ -110,6 +161,7 @@ QuictunServerConnection::QuictunServerConnection(
       self_address_(self_address),
       peer_address_(peer_address),
       target_address_(target_address),
+      transparent_(transparent),
       socket_factory_(socket_factory),
       connection_id_generator_(connection_id_generator),
       expected_psk_(psk),
@@ -414,13 +466,41 @@ void QuictunServerConnection::OnStreamDataAvailable(QuicStreamId id) {
           key_read_buffers_.erase(id);
           return;
         }
-        authenticated = true;
-        // Any bytes already read past the preamble are real payload; hand
-        // them to the tunnel once it's constructed.
-        std::string leftover = key_read_buffer.substr(2 + key_length);
-        key_read_buffers_.erase(id);
-        StartTunnelForStream(id, stream, std::move(leftover));
-        return;
+        size_t offset = 2 + key_length;
+        std::optional<QuicSocketAddress> dest;
+        bool ready = true;
+        if (transparent_) {
+          ParsedTransparentHeader parsed = ParseQuictunTransparentHeader(
+              absl::string_view(key_read_buffer).substr(offset));
+          if (parsed.result == TransparentHeaderParseResult::kInvalid) {
+            // Same reasoning as the key-mismatch case above: only this one
+            // stream is at fault.
+            QUIC_LOG(WARNING)
+                << "Rejecting stream " << id << " from " << peer_address_
+                << ": invalid or missing transparent-proxy address header";
+            stream->Reset(QUIC_BAD_APPLICATION_PAYLOAD);
+            key_read_buffers_.erase(id);
+            return;
+          } else if (parsed.result ==
+                     TransparentHeaderParseResult::kIncomplete) {
+            // Header hasn't fully arrived yet -- keep reading (falls
+            // through to the bytes_read==0 check below).
+            ready = false;
+          } else {
+            dest = parsed.destination;
+            offset += parsed.header_length;
+          }
+        }
+        if (ready) {
+          authenticated = true;
+          // Any bytes already read past the preamble (and address header,
+          // if any) are real payload; hand them to the tunnel once it's
+          // constructed.
+          std::string leftover = key_read_buffer.substr(offset);
+          key_read_buffers_.erase(id);
+          StartTunnelForStream(id, stream, std::move(leftover), dest);
+          return;
+        }
       }
     }
     if (bytes_read == 0) {
@@ -438,9 +518,9 @@ void QuictunServerConnection::OnStreamDataAvailable(QuicStreamId id) {
   }
 }
 
-void QuictunServerConnection::StartTunnelForStream(QuicStreamId id,
-                                                    QuictunStream* stream,
-                                                    std::string leftover) {
+void QuictunServerConnection::StartTunnelForStream(
+    QuicStreamId id, QuictunStream* stream, std::string leftover,
+    std::optional<QuicSocketAddress> dest) {
   StreamTarget& target = stream_targets_[id];
   // Constructed with no socket yet (see QuictunTunnel::SetSocket()'s
   // comment): this tunnel is about to become the dial-out's AsyncVisitor,
@@ -500,8 +580,16 @@ void QuictunServerConnection::StartTunnelForStream(QuicStreamId id,
       });
   target.tunnel->SetPendingSeedData(std::move(leftover));
 
+  // By construction exactly one of these has a value: OnStreamDataAvailable()
+  // only calls this with a real `dest` when transparent_ (and never
+  // otherwise), and target_address_ is only nullopt when transparent_ (see
+  // --transparent's mutual-exclusivity check in quictun_server_bin.cc).
+  QUICHE_DCHECK_EQ(transparent_, dest.has_value());
+  QUICHE_DCHECK_EQ(transparent_, !target_address_.has_value());
+  const QuicSocketAddress& connect_to = transparent_ ? *dest : *target_address_;
+
   target.target_socket = socket_factory_->CreateTcpClientSocket(
-      target_address_, /*receive_buffer_size=*/0, /*send_buffer_size=*/0,
+      connect_to, /*receive_buffer_size=*/0, /*send_buffer_size=*/0,
       target.tunnel.get());
   target.tunnel->SetSocket(target.target_socket.get());
   session_->SetStreamDelegate(id, target.tunnel.get());

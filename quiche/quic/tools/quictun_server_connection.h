@@ -7,6 +7,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "absl/container/flat_hash_map.h"
@@ -38,8 +39,10 @@ namespace quic {
 // the QuicConnection, and the QuictunServerSession. Each stream the client
 // opens on that session (--quic_conn on the client side controls whether
 // that's ever more than one -- see quictun_client_driver.h) gets its own
-// independent authentication (the --key preamble check), its own dial-out
-// to --target, and its own QuictunTunnel -- tracked in stream_targets_,
+// independent authentication (the --key preamble check, plus an address
+// header right after it when --transparent), its own dial-out (to
+// --target, or to that per-stream captured destination when
+// --transparent), and its own QuictunTunnel -- tracked in stream_targets_,
 // keyed by QuicStreamId. A single misbehaving/unauthenticated stream only
 // ever affects itself (reset, not the whole connection); the connection
 // itself closes on a real QUIC-level failure/idle timeout, or when told to
@@ -66,11 +69,20 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   // family, not "::"/"0.0.0.0"). `first_packet` is fed into the new
   // QuicConnection immediately. `psk` (the server's own --key) is checked
   // against each stream's own key preamble once that stream is created --
-  // see OnStreamDataAvailable(). `socket_factory` is used to dial --target
-  // once (and each time) a stream authenticates -- see
-  // StartTunnelForStream(); must outlive this object. Returns nullptr if
-  // the dedicated UDP socket couldn't be created/bound/connected -- the
+  // see OnStreamDataAvailable(). `socket_factory` is used to dial the
+  // stream's destination once (and each time) a stream authenticates --
+  // see StartTunnelForStream(); must outlive this object. Returns nullptr
+  // if the dedicated UDP socket couldn't be created/bound/connected -- the
   // caller should just drop the packet in that case.
+  //
+  // `target_address` is nullopt iff `transparent` -- in that mode there is
+  // no single fixed target; OnStreamDataAvailable() instead parses a
+  // per-stream destination out of an address header the client sends right
+  // after the key preamble (ss-server-style ATYP+addr+port, IPv4/IPv6
+  // only, no domain names -- see the .cc). `transparent` must never be
+  // true at the same time `target_address` has a value; enforced by the
+  // caller (see --transparent's mutual-exclusivity check in
+  // quictun_server_bin.cc), not re-validated here.
   static std::unique_ptr<QuictunServerConnection> Create(
       QuicEventLoop* event_loop, QuicConnectionHelperInterface* helper,
       QuicAlarmFactory* alarm_factory, SocketFactory* socket_factory,
@@ -80,7 +92,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
       const QuicSocketAddress& listen_address,
       const QuicSocketAddress& self_address,
       const QuicSocketAddress& peer_address,
-      const QuicSocketAddress& target_address,
+      std::optional<QuicSocketAddress> target_address, bool transparent,
       QuicConnectionId server_connection_id, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
       QuicByteCount udp_socket_buffer_bytes,
@@ -135,12 +147,14 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   void CollectStreamGarbage();
 
   // QuictunStreamDelegate: used only during a stream's pre-tunnel
-  // authentication phase (reading and validating its key preamble), before
-  // a QuictunTunnel exists to take over as that stream's delegate -- see
+  // authentication phase (reading and validating its key preamble, plus --
+  // when transparent_ -- the address header right after it), before a
+  // QuictunTunnel exists to take over as that stream's delegate -- see
   // quictun_client_connection.cc for the wire format (2-byte big-endian
-  // length + key bytes, always the first bytes on the stream). Not used at
-  // all for a stream once StartTunnelForStream() hands its delegate role to
-  // the QuictunTunnel that owns it from then on.
+  // length + key bytes, always the first bytes on the stream; when
+  // transparent_, an ss-server-style ATYP+addr+port header immediately
+  // follows). Not used at all for a stream once StartTunnelForStream()
+  // hands its delegate role to the QuictunTunnel that owns it from then on.
   void OnStreamDataAvailable(QuicStreamId id) override;
   void OnStreamCanWriteMore(QuicStreamId /*id*/) override {}
   void OnStreamGone(QuicStreamId id) override;
@@ -169,7 +183,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
       ConnectionIdGeneratorInterface& connection_id_generator,
       const QuicConfig& config, const QuicCryptoServerConfig* crypto_config,
       QuicCompressedCertsCache* compressed_certs_cache,
-      const QuicSocketAddress& target_address,
+      std::optional<QuicSocketAddress> target_address, bool transparent,
       QuicConnectionId server_connection_id, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
       const QuicReceivedPacket& first_packet,
@@ -181,17 +195,24 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   // that created the stream).
   void OnNewStream(QuicStreamId id);
 
-  // Called once stream `id` has read a full, matching key preamble.
-  // `leftover` is any real payload bytes already read past the preamble in
-  // the same Read() call. Dials --target and constructs this stream's
-  // QuictunTunnel; see the class comment for why this waits for auth
-  // first rather than dialing eagerly (avoids wasting a --target
-  // connection on a stream that turns out to be unauthenticated, and lets
-  // the newly-created QuictunTunnel itself be the dial-out's AsyncVisitor
-  // instead of this class needing its own per-stream dial-tracking
-  // AsyncVisitor implementation -- see QuictunTunnel::SetSocket()).
+  // Called once stream `id` has read a full, matching key preamble (and,
+  // when transparent_, a full address header right after it -- see
+  // OnStreamDataAvailable()). `leftover` is any real payload bytes already
+  // read past the preamble (and address header, if any) in the same
+  // Read() call. `dest` is the per-stream destination to dial when
+  // transparent_ (always has a value in that case -- OnStreamDataAvailable()
+  // never calls this without one); ignored, and always nullopt, otherwise.
+  // Dials that destination (or target_address_, when not transparent_) and
+  // constructs this stream's QuictunTunnel; see the class comment for why
+  // this waits for auth first rather than dialing eagerly (avoids wasting
+  // a connection on a stream that turns out to be unauthenticated, and
+  // lets the newly-created QuictunTunnel itself be the dial-out's
+  // AsyncVisitor instead of this class needing its own per-stream
+  // dial-tracking AsyncVisitor implementation -- see
+  // QuictunTunnel::SetSocket()).
   void StartTunnelForStream(QuicStreamId id, QuictunStream* stream,
-                            std::string leftover);
+                            std::string leftover,
+                            std::optional<QuicSocketAddress> dest);
 
   // Disconnects `target.target_socket` if it exists and hasn't been
   // already (idempotency mirrors the pre-multiplexing
@@ -206,7 +227,8 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   OwnedSocketFd udp_fd_;
   const QuicSocketAddress self_address_;
   const QuicSocketAddress peer_address_;
-  const QuicSocketAddress target_address_;
+  const std::optional<QuicSocketAddress> target_address_;
+  const bool transparent_;
   SocketFactory* const socket_factory_;
   ConnectionIdGeneratorInterface& connection_id_generator_;
   QuicPacketReader reader_;

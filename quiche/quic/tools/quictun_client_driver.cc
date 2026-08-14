@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include "absl/status/status.h"
@@ -148,6 +149,7 @@ QuictunClientConnection* QuictunClientDriver::CreateNewConnection() {
           server_id_, remote_address_, crypto_config_.get(), options_.psk,
           congestion_control_, options_.so_txtime,
           options_.udp_socket_buffer_bytes, /*poolable=*/options_.quic_conn > 0,
+          options_.transparent,
           [this](QuictunClientConnection* c) { RemoveConnection(c); });
   if (connection == nullptr) {
     return nullptr;
@@ -171,6 +173,25 @@ void QuictunClientDriver::AcceptLoop() {
       return;
     }
 
+    // --transparent: capture the destination an external iptables/nftables
+    // REDIRECT rule sent this connection's way, before it was redirected to
+    // --local -- see CaptureQuictunOriginalDestination()'s own comment.
+    // Required whenever --transparent is set: unlike --target mode, there
+    // is no fixed fallback destination to tunnel this connection to if
+    // capture fails (e.g. it was connected to --local directly, without
+    // ever going through a REDIRECT rule at all) -- refuse it outright
+    // rather than silently dropping it into some other stream's real
+    // destination or sending a malformed header the server would have to
+    // guess about.
+    std::optional<QuicSocketAddress> captured_dest;
+    if (options_.transparent) {
+      captured_dest = CaptureQuictunOriginalDestination(accepted->fd);
+      if (!captured_dest.has_value()) {
+        socket_api::Close(accepted->fd);
+        continue;
+      }
+    }
+
     if (options_.quic_conn == 0) {
       // Unlimited: quictun's original behavior, completely unchanged --
       // every accepted TCP connection gets its own brand-new QUIC
@@ -181,7 +202,8 @@ void QuictunClientDriver::AcceptLoop() {
         socket_api::Close(accepted->fd);
         continue;
       }
-      connection->AssignNewTcp(accepted->fd, accepted->peer_address);
+      connection->AssignNewTcp(accepted->fd, accepted->peer_address,
+                               captured_dest);
       continue;
     }
 
@@ -203,7 +225,7 @@ void QuictunClientDriver::AcceptLoop() {
         continue;
       }
     }
-    slot->AssignNewTcp(accepted->fd, accepted->peer_address);
+    slot->AssignNewTcp(accepted->fd, accepted->peer_address, captured_dest);
   }
 }
 

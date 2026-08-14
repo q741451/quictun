@@ -63,7 +63,7 @@ constexpr char kSourceAddressTokenSecret[] = "quictun";
 
 QuictunServerDriver::QuictunServerDriver(QuicEventLoop* event_loop,
                                          const QuicSocketAddress& listen_address,
-                                         const QuicSocketAddress& target_address,
+                                         std::optional<QuicSocketAddress> target_address,
                                          const QuictunTuningOptions& options)
     : event_loop_(event_loop),
       listen_address_(listen_address),
@@ -133,7 +133,11 @@ absl::Status QuictunServerDriver::Start() {
   // actually succeeded, tunnel is ready" confirmation that completes the
   // startup banner, and needs the same default visibility.
   std::cerr << "quictun_server listening on " << listen_address_
-            << ", tunneling to " << target_address_ << std::endl;
+            << ", tunneling to "
+            << (target_address_.has_value()
+                    ? target_address_->ToString()
+                    : std::string("(transparent mode)"))
+            << std::endl;
   return absl::OkStatus();
 }
 
@@ -223,7 +227,8 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
           event_loop_, &helper_, alarm_factory_.get(), &socket_factory_,
           connection_id_generator_, config_template_, crypto_config_.get(),
           &compressed_certs_cache_, listen_address_, self_address, peer_address,
-          target_address_, QuicConnectionId(destination_connection_id),
+          target_address_, options_.transparent,
+          QuicConnectionId(destination_connection_id),
           options_.psk, congestion_control_, options_.so_txtime,
           options_.udp_socket_buffer_bytes, packet,
           [this](QuictunServerConnection* c) { RemoveConnection(c); });

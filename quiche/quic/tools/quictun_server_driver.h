@@ -6,6 +6,7 @@
 #define QUICHE_QUIC_TOOLS_QUICTUN_SERVER_DRIVER_H_
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -40,9 +41,13 @@ namespace quic {
 class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
                                           public ProcessPacketInterface {
  public:
+  // `target_address` is nullopt iff `options.transparent` -- in that mode
+  // there is no single fixed target, each QuictunServerConnection connects
+  // out to a per-stream destination captured by the client instead (see
+  // quictun_server_connection.h).
   QuictunServerDriver(QuicEventLoop* event_loop,
                       const QuicSocketAddress& listen_address,
-                      const QuicSocketAddress& target_address,
+                      std::optional<QuicSocketAddress> target_address,
                       const QuictunTuningOptions& options);
 
   // Creates, binds, and registers the rendezvous UDP socket. Returns
@@ -68,7 +73,7 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
 
   QuicEventLoop* const event_loop_;
   const QuicSocketAddress listen_address_;
-  const QuicSocketAddress target_address_;
+  const std::optional<QuicSocketAddress> target_address_;
   const QuictunTuningOptions options_;
 
   OwnedSocketFd rendezvous_fd_;

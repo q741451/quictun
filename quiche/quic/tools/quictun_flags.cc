@@ -60,6 +60,22 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "it.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    bool, transparent, false,
+    "Transparent-proxy mode (Linux only). quictun_client captures each "
+    "accepted TCP connection's original destination via SO_ORIGINAL_DST "
+    "(populated by an external iptables/nftables REDIRECT rule the "
+    "operator sets up separately -- quictun itself never touches "
+    "netfilter config) instead of always tunneling to one fixed address; "
+    "quictun_server connects out to that per-stream destination instead "
+    "of --target. Mutually exclusive with --target -- setting both is a "
+    "startup error, since the two modes speak incompatible wire formats "
+    "(--target's existing mode has zero framing after the --key preamble; "
+    "transparent mode prepends an address header). Both quictun_client "
+    "and quictun_server must be started with the same value, the same as "
+    "--key. false (default) is a no-op -- normal port-forward behavior, "
+    "unchanged.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, idle_timeout_seconds, 60,
     "QUIC connection idle timeout, in seconds.");
 
@@ -156,6 +172,7 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
   options.congestion_control =
       quiche::GetQuicheCommandLineFlag(FLAGS_congestion_control);
   options.so_txtime = quiche::GetQuicheCommandLineFlag(FLAGS_so_txtime);
+  options.transparent = quiche::GetQuicheCommandLineFlag(FLAGS_transparent);
   options.idle_timeout = QuicTime::Delta::FromSeconds(
       quiche::GetQuicheCommandLineFlag(FLAGS_idle_timeout_seconds));
   options.initial_stream_flow_control_window_bytes =
@@ -234,6 +251,7 @@ void PrintQuictunStartupBanner(
                                           : "0 (unlimited)"});
   lines.push_back({"congestion_control", options.congestion_control});
   lines.push_back({"so_txtime", options.so_txtime ? "true" : "false"});
+  lines.push_back({"transparent", options.transparent ? "true" : "false"});
   lines.push_back({"idle_timeout_seconds",
                     absl::StrCat(options.idle_timeout.ToSeconds())});
   lines.push_back(

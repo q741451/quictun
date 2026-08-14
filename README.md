@@ -61,6 +61,7 @@ quictun_server  (built 2026/08/06 20:14:23)
   zero_rtt                               = true
   congestion_control                     = bbr2
   so_txtime                              = false
+  transparent                            = false
   idle_timeout_seconds                   = 60
   initial_stream_flow_control_window_kb  = 512
   initial_session_flow_control_window_kb = 512
@@ -83,6 +84,7 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | `--zero_rtt` | `true` | Attempt 0-RTT resumption for QUIC connections made after the first, within one process's lifetime. See [Security model](#security-model) for the replay caveat. |
 | `--congestion_control` | `cubic` | `cubic`, `bbr`, `bbr2`, or `bbr3`. Applies independently to *this endpoint's own send direction* -- client and server each pick their own, and the two need not match. An unrecognized value falls back to `cubic` with a logged warning rather than failing to start. |
 | `--so_txtime` | `false` | Use `SO_TXTIME` (Linux packet pacing offload) on the UDP send path. Falls back silently if the kernel doesn't support it. |
+| `--transparent` | `false` | Transparent-proxy mode (Linux only). `quictun_client` captures each accepted TCP connection's original destination via `SO_ORIGINAL_DST` (populated by an external iptables/nftables `REDIRECT` rule the operator sets up separately -- quictun itself never touches netfilter config) instead of always tunneling to one fixed address; `quictun_server` connects out to that per-stream destination instead of `--target`. Mutually exclusive with `--target` on the server -- setting both is a startup error, since the two modes speak incompatible wire formats (`--target`'s existing mode has zero framing after the `--key` preamble; transparent mode prepends an address header, IPv4/IPv6 only, no domain names). Both `quictun_client` and `quictun_server` must be started with the same value, the same as `--key`. |
 | `--idle_timeout_seconds` | `60` | QUIC connection idle timeout, in seconds. |
 | `--initial_stream_flow_control_window_kb` | `512` | Initial per-stream flow-control window advertised to the peer, in KiB. Independent of `--initial_session_flow_control_window_kb` -- since each connection carries exactly one stream, the smaller of the two is what actually caps throughput in practice, so raise both together for high-bandwidth-delay-product paths. |
 | `--initial_session_flow_control_window_kb` | `512` | Initial per-session flow-control window advertised to the peer, in KiB. See `--initial_stream_flow_control_window_kb` above. |
@@ -98,7 +100,7 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--listen` | `[::]:4433` | Address:port to accept incoming QUIC (UDP) connections on. |
-| `--target` | *(required)* | Address:port of the TCP server to connect to for each accepted tunnel. |
+| `--target` | *(required unless `--transparent`)* | Address:port of the TCP server to connect to for each accepted tunnel. Must be left unset when `--transparent` is enabled -- see that flag above. |
 
 ### `quictun_client`-only
 

@@ -93,18 +93,30 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  std::string target_flag = quiche::GetQuicheCommandLineFlag(FLAGS_target);
-  std::optional<quic::QuicSocketAddress> target_address =
-      quic::ParseQuictunSocketAddress(target_flag);
-  if (!target_address.has_value()) {
-    quiche::QuichePrintCommandLineFlagHelp(usage);
-    return 1;
-  }
-
   quic::QuictunTuningOptions options = quic::GetQuictunTuningOptionsFromFlags();
   if (options.psk.empty()) {
     std::cerr << "--key is required" << std::endl;
     return 1;
+  }
+
+  std::string target_flag = quiche::GetQuicheCommandLineFlag(FLAGS_target);
+  std::optional<quic::QuicSocketAddress> target_address;
+  if (options.transparent) {
+    // --target and --transparent speak incompatible wire formats (see
+    // --transparent's own help text) -- refuse to guess which one was
+    // meant rather than silently ignoring one of them.
+    if (!target_flag.empty()) {
+      std::cerr << "--target must not be set when --transparent is enabled "
+                   "-- the destination is captured per-connection instead"
+                << std::endl;
+      return 1;
+    }
+  } else {
+    target_address = quic::ParseQuictunSocketAddress(target_flag);
+    if (!target_address.has_value()) {
+      quiche::QuichePrintCommandLineFlagHelp(usage);
+      return 1;
+    }
   }
   // Process-wide; must run before any connection is created, and after
   // flag parsing since it reads --bbr_startup_loss_threshold_percent/
@@ -115,12 +127,14 @@ int main(int argc, char* argv[]) {
 
   quic::PrintQuictunStartupBanner(
       "quictun_server",
-      {{"listen", listen_flag}, {"target", target_flag}}, options);
+      {{"listen", listen_flag},
+       {"target", options.transparent ? "(transparent mode)" : target_flag}},
+      options);
 
   std::unique_ptr<quic::QuicEventLoop> event_loop =
       quic::GetDefaultEventLoop()->Create(quic::QuicDefaultClock::Get());
   quic::QuictunServerDriver driver(event_loop.get(), *listen_address,
-                                   *target_address, options);
+                                   target_address, options);
   absl::Status status = driver.Start();
   if (!status.ok()) {
     std::cerr << "Failed to start quictun_server: " << status << std::endl;

@@ -54,7 +54,7 @@ std::unique_ptr<QuictunClientConnection> QuictunClientConnection::Create(
     const QuicServerId& server_id, const QuicSocketAddress& remote_address,
     QuicCryptoClientConfig* crypto_config, const std::string& psk,
     CongestionControlType congestion_control, bool so_txtime_enabled,
-    QuicByteCount udp_socket_buffer_bytes, bool poolable,
+    QuicByteCount udp_socket_buffer_bytes, bool poolable, bool transparent,
     std::function<void(QuictunClientConnection*)> on_closed) {
   absl::StatusOr<OwnedSocketFd> fd =
       CreateQuicUdpSocket(remote_address, udp_socket_buffer_bytes);
@@ -85,7 +85,7 @@ std::unique_ptr<QuictunClientConnection> QuictunClientConnection::Create(
       event_loop, std::move(udp_fd), *self_address, remote_address, helper,
       alarm_factory, connection_id_generator, buffer_allocator, config,
       server_id, crypto_config, psk, congestion_control, so_txtime_enabled,
-      poolable, std::move(on_closed)));
+      poolable, transparent, std::move(on_closed)));
 }
 
 QuictunClientConnection::QuictunClientConnection(
@@ -97,12 +97,13 @@ QuictunClientConnection::QuictunClientConnection(
     quiche::QuicheBufferAllocator* buffer_allocator, const QuicConfig& config,
     const QuicServerId& server_id, QuicCryptoClientConfig* crypto_config,
     const std::string& psk, CongestionControlType congestion_control,
-    bool so_txtime_enabled, bool poolable,
+    bool so_txtime_enabled, bool poolable, bool transparent,
     std::function<void(QuictunClientConnection*)> on_closed)
     : event_loop_(event_loop),
       udp_fd_(std::move(udp_fd)),
       self_address_(self_address),
       psk_(psk),
+      transparent_(transparent),
       buffer_allocator_(buffer_allocator),
       idle_timeout_(config.IdleNetworkTimeout()),
       on_closed_(std::move(on_closed)) {
@@ -135,12 +136,14 @@ QuictunClientConnection::QuictunClientConnection(
 }
 
 void QuictunClientConnection::AssignNewTcp(
-    SocketFd accepted_tcp_fd, const QuicSocketAddress& tcp_peer_address) {
+    SocketFd accepted_tcp_fd, const QuicSocketAddress& tcp_peer_address,
+    std::optional<QuicSocketAddress> captured_dest) {
   if (closed_) {
     socket_api::Close(accepted_tcp_fd);
     return;
   }
-  pending_tcps_.push_back({accepted_tcp_fd, tcp_peer_address});
+  QUICHE_DCHECK_EQ(transparent_, captured_dest.has_value());
+  pending_tcps_.push_back({accepted_tcp_fd, tcp_peer_address, captured_dest});
   // Try right away -- succeeds immediately when a cached 0-RTT session (or,
   // under pooling, this connection's own already-confirmed handshake) has
   // already supplied a max_streams value allowing it. Otherwise this is a
@@ -186,6 +189,24 @@ void QuictunClientConnection::StartTunnel(QuictunStream* stream,
   preamble.push_back(static_cast<char>((psk_.size() >> 8) & 0xff));
   preamble.push_back(static_cast<char>(psk_.size() & 0xff));
   preamble.append(psk_);
+  if (transparent_) {
+    // ss-server-style address header (1-byte ATYP + raw address + 2-byte
+    // big-endian port), IPv4/IPv6 only -- no domain-name ATYP, since this
+    // is always a concrete IP captured off SO_ORIGINAL_DST, never a
+    // hostname. Sent as part of the same preamble write, right after the
+    // key, so this doesn't cost an extra round trip -- see
+    // QuictunServerConnection::OnStreamDataAvailable() for the matching
+    // parse. pending.captured_dest always has a value here: AssignNewTcp()
+    // requires one whenever this connection was constructed with
+    // transparent_ (see its own comment/QUICHE_DCHECK).
+    const QuicSocketAddress& dest = *pending.captured_dest;
+    bool is_ipv6 = dest.host().address_family() == IpAddressFamily::IP_V6;
+    preamble.push_back(is_ipv6 ? 4 : 1);
+    preamble.append(dest.host().ToPackedString());
+    uint16_t port = dest.port();
+    preamble.push_back(static_cast<char>((port >> 8) & 0xff));
+    preamble.push_back(static_cast<char>(port & 0xff));
+  }
   stream->WriteToStream(preamble, /*fin=*/false);
   // WriteToStream() above can synchronously tear down this whole
   // connection: a failing UDP write (e.g. --remote unreachable right this

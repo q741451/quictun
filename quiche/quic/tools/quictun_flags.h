@@ -41,6 +41,21 @@ struct QuictunTuningOptions {
   // direction only.
   std::string congestion_control = "cubic";
 
+  // Transparent-proxy mode: quictun_client captures each accepted TCP
+  // connection's original destination (Linux SO_ORIGINAL_DST, i.e. an
+  // external iptables/nftables REDIRECT rule) instead of always tunneling
+  // to a single fixed address, and quictun_server connects out to that
+  // per-stream destination instead of --target. Mutually exclusive with
+  // --target: the existing pure-port-forward wire format has no framing at
+  // all (whatever bytes follow the --key preamble are raw TCP payload,
+  // forwarded verbatim), so a transparent-mode client/server pair speaks a
+  // different, incompatible wire format (an address header right after the
+  // --key preamble) rather than trying to auto-negotiate the two -- both
+  // ends must be configured with the same value, the same way both ends
+  // must be configured with the same --key. false (default) is a
+  // no-op -- quictun's original pure-port-forward behavior, unchanged.
+  bool transparent = false;
+
   // Whether to use SO_TXTIME (Linux packet pacing offload) on the UDP send
   // path. Falls back silently if the kernel doesn't support it.
   bool so_txtime = false;
@@ -147,7 +162,8 @@ struct QuictunTuningOptions {
 };
 
 // Defines --key, --zero_rtt, --congestion_control, --so_txtime,
-// --idle_timeout_seconds, --initial_stream_flow_control_window_kb,
+// --transparent, --idle_timeout_seconds,
+// --initial_stream_flow_control_window_kb,
 // --initial_session_flow_control_window_kb, --udp_socket_buffer_kb,
 // --startup_bandwidth_kbps, --startup_rtt_ms,
 // --bbr_startup_loss_threshold_percent, --bbr_startup_full_loss_count,
