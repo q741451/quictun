@@ -61,13 +61,14 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener {
   void AcceptLoop();
   void RemoveConnection(QuictunClientConnection* connection);
 
-  // Creates a brand-new QuictunClientConnection, taking ownership via
-  // connections_ (same as quictun's original, --quic_conn=0 behavior), and
-  // returns the raw (non-owning) pointer -- for AcceptLoop() to either use
-  // directly (--quic_conn=0) or drop into a freshly-(re)claimed pool_slots_
-  // entry (--quic_conn>0). Returns nullptr if the new connection's UDP
-  // socket couldn't be created -- see QuictunClientConnection::Create().
-  QuictunClientConnection* CreateNewConnection();
+  // Creates a brand-new QuictunClientConnection, taking (shared) ownership
+  // via connections_ and returning a second reference to it -- for
+  // AcceptLoop() to either use directly (--quic_conn=0) or drop a weak_ptr
+  // to into a freshly-(re)claimed pool_slots_ entry (--quic_conn>0). See
+  // pool_slots_'s own comment for why shared_ptr, not a raw pointer.
+  // Returns nullptr if the new connection's UDP socket couldn't be created
+  // -- see QuictunClientConnection::Create().
+  std::shared_ptr<QuictunClientConnection> CreateNewConnection();
 
   QuicEventLoop* const event_loop_;
   const QuicSocketAddress local_address_;
@@ -86,7 +87,7 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener {
   CongestionControlType congestion_control_;
 
   absl::flat_hash_map<QuictunClientConnection*,
-                      std::unique_ptr<QuictunClientConnection>>
+                      std::shared_ptr<QuictunClientConnection>>
       connections_;
   // Populated by RemoveConnection() (invoked via a QuictunClientConnection's
   // on_closed callback, which fires from deep within that connection's own
@@ -99,25 +100,41 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener {
   std::vector<QuictunClientConnection*> pending_removal_;
 
   // --quic_conn>0 connection pool: a fixed-size (== options_.quic_conn)
-  // array of slots, each either empty (nullptr) or pointing at one of this
-  // driver's own connections_ entries (non-owning -- the same reentrancy/
-  // deferred-destruction rules as pending_removal_ above apply; a slot can
-  // point at an already-closed connection that's merely waiting for
-  // CollectGarbage() to actually free it). Modeled directly on kcptun's own
-  // --conn pool (github.com/xtaci/kcptun, client/main.go): fixed slots +
-  // check-and-lazily-replace at the moment a slot is selected, rather than
-  // eagerly maintaining a separate "which slots are still alive" set in
-  // sync with every connection's own close. AcceptLoop() is the only
-  // reader/writer, always from the same single-threaded event loop, so
-  // there's no locking here, matching kcptun's own single-goroutine accept
-  // loop for the same reason.
+  // array of slots, each either empty/expired or referencing one of this
+  // driver's own connections_ entries. weak_ptr, not a raw pointer --
+  // modeled on real QUICHE's own QuicDispatcher, which faces the identical
+  // problem (something needs a non-owning reference to a session whose
+  // actual destruction is deliberately deferred past the moment it's
+  // logically "closed") and solves it by making the canonical owner
+  // (reference_counted_session_map_) hold shared_ptr<QuicSession> so any
+  // other reference can safely be weak_ptr instead of a raw pointer that
+  // has to be manually invalidated by every single place that might hold
+  // one. A previous version of this pool used raw QuictunClientConnection*
+  // slots RemoveConnection() had to remember to null out synchronously
+  // before CollectGarbage() could free the connection -- easy to add a new
+  // non-owning reference elsewhere later and forget to wire it into that
+  // same invalidation step (that's exactly how the raw-pointer version's
+  // real, reproduced-under-ASan use-after-free happened). lock() makes
+  // that whole class of bug structurally impossible: a slot whose
+  // connection has actually been destroyed just resolves to nullptr, same
+  // as an empty slot, with zero bookkeeping required anywhere else.
+  //
+  // Modeled on kcptun's own --conn pool (github.com/xtaci/kcptun,
+  // client/main.go) for the fixed-slots + check-and-lazily-replace part:
+  // round-robin blindly picks a slot, and only that slot's own current
+  // state (empty/expired vs. alive) at the moment it's picked determines
+  // whether to reuse it or build a new connection -- no separate "which
+  // slots are still alive" set kept eagerly in sync with every close.
+  // AcceptLoop() is the only reader/writer, always from the same
+  // single-threaded event loop, so there's no locking here, matching
+  // kcptun's own single-goroutine accept loop for the same reason.
   //
   // Deliberately never constructed/touched at all when options_.quic_conn
   // == 0 (see AcceptLoop()) -- unlimited pooling isn't "a pool of size 0",
   // it's a structurally different mode (a fixed-size array of size 0 would
   // make the round-robin's modulo undefined behavior, quite apart from not
   // making semantic sense).
-  std::vector<QuictunClientConnection*> pool_slots_;
+  std::vector<std::weak_ptr<QuictunClientConnection>> pool_slots_;
   size_t pool_round_robin_next_ = 0;
 };
 

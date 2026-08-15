@@ -76,7 +76,7 @@ QuictunClientDriver::QuictunClientDriver(QuicEventLoop* event_loop,
   // takes this same branch as 0 -- harmless, not worth a separate
   // validation error for what's obviously a typo anyway.
   if (options.quic_conn > 0) {
-    pool_slots_.resize(options.quic_conn, nullptr);
+    pool_slots_.resize(options.quic_conn);
   }
 }
 
@@ -141,7 +141,8 @@ void QuictunClientDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
   }
 }
 
-QuictunClientConnection* QuictunClientDriver::CreateNewConnection() {
+std::shared_ptr<QuictunClientConnection>
+QuictunClientDriver::CreateNewConnection() {
   std::unique_ptr<QuictunClientConnection> connection =
       QuictunClientConnection::Create(
           event_loop_, &helper_, alarm_factory_.get(),
@@ -157,9 +158,9 @@ QuictunClientConnection* QuictunClientDriver::CreateNewConnection() {
   SetQuictunStartupBandwidthHint(connection->connection(),
                                  options_.startup_bandwidth_kbps,
                                  options_.startup_rtt_ms);
-  QuictunClientConnection* raw = connection.get();
-  connections_.emplace(raw, std::move(connection));
-  return raw;
+  std::shared_ptr<QuictunClientConnection> shared(std::move(connection));
+  connections_.emplace(shared.get(), shared);
+  return shared;
 }
 
 void QuictunClientDriver::AcceptLoop() {
@@ -197,7 +198,8 @@ void QuictunClientDriver::AcceptLoop() {
       // every accepted TCP connection gets its own brand-new QUIC
       // connection. See pool_slots_'s comment for why this can't just be
       // "the pooling path below with a size-0 pool_slots_".
-      QuictunClientConnection* connection = CreateNewConnection();
+      std::shared_ptr<QuictunClientConnection> connection =
+          CreateNewConnection();
       if (connection == nullptr) {
         socket_api::Close(accepted->fd);
         continue;
@@ -217,15 +219,16 @@ void QuictunClientDriver::AcceptLoop() {
     // if OpenOutgoingStream() isn't possible yet, same as it always does.
     size_t idx = pool_round_robin_next_ % pool_slots_.size();
     pool_round_robin_next_++;
-    QuictunClientConnection*& slot = pool_slots_[idx];
-    if (slot == nullptr || slot->closed()) {
-      slot = CreateNewConnection();
-      if (slot == nullptr) {
+    std::shared_ptr<QuictunClientConnection> conn = pool_slots_[idx].lock();
+    if (conn == nullptr || conn->closed()) {
+      conn = CreateNewConnection();
+      if (conn == nullptr) {
         socket_api::Close(accepted->fd);
         continue;
       }
+      pool_slots_[idx] = conn;
     }
-    slot->AssignNewTcp(accepted->fd, accepted->peer_address, captured_dest);
+    conn->AssignNewTcp(accepted->fd, accepted->peer_address, captured_dest);
   }
 }
 
