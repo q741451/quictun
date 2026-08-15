@@ -57,6 +57,8 @@ quictun_server  (built 2026/08/06 20:14:23)
 ------------------------------------------------------------------
   listen                                 = [::]:4433
   target                                 = 127.0.0.1:12948
+  max_new_connections_per_event_loop     = 100
+  max_concurrent_connections             = 5000
   key                                    = <redacted, 20 bytes>
   zero_rtt                               = true
   congestion_control                     = bbr2
@@ -66,8 +68,6 @@ quictun_server  (built 2026/08/06 20:14:23)
   initial_stream_flow_control_window_kb  = 512
   initial_session_flow_control_window_kb = 512
   udp_socket_buffer_kb                   = 1024
-  max_new_connections_per_event_loop     = 100
-  max_concurrent_connections             = 5000
   max_streams_per_connection             = 100
 ==================================================================
 ```
@@ -91,8 +91,6 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | `--udp_socket_buffer_kb` | `1024` | `SO_RCVBUF`/`SO_SNDBUF` size set on every UDP socket quictun creates (one per QUIC connection), in KiB; applies to both the receive and send buffer. Too small a value under load can cause the kernel to drop packets before quictun ever sees them, which looks like network loss to the congestion controller rather than a local buffering problem -- if `/proc/net/snmp`'s `Udp: RcvbufErrors` column (or `nstat -az UdpRcvbufErrors`) climbs during a transfer, raise this. |
 | `--startup_bandwidth_kbps` | `0` | If > 0, bootstrap every new connection's congestion controller with this assumed starting bandwidth (Kbps, i.e. kilobits/sec -- *not* KB/s or bytes) instead of ramping up from scratch. Only affects the controller while still in its startup/slow-start phase; has no effect once a connection reaches steady state. `0` disables this (normal cold-start ramp-up). Pairs with `--startup_rtt_ms`; set both sides (client and server) to the same values, since each governs only that endpoint's own send direction. |
 | `--startup_rtt_ms` | `0` | Assumed starting RTT in milliseconds, paired with `--startup_bandwidth_kbps` -- only used, and only meaningful, if that flag is also `> 0`. `0` falls back to QUICHE's own initial RTT guess (100ms). |
-| `--max_new_connections_per_event_loop` | `100` | Server-only (accepted but unused by `quictun_client`, shown on both binaries' banners for symmetry with `--max_streams_per_connection` below). Caps how many brand-new connections `quictun_server` will create per event-loop iteration (~every 50ms); a packet that would create another past that budget is dropped once it hits zero for that tick. Not a permanent rejection -- a legitimate client's own QUIC handshake retransmission logic retries on its own, so this only spreads a burst of genuine connection attempts across a couple of ticks. Exists to bound how much CPU/memory a flood of spoofed-source garbage packets can force the server to spend in one tick. The default (`100`) matches real QUICHE's own `QuicBufferedPacketStore::kDefaultMaxConnectionsInStore`. |
-| `--max_concurrent_connections` | `5000` | Server-only (accepted but unused by `quictun_client`). Hard cap on how many connections (established or still mid-handshake) `quictun_server` will have open at once; a packet that would create another past that cap is dropped. Each connection holds at least one dedicated UDP socket, so this bounds fd/memory exhaustion from a flood of forged connection attempts rather than relying on the OS fd limit to be the thing that eventually says no. The default (`5000`) is meant to be generous relative to any realistic legitimate load. |
 | `--max_streams_per_connection` | `100` | Max concurrent bidirectional streams this endpoint will accept as incoming from its peer at once. quictun's streams are always client-initiated, so in practice only the *server's* value does anything -- the client's own copy is accepted for symmetry but has nothing to bite, since the server never opens a stream to the client. Matters for `--quic_conn` pooling: with `N` pool slots round-robining accepted TCP connections, one pooled connection's concurrently-open stream count is the pool's live TCP count divided across those `N` slots, not `N` itself -- a *small* `--quic_conn` concentrates more load onto fewer connections, making this cap more likely to matter than a large one does. The default (`100`) is QUICHE's own real default -- quictun applies no override unless you change this. Not a hard lifetime cap: it's a sliding window that grows back by one every time an existing stream closes, so it only blocks new streams while this many are open *at once*, not after this many have ever been opened in total. A peer that opens a stream beyond what's currently granted anyway is a protocol violation -- not a per-stream rejection but the *whole connection* closing, taking every other stream sharing it down too. |
 
 ### `quictun_server`-only
@@ -101,6 +99,8 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | --- | --- | --- |
 | `--listen` | `[::]:4433` | Address:port to accept incoming QUIC (UDP) connections on. |
 | `--target` | *(required unless `--transparent`)* | Address:port of the TCP server to connect to for each accepted tunnel. Must be left unset when `--transparent` is enabled -- see that flag above. |
+| `--max_new_connections_per_event_loop` | `100` | Caps how many brand-new connections `quictun_server` will create per event-loop iteration (~every 50ms); a packet that would create another past that budget is dropped once it hits zero for that tick. Not a permanent rejection -- a legitimate client's own QUIC handshake retransmission logic retries on its own, so this only spreads a burst of genuine connection attempts across a couple of ticks. Exists to bound how much CPU/memory a flood of spoofed-source garbage packets can force the server to spend in one tick. The default (`100`) matches real QUICHE's own `QuicBufferedPacketStore::kDefaultMaxConnectionsInStore`. |
+| `--max_concurrent_connections` | `5000` | Hard cap on how many connections (established or still mid-handshake) `quictun_server` will have open at once; a packet that would create another past that cap is dropped. Each connection holds at least one dedicated UDP socket, so this bounds fd/memory exhaustion from a flood of forged connection attempts rather than relying on the OS fd limit to be the thing that eventually says no. The default (`5000`) is meant to be generous relative to any realistic legitimate load. |
 
 ### `quictun_client`-only
 

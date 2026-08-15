@@ -139,29 +139,6 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "violation -- not a per-stream rejection but the whole connection "
     "closing, taking every other stream sharing it down too.");
 
-DEFINE_QUICHE_COMMAND_LINE_FLAG(
-    int32_t, max_new_connections_per_event_loop, 100,
-    "Server-only (accepted but unused by quictun_client). Caps how many "
-    "brand-new connections quictun_server will create per event-loop "
-    "iteration (~every 50ms); packets that would create another past "
-    "that are dropped once the budget hits zero for that tick (a "
-    "legitimate client's own QUIC handshake retransmission just retries, "
-    "so this only spreads out genuine bursts, never silently drops them "
-    "for good). Bounds how much CPU/memory a flood of spoofed-source "
-    "garbage packets can force per tick. Default (100) matches real "
-    "QUICHE's own QuicBufferedPacketStore::kDefaultMaxConnectionsInStore.");
-
-DEFINE_QUICHE_COMMAND_LINE_FLAG(
-    int32_t, max_concurrent_connections, 5000,
-    "Server-only (accepted but unused by quictun_client). Hard cap on "
-    "how many connections (established or mid-handshake) quictun_server "
-    "will have open at once; packets that would create another past "
-    "that are dropped. Each connection holds at least one dedicated UDP "
-    "socket, so this bounds fd/memory exhaustion from a flood of forged "
-    "connection attempts instead of relying on the OS fd limit to be "
-    "the thing that eventually says no. Default (5000) is meant to be "
-    "generous relative to any realistic legitimate load.");
-
 namespace quic {
 
 QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
@@ -193,10 +170,6 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
       quiche::GetQuicheCommandLineFlag(FLAGS_startup_rtt_ms);
   options.max_streams_per_connection =
       quiche::GetQuicheCommandLineFlag(FLAGS_max_streams_per_connection);
-  options.max_new_connections_per_event_loop = quiche::GetQuicheCommandLineFlag(
-      FLAGS_max_new_connections_per_event_loop);
-  options.max_concurrent_connections =
-      quiche::GetQuicheCommandLineFlag(FLAGS_max_concurrent_connections);
   return options;
 }
 
@@ -272,14 +245,6 @@ void PrintQuictunStartupBanner(
          absl::StrCat(options.startup_rtt_ms > 0 ? options.startup_rtt_ms
                                                   : 100)});
   }
-  // Server-only, like max_streams_per_connection above -- shown
-  // unconditionally on both binaries' banners for the same reason (see
-  // quic_conn's own banner entry): states what's actually configured
-  // even where the value itself does nothing on this side.
-  lines.push_back({"max_new_connections_per_event_loop",
-                    absl::StrCat(options.max_new_connections_per_event_loop)});
-  lines.push_back({"max_concurrent_connections",
-                    absl::StrCat(options.max_concurrent_connections)});
   lines.push_back({"max_streams_per_connection",
                     absl::StrCat(options.max_streams_per_connection)});
 

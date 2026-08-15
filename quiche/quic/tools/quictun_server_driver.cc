@@ -68,11 +68,15 @@ constexpr QuicByteCount kQuictunMinInitialPacketLength = 1200;
 QuictunServerDriver::QuictunServerDriver(QuicEventLoop* event_loop,
                                          const QuicSocketAddress& listen_address,
                                          std::optional<QuicSocketAddress> target_address,
-                                         const QuictunTuningOptions& options)
+                                         const QuictunTuningOptions& options,
+                                         int32_t max_new_connections_per_event_loop,
+                                         int32_t max_concurrent_connections)
     : event_loop_(event_loop),
       listen_address_(listen_address),
       target_address_(target_address),
       options_(options),
+      max_new_connections_per_event_loop_(max_new_connections_per_event_loop),
+      max_concurrent_connections_(max_concurrent_connections),
       alarm_factory_(event_loop_->CreateAlarmFactory()),
       connection_id_generator_(kQuicDefaultConnectionIdLength),
       compressed_certs_cache_(QuicCompressedCertsCache::kQuicCompressedCertsCacheSize),
@@ -116,7 +120,7 @@ QuictunServerDriver::QuictunServerDriver(QuicEventLoop* event_loop,
   // first RunEventLoopOnce() call, before CollectGarbage() has ever run
   // once to reset this for real, would otherwise see a zero budget and
   // drop every connection attempt in that first iteration.
-  new_connections_allowed_this_event_loop_ = options.max_new_connections_per_event_loop;
+  new_connections_allowed_this_event_loop_ = max_new_connections_per_event_loop_;
 }
 
 absl::Status QuictunServerDriver::Start() {
@@ -255,11 +259,11 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
     return;
   }
   if (connections_.size() >=
-      static_cast<size_t>(options_.max_concurrent_connections)) {
-    // See max_concurrent_connections's own comment (quictun_flags.h).
+      static_cast<size_t>(max_concurrent_connections_)) {
+    // See --max_concurrent_connections's own comment (quictun_server_bin.cc).
     QUIC_LOG(INFO) << "Dropping new connection attempt from " << peer_address
                   << ": at max_concurrent_connections ("
-                  << options_.max_concurrent_connections
+                  << max_concurrent_connections_
                   << "), current connections_.size()=" << connections_.size();
     return;
   }
@@ -315,8 +319,7 @@ void QuictunServerDriver::CollectGarbage() {
   // after RunEventLoopOnce() delivered and ProcessPacket()-processed
   // everything for the iteration that just finished, and before the next
   // one delivers anything -- see quictun_server_bin.cc's main loop.
-  new_connections_allowed_this_event_loop_ =
-      options_.max_new_connections_per_event_loop;
+  new_connections_allowed_this_event_loop_ = max_new_connections_per_event_loop_;
 }
 
 }  // namespace quic

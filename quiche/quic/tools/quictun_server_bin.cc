@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "quiche/quic/core/io/quic_default_event_loop.h"
 #include "quiche/quic/core/io/quic_event_loop.h"
 #include "quiche/quic/core/quic_default_clock.h"
@@ -37,6 +38,29 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     std::string, target, "",
     "Address:port of the TCP server to connect to for each accepted "
     "tunnel. Required.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, max_new_connections_per_event_loop, 100,
+    "Caps how many brand-new connections quictun_server will create per "
+    "event-loop iteration (~every 50ms); packets that would create "
+    "another past that are dropped once the budget hits zero for that "
+    "tick (a legitimate client's own QUIC handshake retransmission just "
+    "retries, so this only spreads out genuine bursts, never silently "
+    "drops them for good). Bounds how much CPU/memory a flood of "
+    "spoofed-source garbage packets can force per tick. Default (100) "
+    "matches real QUICHE's own "
+    "QuicBufferedPacketStore::kDefaultMaxConnectionsInStore.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, max_concurrent_connections, 5000,
+    "Hard cap on how many connections (established or mid-handshake) "
+    "quictun_server will have open at once; packets that would create "
+    "another past that are dropped. Each connection holds at least one "
+    "dedicated UDP socket, so this bounds fd/memory exhaustion from a "
+    "flood of forged connection attempts instead of relying on the OS "
+    "fd limit to be the thing that eventually says no. Default (5000) "
+    "is meant to be generous relative to any realistic legitimate "
+    "load.");
 
 #ifdef QUICTUN_COVERAGE_BUILD
 // Coverage-instrumented builds only (--copt=-DQUICTUN_COVERAGE_BUILD,
@@ -118,16 +142,27 @@ int main(int argc, char* argv[]) {
       return 1;
     }
   }
+  int32_t max_new_connections_per_event_loop = quiche::GetQuicheCommandLineFlag(
+      FLAGS_max_new_connections_per_event_loop);
+  int32_t max_concurrent_connections =
+      quiche::GetQuicheCommandLineFlag(FLAGS_max_concurrent_connections);
+
   quic::PrintQuictunStartupBanner(
       "quictun_server",
       {{"listen", listen_flag},
-       {"target", options.transparent ? "(transparent mode)" : target_flag}},
+       {"target", options.transparent ? "(transparent mode)" : target_flag},
+       {"max_new_connections_per_event_loop",
+        absl::StrCat(max_new_connections_per_event_loop)},
+       {"max_concurrent_connections",
+        absl::StrCat(max_concurrent_connections)}},
       options);
 
   std::unique_ptr<quic::QuicEventLoop> event_loop =
       quic::GetDefaultEventLoop()->Create(quic::QuicDefaultClock::Get());
   quic::QuictunServerDriver driver(event_loop.get(), *listen_address,
-                                   target_address, options);
+                                   target_address, options,
+                                   max_new_connections_per_event_loop,
+                                   max_concurrent_connections);
   absl::Status status = driver.Start();
   if (!status.ok()) {
     std::cerr << "Failed to start quictun_server: " << status << std::endl;

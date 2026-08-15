@@ -86,7 +86,9 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
   QuictunServerDriver(QuicEventLoop* event_loop,
                       const QuicSocketAddress& listen_address,
                       std::optional<QuicSocketAddress> target_address,
-                      const QuictunTuningOptions& options);
+                      const QuictunTuningOptions& options,
+                      int32_t max_new_connections_per_event_loop,
+                      int32_t max_concurrent_connections);
 
   // Creates, binds, and registers the rendezvous UDP socket. Returns
   // non-ok on failure.
@@ -115,6 +117,8 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
   const QuicSocketAddress listen_address_;
   const std::optional<QuicSocketAddress> target_address_;
   const QuictunTuningOptions options_;
+  const int32_t max_new_connections_per_event_loop_;
+  const int32_t max_concurrent_connections_;
 
   OwnedSocketFd rendezvous_fd_;
   QuicPacketReader reader_;
@@ -139,8 +143,8 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
   std::vector<QuicSocketAddress> pending_removal_;
 
   // Per-event-loop-iteration budget for how many brand-new connections
-  // ProcessPacket() may create -- see options_.max_new_connections_per_
-  // event_loop's own comment. Reset to that value by CollectGarbage()
+  // ProcessPacket() may create -- see max_new_connections_per_event_loop_
+  // above. Reset to that value by CollectGarbage()
   // (called once per iteration, right after the packets that iteration's
   // RunEventLoopOnce() delivered have all been processed -- see quictun_
   // server_bin.cc's main loop), decremented once per connection actually
