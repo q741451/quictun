@@ -314,20 +314,6 @@ void SetQuictunStartupBandwidthHint(QuicConnection* connection,
   connection->AdjustNetworkParameters(params);
 }
 
-void ApplyQuictunBbrStartupLossOverrides(int32_t loss_threshold_percent,
-                                         int32_t full_loss_count) {
-  // See BbrSender::ShouldExitStartupDueToLoss() (bbr_sender.cc) -- despite
-  // the "bbr2" in these flag names, they're read directly by BBRv1's own
-  // STARTUP-loss-exit check, confirmed by grepping bbr_sender.cc itself
-  // (not bbr2_sender.cc). Applied unconditionally, not gated behind a
-  // sentinel: --bbr_startup_loss_threshold_percent/--bbr_startup_full_
-  // loss_count default to QUICHE's own real defaults (2, 8) already (see
-  // quictun_flags.h), so calling this with those defaults is a harmless
-  // no-op that re-sets the flags to what they already were.
-  SetQuicFlag(quic_bbr2_default_loss_threshold, loss_threshold_percent / 100.0);
-  SetQuicFlag(quic_bbr2_default_startup_full_loss_count, full_loss_count);
-}
-
 std::optional<QuicSocketAddress> CaptureQuictunOriginalDestination(
     SocketFd fd) {
   struct sockaddr_storage dest_storage;

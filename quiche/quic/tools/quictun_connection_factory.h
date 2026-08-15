@@ -97,28 +97,6 @@ void SetQuictunCongestionControl(QuicConnection* connection,
 void SetQuictunStartupBandwidthHint(QuicConnection* connection,
                                     int32_t bandwidth_kbps, int32_t rtt_ms);
 
-// Process-wide, not per-connection -- see --bbr_startup_loss_threshold_
-// percent/--bbr_startup_full_loss_count in quictun_flags.cc.
-// BbrSender::ShouldExitStartupDueToLoss() (bbr_sender.cc) makes BBRv1 give
-// up on STARTUP -- i.e. stop probing for more bandwidth and settle for
-// whatever it's already reached -- once a round sees enough loss events
-// (default quic_bbr2_default_startup_full_loss_count = 8) AND the lost
-// bytes exceed a fraction of bytes in flight (default
-// quic_bbr2_default_loss_threshold = 0.02, i.e. 2%). On a path with
-// genuine baseline loss above 2% (e.g. a long-haul/lossy link that can
-// still sustain a real, higher bandwidth once ramped), this fires well
-// before actually finding the true available bandwidth.
-//
-// These are process-wide QuicFlags (not per-connection QuicConfig), so
-// this must be called exactly once at process startup, before any
-// connection is created -- and it applies to every connection the process
-// ever makes, not just one. `loss_threshold_percent` is a percent (e.g.
-// 50 for 50%), not a fraction. Both parameters default (in
-// QuictunTuningOptions) to QUICHE's own real defaults (2, 8), so calling
-// this with those defaults is a harmless no-op.
-void ApplyQuictunBbrStartupLossOverrides(int32_t loss_threshold_percent,
-                                         int32_t full_loss_count);
-
 // --transparent (Linux only, quictun_client_driver.cc's AcceptLoop()): the
 // original destination a freshly-accepted TCP connection was heading to
 // before an external iptables/nftables REDIRECT rule sent it to --local

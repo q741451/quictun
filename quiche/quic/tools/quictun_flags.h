@@ -97,24 +97,6 @@ struct QuictunTuningOptions {
   int32_t startup_bandwidth_kbps = 0;
   int32_t startup_rtt_ms = 0;
 
-  // Process-wide (not per-connection) overrides for the two thresholds
-  // BbrSender::ShouldExitStartupDueToLoss() (bbr_sender.cc) uses to decide
-  // BBRv1 should give up on STARTUP -- stop probing for more bandwidth and
-  // settle for whatever it's already reached -- once a round sees enough
-  // distinct loss-detection events AND the lost bytes exceed a fraction of
-  // bytes in flight. See ApplyQuictunBbrStartupLossOverrides() in
-  // quictun_connection_factory.h. Defaults here match QUICHE's own real
-  // defaults exactly (2%, 8 events) -- i.e. quictun applies no override
-  // at all unless one of these is explicitly changed, and the values
-  // shown by --helpfull/the startup banner are always what's actually in
-  // effect, not a sentinel. On a path with genuine baseline loss above 2%
-  // that can still sustain a much higher real bandwidth once ramped, the
-  // real default fires prematurely and the connection settles for far
-  // less than the path can actually do -- raise loss_threshold_percent
-  // (and/or full_loss_count) past the path's real loss rate to fix that.
-  int32_t bbr_startup_loss_threshold_percent = 2;
-  int32_t bbr_startup_full_loss_count = 8;
-
   // Max concurrent bidirectional streams this endpoint will accept as
   // incoming from its peer -- i.e. what governs how many streams the
   // OTHER side can have open on one connection at once (see
@@ -198,7 +180,6 @@ struct QuictunTuningOptions {
 // --initial_stream_flow_control_window_kb,
 // --initial_session_flow_control_window_kb, --udp_socket_buffer_kb,
 // --startup_bandwidth_kbps, --startup_rtt_ms,
-// --bbr_startup_loss_threshold_percent, --bbr_startup_full_loss_count,
 // --max_streams_per_connection, --max_new_connections_per_event_loop,
 // --max_concurrent_connections and reads their current values into a
 // QuictunTuningOptions. Must be called after

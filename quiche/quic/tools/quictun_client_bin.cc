@@ -100,13 +100,6 @@ int main(int argc, char* argv[]) {
     std::cerr << "--key is required" << std::endl;
     return 1;
   }
-  // Process-wide; must run before any connection is created, and after
-  // flag parsing since it reads --bbr_startup_loss_threshold_percent/
-  // --bbr_startup_full_loss_count.
-  quic::ApplyQuictunBbrStartupLossOverrides(
-      options.bbr_startup_loss_threshold_percent,
-      options.bbr_startup_full_loss_count);
-
   quic::PrintQuictunStartupBanner(
       "quictun_client",
       {{"local", local_flag}, {"remote", remote_flag}}, options);

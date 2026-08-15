@@ -121,29 +121,6 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "guess (100ms).");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
-    int32_t, bbr_startup_loss_threshold_percent, 2,
-    "Process-wide. One of the two thresholds BBRv1 uses to decide 'give "
-    "up probing for more bandwidth, I've hit loss-driven congestion' "
-    "during STARTUP (BbrSender::ShouldExitStartupDueToLoss(), "
-    "quic_bbr2_default_loss_threshold -- the name says bbr2 but BBRv1 "
-    "reads the same flag). Default here (2, i.e. 2%) is QUICHE's own real "
-    "default -- quictun applies no override unless you change this. On a "
-    "path with genuine baseline loss above 2% that can still sustain a "
-    "much higher real bandwidth once ramped, the default fires "
-    "prematurely and settles for less than the path can actually do; "
-    "raise this past the path's real loss rate to fix that. A value here "
-    "is a percent (e.g. 50 for 50%), not a fraction.");
-
-DEFINE_QUICHE_COMMAND_LINE_FLAG(
-    int32_t, bbr_startup_full_loss_count, 8,
-    "Process-wide. The other threshold paired with "
-    "--bbr_startup_loss_threshold_percent -- minimum number of distinct "
-    "loss-detection events (not lost packets) in one round before that "
-    "threshold check even applies (quic_bbr2_default_startup_full_loss_"
-    "count). Default here (8) is QUICHE's own real default -- quictun "
-    "applies no override unless you change this.");
-
-DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, max_streams_per_connection, 100,
     "Max concurrent bidirectional streams this endpoint will accept as "
     "incoming from its peer at once -- in practice only the server's "
@@ -214,10 +191,6 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
       quiche::GetQuicheCommandLineFlag(FLAGS_startup_bandwidth_kbps);
   options.startup_rtt_ms =
       quiche::GetQuicheCommandLineFlag(FLAGS_startup_rtt_ms);
-  options.bbr_startup_loss_threshold_percent = quiche::GetQuicheCommandLineFlag(
-      FLAGS_bbr_startup_loss_threshold_percent);
-  options.bbr_startup_full_loss_count =
-      quiche::GetQuicheCommandLineFlag(FLAGS_bbr_startup_full_loss_count);
   options.max_streams_per_connection =
       quiche::GetQuicheCommandLineFlag(FLAGS_max_streams_per_connection);
   options.max_new_connections_per_event_loop = quiche::GetQuicheCommandLineFlag(
@@ -299,15 +272,6 @@ void PrintQuictunStartupBanner(
          absl::StrCat(options.startup_rtt_ms > 0 ? options.startup_rtt_ms
                                                   : 100)});
   }
-  // Unlike startup_bandwidth_kbps/startup_rtt_ms above (which are truly
-  // off at 0, since QUICHE has no "assumed starting bandwidth" concept of
-  // its own to fall back to), these two default to QUICHE's own real
-  // defaults (see quictun_flags.h) -- always shown, not gated behind a
-  // sentinel, so the banner always states what's actually in effect.
-  lines.push_back({"bbr_startup_loss_threshold_percent",
-                    absl::StrCat(options.bbr_startup_loss_threshold_percent)});
-  lines.push_back({"bbr_startup_full_loss_count",
-                    absl::StrCat(options.bbr_startup_full_loss_count)});
   // Server-only, like max_streams_per_connection above -- shown
   // unconditionally on both binaries' banners for the same reason (see
   // quic_conn's own banner entry): states what's actually configured
