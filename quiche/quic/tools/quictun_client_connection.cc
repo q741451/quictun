@@ -342,10 +342,26 @@ void QuictunClientConnection::Close() {
     }
   }
   stream_tcps_.clear();
-  // Same idea as QuicSession::OnConnectionClosed() cancelling its own
-  // closed_streams_clean_up_alarm_ -- see QuictunServerConnection::
-  // Close()'s identical comment.
-  closed_stream_tcps_.clear();
+  // Cancel, but deliberately do NOT closed_stream_tcps_.clear() here --
+  // see QuictunServerConnection::Close()'s identical comment for the full
+  // real-crash story (this is the fix for it): whichever tunnel's own
+  // stream_->WriteToStream() is what triggered this Close() reentrantly
+  // (a failing write, mid QuictunTunnel::ReceiveComplete()/Start()/
+  // MaybeCloseAfterQuicFin(), see quictun_tunnel.cc) is still executing
+  // further up this exact call stack, and the loop above already moved
+  // it into closed_stream_tcps_ via its own on_closed_ callback --
+  // clearing that vector synchronously right here would destroy that
+  // tunnel out from under itself before its own call stack unwinds back
+  // into it, a real reproduced-under-ASan use-after-free. Real QUICHE's
+  // QuicSession::OnConnectionClosed() has exactly this same shape and
+  // solves it the same way: cancel closed_streams_clean_up_alarm_
+  // (nothing will fire it again) but leave closed_streams_ itself alone
+  // -- actual destruction happens whenever the owning object is itself
+  // destroyed. Here that's whenever this whole QuictunClientConnection
+  // is destroyed, already safely deferred to CollectGarbage() in
+  // quictun_client_driver.cc -- always outside any callback's stack, the
+  // same guarantee QuicDispatcher's own deferred session destruction
+  // gives QuicSession.
   stream_garbage_alarm_->Cancel();
   // Any TCPs that never even got a stream opened for them yet: nothing
   // owns these but this queue, so close the raw fd directly.

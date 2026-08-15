@@ -271,12 +271,27 @@ void QuictunServerConnection::Close() {
   }
   stream_targets_.clear();
   key_read_buffers_.clear();
-  // Same idea as QuicSession::OnConnectionClosed() cancelling its own
-  // closed_streams_clean_up_alarm_: whatever's sitting in
-  // closed_stream_targets_ is destroyed right here (this whole connection,
-  // and everything it owns, is going away regardless), so there's no
-  // further need for the alarm to fire and do it again.
-  closed_stream_targets_.clear();
+  // Cancel, but deliberately do NOT closed_stream_targets_.clear() here.
+  // Real crash, found via ASan (heap-use-after-free) on the client-side
+  // mirror of this exact code and confirmed to apply here too: whichever
+  // tunnel's own stream_->WriteToStream() is what triggered this Close()
+  // reentrantly (a failing write, mid QuictunTunnel::ReceiveComplete()/
+  // Start()/MaybeCloseAfterQuicFin(), see quictun_tunnel.cc) is still
+  // executing further up this exact call stack -- the loop above already
+  // moved it into closed_stream_targets_ via its own on_closed_ callback,
+  // so clearing that vector synchronously right here would destroy that
+  // tunnel out from under itself before its own call stack unwinds back
+  // into it. The comment this replaces had it backwards: real QUICHE's
+  // QuicSession::OnConnectionClosed() has exactly this same shape
+  // (PerformActionOnActiveStreams() moving streams into closed_streams_,
+  // possibly including the very one whose write is on the stack right
+  // now) and solves it by cancelling closed_streams_clean_up_alarm_
+  // (nothing will fire it again) while deliberately leaving
+  // closed_streams_ itself alone -- actual destruction happens whenever
+  // the owning QuicSession is itself destroyed, deferred by QuicDispatcher.
+  // Here that's whenever this whole QuictunServerConnection is destroyed,
+  // already safely deferred the same way (see wherever this connection's
+  // own on_closed_ callback leads) -- always outside any callback's stack.
   stream_garbage_alarm_->Cancel();
   event_loop_->UnregisterSocket(*udp_fd_);
   std::function<void(QuictunServerConnection*)> on_closed = std::move(on_closed_);
