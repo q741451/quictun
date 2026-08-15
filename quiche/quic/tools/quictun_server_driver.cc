@@ -59,6 +59,10 @@ QuicSocketAddress AdaptPeerAddressForListenSocket(
 // needs to exist.
 constexpr char kSourceAddressTokenSecret[] = "quictun";
 
+// Mirrors QuicDispatcher::kMinClientInitialPacketLength (quic_dispatcher.cc)
+// -- see its use in ProcessPacket() for the full rationale.
+constexpr QuicByteCount kQuictunMinInitialPacketLength = 1200;
+
 }  // namespace
 
 QuictunServerDriver::QuictunServerDriver(QuicEventLoop* event_loop,
@@ -107,6 +111,12 @@ QuictunServerDriver::QuictunServerDriver(QuicEventLoop* event_loop,
   if (options.so_txtime) {
     EnableQuictunSoTxTime();
   }
+
+  // Seeded here, not left at its member-declaration default (0): the very
+  // first RunEventLoopOnce() call, before CollectGarbage() has ever run
+  // once to reset this for real, would otherwise see a zero budget and
+  // drop every connection attempt in that first iteration.
+  new_connections_allowed_this_event_loop_ = options.max_new_connections_per_event_loop;
 }
 
 absl::Status QuictunServerDriver::Start() {
@@ -222,6 +232,49 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
     return;
   }
 
+  // Everything from here on is about to create a brand-new connection --
+  // the existing-connection fast path above already returned if this
+  // packet belonged to one. Three cheap admission checks, cheapest first,
+  // mirroring real QUICHE's own QuicDispatcher layered defense
+  // (MaybeDispatchPacket()/ProcessChlo() in quic_dispatcher.cc) against a
+  // flood of packets that merely parse as plausible first packets:
+  if (packet.length() < kQuictunMinInitialPacketLength) {
+    // Mirrors QuicDispatcher's own kMinClientInitialPacketLength (1200,
+    // quic_dispatcher.cc) -- RFC 9000 section 14.1 requires a real client
+    // to pad its actual Initial packet's UDP datagram to at least this
+    // size, precisely so a server can cheaply reject anything smaller as
+    // definitely not a genuine handshake attempt without parsing a single
+    // byte of it. quictun_client's own Initial packets already satisfy
+    // this for free -- they're real QuicConnection/QuicPacketCreator
+    // output, which pads crypto/CHLO packets the same way any compliant
+    // QUIC client does (see QuicPacketCreator::ConsumeCryptoData()'s
+    // needs_full_padding handling) -- so this only ever rejects packets
+    // no real quictun_client would ever send.
+    QUIC_LOG(INFO) << "Dropping undersized first packet from " << peer_address
+                  << ": " << packet.length() << " bytes";
+    return;
+  }
+  if (connections_.size() >=
+      static_cast<size_t>(options_.max_concurrent_connections)) {
+    // See max_concurrent_connections's own comment (quictun_flags.h).
+    QUIC_LOG(INFO) << "Dropping new connection attempt from " << peer_address
+                  << ": at max_concurrent_connections ("
+                  << options_.max_concurrent_connections
+                  << "), current connections_.size()=" << connections_.size();
+    return;
+  }
+  if (new_connections_allowed_this_event_loop_ <= 0) {
+    // See new_connections_allowed_this_event_loop_'s own comment
+    // (quictun_server_driver.h) -- a real client's own QUIC handshake
+    // retransmission logic retries on its own, so dropping here just
+    // spreads a burst of genuine connection attempts across a couple of
+    // event-loop ticks instead of creating them all in this one.
+    QUIC_LOG(INFO) << "Dropping new connection attempt from " << peer_address
+                  << ": max_new_connections_per_event_loop budget exhausted "
+                     "for this tick";
+    return;
+  }
+
   std::unique_ptr<QuictunServerConnection> connection =
       QuictunServerConnection::Create(
           event_loop_, &helper_, alarm_factory_.get(), &socket_factory_,
@@ -239,6 +292,7 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
                                  options_.startup_bandwidth_kbps,
                                  options_.startup_rtt_ms);
   connections_.emplace(peer_address, std::move(connection));
+  --new_connections_allowed_this_event_loop_;
 }
 
 void QuictunServerDriver::RemoveConnection(QuictunServerConnection* connection) {
@@ -255,6 +309,14 @@ void QuictunServerDriver::CollectGarbage() {
     connections_.erase(peer_address);
   }
   pending_removal_.clear();
+
+  // Reset the per-tick new-connection budget for the next iteration -- see
+  // new_connections_allowed_this_event_loop_'s own comment. Runs right
+  // after RunEventLoopOnce() delivered and ProcessPacket()-processed
+  // everything for the iteration that just finished, and before the next
+  // one delivers anything -- see quictun_server_bin.cc's main loop.
+  new_connections_allowed_this_event_loop_ =
+      options_.max_new_connections_per_event_loop;
 }
 
 }  // namespace quic

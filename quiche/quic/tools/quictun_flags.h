@@ -159,6 +159,38 @@ struct QuictunTuningOptions {
   // many streams a client legitimately opens on a connection -- see
   // QuictunServerConnection's class comment.
   int32_t quic_conn = 0;
+
+  // Server-only (ignored by quictun_client): caps how many brand-new
+  // QuictunServerConnections may be created per event-loop iteration
+  // (~every 50ms). Any packet that would otherwise create one past that
+  // is simply dropped once this hits zero -- a legitimate client's own
+  // QUIC handshake retransmission logic retries on its own, so this just
+  // spreads a burst of genuine connection attempts across a couple of
+  // ticks instead of ever silently rejecting them. Exists to bound how
+  // much CPU/memory a burst of spoofed-source garbage packets can force
+  // this process to spend per tick, mirroring real QUICHE's own
+  // QuicDispatcher::new_sessions_allowed_per_event_loop_ (quic_dispatcher.cc).
+  // Default (100) matches QUICHE's own kDefaultMaxConnectionsInStore
+  // (quic_buffered_packet_store.cc), a proven real-world figure for this
+  // exact kind of per-tick admission budget.
+  int32_t max_new_connections_per_event_loop = 100;
+
+  // Server-only (ignored by quictun_client): hard cap on how many
+  // QuictunServerConnections (established or still mid-handshake) may
+  // exist at once. Once at this cap, packets that would create another
+  // are dropped instead. Real QUICHE has no single direct equivalent --
+  // its own QuicBufferedPacketStore only bounds pre-CHLO staging state
+  // (see max_new_connections_per_event_loop's comment), since a real
+  // QuicSession's resource footprint is governed by whatever product
+  // embeds QUICHE. quictun has no such outer layer, so this exists to
+  // put an explicit, operator-controlled ceiling on the worst case (each
+  // connection holds at least one dedicated UDP socket/fd -- see
+  // quictun_server_connection.cc) rather than relying on the OS fd limit
+  // to be the thing that eventually says no. Default (5000) is
+  // deliberately generous relative to any realistic legitimate load
+  // this tool is meant for while still bounding fd/memory exhaustion
+  // from a flood of forged connection attempts.
+  int32_t max_concurrent_connections = 5000;
 };
 
 // Defines --key, --zero_rtt, --congestion_control, --so_txtime,
@@ -167,7 +199,8 @@ struct QuictunTuningOptions {
 // --initial_session_flow_control_window_kb, --udp_socket_buffer_kb,
 // --startup_bandwidth_kbps, --startup_rtt_ms,
 // --bbr_startup_loss_threshold_percent, --bbr_startup_full_loss_count,
-// --max_streams_per_connection and reads their current values into a
+// --max_streams_per_connection, --max_new_connections_per_event_loop,
+// --max_concurrent_connections and reads their current values into a
 // QuictunTuningOptions. Must be called after
 // quiche::QuicheParseCommandLineFlags().
 QuictunTuningOptions GetQuictunTuningOptionsFromFlags();
