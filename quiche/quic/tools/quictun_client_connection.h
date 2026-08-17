@@ -193,6 +193,11 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   // entry for the TCP connection `pending`.
   void StartTunnel(QuictunStream* stream, PendingTcp pending);
 
+  // Reads (and thereby clears) this socket's pending SO_ERROR, then
+  // re-arms kSocketEventError -- mirror of the server's method of the
+  // same name; see it, and this socket's RegisterSocket() call, for why.
+  void ConsumePendingSocketError();
+
   void Close();
 
   QuicEventLoop* const event_loop_;

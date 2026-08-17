@@ -221,6 +221,13 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   // stream's own on_closed callback (see StartTunnelForStream()).
   void DisconnectStreamTarget(StreamTarget& target);
 
+  // Reads (and thereby clears) this socket's pending SO_ERROR, then
+  // re-arms kSocketEventError. Called from OnSocketEvent() -- see its own
+  // definition for why the error is deliberately not acted on beyond
+  // being consumed and logged, and this socket's RegisterSocket() call
+  // for why leaving it unconsumed busy-spins the event loop.
+  void ConsumePendingSocketError();
+
   void Close();
 
   QuicEventLoop* const event_loop_;

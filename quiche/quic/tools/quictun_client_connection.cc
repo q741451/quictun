@@ -128,8 +128,18 @@ QuictunClientConnection::QuictunClientConnection(
   stream_garbage_alarm_.reset(
       alarm_factory->CreateAlarm(new StreamGarbageAlarmDelegate(this)));
 
+  // kSocketEventError: see QuictunServerConnection's identical
+  // RegisterSocket() comment for the full story. Same exposure here --
+  // this socket is connect()ed to --remote (see Create() above), so it
+  // latches ICMP into SO_ERROR, poll() reports that as an unmaskable
+  // POLLERR, and an unsubscribed POLLERR is masked away and dispatched to
+  // nobody, spinning the event loop at 100% CPU. Mirrored on both sides
+  // rather than only where it was first reproduced (server, when a client
+  // vanished): the client hits exactly the same thing whenever the server
+  // is the one that disappears abruptly.
   bool registered = event_loop_->RegisterSocket(
-      *udp_fd_, kSocketEventReadable | kSocketEventWritable, this);
+      *udp_fd_,
+      kSocketEventReadable | kSocketEventWritable | kSocketEventError, this);
   QUICHE_DCHECK(registered);
 
   session_->CryptoConnect();
@@ -409,6 +419,12 @@ void QuictunClientConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
                                             SocketFd fd,
                                             QuicSocketEventMask events) {
   QUICHE_DCHECK_EQ(fd, *udp_fd_);
+  // Before the readable/writable branches: a recvmsg() on a socket with a
+  // pending SO_ERROR returns that error rather than any data queued
+  // behind it. See ConsumePendingSocketError().
+  if (events & kSocketEventError) {
+    ConsumePendingSocketError();
+  }
   if (events & kSocketEventReadable) {
     bool more_to_read = true;
     while (more_to_read) {
@@ -451,6 +467,27 @@ void QuictunClientConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
         connection_->IsWriterBlocked()) {
       event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
     }
+  }
+}
+
+void QuictunClientConnection::ConsumePendingSocketError() {
+  // See QuictunServerConnection::ConsumePendingSocketError() for the full
+  // reasoning; this is its exact mirror. Short version: reading SO_ERROR
+  // is what clears the kernel's latched error, without which poll() keeps
+  // reporting an unsubscribed POLLERR forever and the event loop stops
+  // sleeping; and the error is deliberately only consumed and logged,
+  // never acted on, since ICMP is spoofable and transient unreachables
+  // are normal -- QUIC's own idle timeout decides the connection's fate.
+  absl::Status error = socket_api::GetSocketError(*udp_fd_);
+  if (!error.ok()) {
+    QUIC_LOG_EVERY_N_SEC(INFO, 10)
+        << "quictun connection to " << connection_->peer_address()
+        << " got a socket error (peer may be gone): " << error
+        << " -- consumed; leaving the connection's fate to QUIC's own "
+           "idle timeout";
+  }
+  if (!event_loop_->SupportsEdgeTriggered()) {
+    event_loop_->RearmSocket(*udp_fd_, kSocketEventError);
   }
 }
 

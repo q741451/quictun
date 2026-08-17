@@ -193,8 +193,25 @@ QuictunServerConnection::QuictunServerConnection(
   stream_garbage_alarm_.reset(
       alarm_factory->CreateAlarm(new StreamGarbageAlarmDelegate(this)));
 
+  // kSocketEventError, unlike real QUICHE's own server (which registers
+  // only readable|writable -- quic_server_io_harness.cc): that server owns
+  // one shared, bind()-only UDP socket, and an *unconnected* UDP socket
+  // never has ICMP errors delivered to it, so POLLERR simply cannot occur
+  // there. quictun gives every connection its own socket and connect()s it
+  // to the peer (see Create() above), and a *connected* UDP socket does
+  // latch ICMP (e.g. the port unreachable that comes back once the peer
+  // process is gone) into SO_ERROR -- which poll() then reports as POLLERR
+  // whether or not it was asked for, since POLLERR/POLLHUP are not
+  // maskable. Without subscribing it here, QuicPollEventLoop masks that
+  // POLLERR back out (DispatchIoEvent(): `mask &= GetPollMask(
+  // registration.events)`), dispatches no callback at all, and
+  // RunEventLoopOnce() returns instantly -- so the main loop spins at 100%
+  // CPU until some QUIC timer happens to attempt a write and consume the
+  // error. Confirmed with a real repro: SIGKILL a client mid-transfer and
+  // this socket sits on `revents=POLLERR` with nothing subscribed to it.
   bool registered = event_loop_->RegisterSocket(
-      *udp_fd_, kSocketEventReadable | kSocketEventWritable, this);
+      *udp_fd_,
+      kSocketEventReadable | kSocketEventWritable | kSocketEventError, this);
   QUICHE_DCHECK(registered);
 
   connection_->ProcessUdpPacket(self_address_, peer_address_, first_packet);
@@ -323,6 +340,13 @@ void QuictunServerConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
                                             SocketFd fd,
                                             QuicSocketEventMask events) {
   QUICHE_DCHECK_EQ(fd, *udp_fd_);
+  // Handled before the readable/writable branches below so the pending
+  // error is cleared before anything tries to read: a recvmsg() on a
+  // socket with SO_ERROR set returns that error instead of any data
+  // actually queued behind it. See ConsumePendingSocketError().
+  if (events & kSocketEventError) {
+    ConsumePendingSocketError();
+  }
   if (events & kSocketEventReadable) {
     bool more_to_read = true;
     while (more_to_read) {
@@ -365,6 +389,46 @@ void QuictunServerConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
         connection_->IsWriterBlocked()) {
       event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
     }
+  }
+}
+
+void QuictunServerConnection::ConsumePendingSocketError() {
+  // Reading SO_ERROR is what actually clears the kernel's latched
+  // sk_err -- that is the whole point of this call. Until something
+  // performs a syscall that consumes it, poll() keeps reporting POLLERR
+  // on every single iteration, and (see this socket's RegisterSocket()
+  // comment) an unconsumed POLLERR is exactly the busy spin this branch
+  // exists to prevent.
+  absl::Status error = socket_api::GetSocketError(*udp_fd_);
+
+  // Deliberately does NOT close the connection. The overwhelmingly common
+  // source of this is an ICMP unreachable, which is trivially spoofable by
+  // any off-path attacker who can guess the 4-tuple -- acting on it
+  // directly would hand them a way to tear down arbitrary tunnels with a
+  // single forged packet. Transient unreachables (route flap, a NAT
+  // entry briefly expiring) are also entirely normal and recover on their
+  // own. So the error is consumed and reported, and whether the peer is
+  // really gone is left to QUIC's own timers, which do not depend on it:
+  // a genuinely vanished peer stops acking, and the connection dies via
+  // the idle network timeout (--idle_timeout_seconds). Note that this
+  // deadline cannot be pushed out indefinitely by our own keepalive
+  // PINGs: QuicIdleNetworkDetector::OnPacketSent() only advances its
+  // clock for the *first* packet sent after the last one received (see
+  // last_network_activity_time()), so repeated PINGs to a dead peer do
+  // not keep the connection alive.
+  if (!error.ok()) {
+    QUIC_LOG_EVERY_N_SEC(INFO, 10)
+        << "quictun connection to " << peer_address_
+        << " got a socket error (peer may be gone): " << error
+        << " -- consumed; leaving the connection's fate to QUIC's own "
+           "idle timeout";
+  }
+
+  // Re-arm: QuicPollEventLoop is level-triggered and consumes the
+  // subscription when it fires, so without this the *next* error would
+  // again be an unsubscribed POLLERR, i.e. the same spin.
+  if (!event_loop_->SupportsEdgeTriggered()) {
+    event_loop_->RearmSocket(*udp_fd_, kSocketEventError);
   }
 }
 
