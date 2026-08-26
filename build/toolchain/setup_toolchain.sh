@@ -58,6 +58,18 @@ PREFIX=${QUICTUN_TOOLCHAIN_PREFIX:-$REPO_ROOT/build/toolchain/out}
 # saved and restored on every run for nothing.
 BUILD_ROOT=$REPO_ROOT/build/toolchain/.build
 
+# libc++abi's and libunwind's assertion strings expand __FILE__, so eight of
+# their source paths end up verbatim in .rodata of every binary this
+# toolchain links -- they survive the release strip, because they are string
+# data, not debug info. Rewrite that prefix away: without it the binary
+# carries the absolute path of whoever's machine built it (a CI workspace,
+# or a developer's home directory), it grows or shrinks with the length of
+# that path, and two builds of identical source from different directories
+# are not bit-identical. What remains is
+# "llvm-src/llvm-project-<commit>/libcxxabi/src/...", which still says
+# exactly which source produced it while saying nothing about where.
+FILE_PREFIX_MAP="-ffile-prefix-map=$BUILD_ROOT/="
+
 # --- Pins ---
 # Chromium's actual current clang, from tools/clang/scripts/update.py
 # (CLANG_REVISION/CLANG_SUB_REVISION) as of 2026-06-16.
@@ -249,9 +261,9 @@ build_compiler_rt() {
     -DCMAKE_CXX_COMPILER_TARGET="$MUSL_TARGET" \
     -DCMAKE_ASM_COMPILER_TARGET="$MUSL_TARGET" \
     -DCMAKE_SYSROOT="$MUSL_DIR" \
-    -DCMAKE_C_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR" \
-    -DCMAKE_CXX_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR" \
-    -DCMAKE_ASM_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR" \
+    -DCMAKE_C_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR $FILE_PREFIX_MAP" \
+    -DCMAKE_CXX_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR $FILE_PREFIX_MAP" \
+    -DCMAKE_ASM_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR $FILE_PREFIX_MAP" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCOMPILER_RT_STANDALONE_BUILD=ON \
     -DCOMPILER_RT_BUILD_CRT=ON \
@@ -435,7 +447,7 @@ if [ ! -e "$LIBCXX_DIR/lib/libc++.a" ]; then
   # --unwindlib=none, not libunwind: this build is what *produces* libunwind,
   # so CMake's link probes have to work before it exists. The real build gets
   # --unwindlib=libunwind from toolchain_flags.bzl.
-  MUSL_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR -fuse-ld=lld -I$SRC/libc"
+  MUSL_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR -fuse-ld=lld -I$SRC/libc $FILE_PREFIX_MAP"
   MUSL_LINK_FLAGS="$MUSL_FLAGS --rtlib=compiler-rt --unwindlib=none -nostdlib++"
 
   cmake -GNinja -S "$SRC/runtimes" -B "$BUILD_DIR" \
