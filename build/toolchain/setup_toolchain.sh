@@ -68,7 +68,13 @@ case "$ARCH" in
     KERNEL_ARCH=arm64
     ;;
   armv7)
-    MUSL_TARGET=armv7l-linux-musleabihf
+    # armv7, not armv7l: the trailing l is uname's spelling, not LLVM's, and
+    # compiler-rt's ARM32 arch list has no entry for it, so a builtins build
+    # configures with nothing to do and silently produces no library. Both
+    # spellings normalise to the same effective triple
+    # (armv7-unknown-linux-musleabihf), so this changes nothing else. Plain
+    # "arm-" is not the fix: clang normalises that down to armv6kz.
+    MUSL_TARGET=armv7-linux-musleabihf
     KERNEL_ARCH=arm
     ;;
   mipsel)
@@ -172,35 +178,6 @@ UNISTD_EOF
 RANDOM_EOF
 }
 
-CLANG_DIR="$PREFIX/chromium-clang"
-MUSL_DIR="$PREFIX/musl-$ARCH"
-LIBCXX_DIR="$PREFIX/libcxx-$ARCH"
-CLANG="$CLANG_DIR/bin/clang"
-
-mkdir -p "$PREFIX"
-
-# --- 1. Chromium's pinned clang/lld/llvm-* ---
-if [ ! -e "$CLANG" ]; then
-  echo "== Downloading Chromium's pinned clang ($CLANG_PACKAGE_VERSION) =="
-  mkdir -p "$CLANG_DIR"
-  curl -fsSL "https://commondatastorage.googleapis.com/chromium-browser-clang/Linux_x64/clang-${CLANG_PACKAGE_VERSION}.tar.xz" \
-    | tar -xJ -C "$CLANG_DIR"
-  # llvm-ar acts as ranlib/nm/etc when invoked under those names; the
-  # package only ships the canonical binary.
-  ln -sf llvm-ar "$CLANG_DIR/bin/llvm-ranlib"
-fi
-
-# Clang's resource directory is versioned by major release; derive it rather
-# than hardcoding, so bumping CLANG_PACKAGE_VERSION doesn't silently break
-# the alias below.
-CLANG_RESOURCE_DIR=$("$CLANG" -print-resource-dir)
-
-# The directory clang will actually search for compiler-rt. Taken from clang
-# itself rather than derived: it is *not* -print-effective-triple, which
-# normalises armv7l down to armv7 while the runtime lookup keeps the l.
-RT_MUSL_TRIPLE=$(basename "$(dirname "$("$CLANG" --target="$MUSL_TARGET" \
-  --rtlib=compiler-rt -print-libgcc-file-name)")")
-
 # compiler-rt (builtins + crtbegin/crtend), built from the same LLVM source as
 # libc++ and targeting musl directly.
 #
@@ -218,29 +195,51 @@ build_compiler_rt() {
 
   echo "== Building compiler-rt builtins for $MUSL_TARGET =="
   local build_dir="/tmp/compiler-rt-build-$ARCH"
+  # cmake -B would create this itself, but the log redirections below are
+  # opened by the shell before cmake ever runs.
   rm -rf "$build_dir"
+  mkdir -p "$build_dir"
   cmake -GNinja -S "$SRC/compiler-rt/lib/builtins" -B "$build_dir" \
     -DCMAKE_C_COMPILER="$CLANG" \
+    -DCMAKE_CXX_COMPILER="$CLANG_DIR/bin/clang++" \
     -DCMAKE_ASM_COMPILER="$CLANG" \
     -DCMAKE_AR="$CLANG_DIR/bin/llvm-ar" \
     -DCMAKE_RANLIB="$CLANG_DIR/bin/llvm-ranlib" \
     -DCMAKE_C_COMPILER_TARGET="$MUSL_TARGET" \
+    -DCMAKE_CXX_COMPILER_TARGET="$MUSL_TARGET" \
     -DCMAKE_ASM_COMPILER_TARGET="$MUSL_TARGET" \
     -DCMAKE_SYSROOT="$MUSL_DIR" \
     -DCMAKE_C_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR" \
+    -DCMAKE_CXX_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR" \
+    -DCMAKE_ASM_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCOMPILER_RT_STANDALONE_BUILD=ON \
     -DCOMPILER_RT_BUILD_CRT=ON \
     -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
-    -DLLVM_CMAKE_DIR="$SRC/llvm/cmake/modules" >/dev/null
-  ninja -C "$build_dir" -j"$(nproc)" >/dev/null
+    -DLLVM_CMAKE_DIR="$SRC/llvm/cmake/modules" > "$build_dir/cmake.log" 2>&1 \
+    || { echo "compiler-rt configure failed:" >&2; tail -40 "$build_dir/cmake.log" >&2; exit 1; }
+  ninja -C "$build_dir" -j"$(nproc)" > "$build_dir/build.log" 2>&1 \
+    || { echo "compiler-rt build failed:" >&2; tail -40 "$build_dir/build.log" >&2; exit 1; }
 
   # The builtins-only build emits the old per-arch-suffix layout
   # (lib/linux/libclang_rt.builtins-<arch>.a) while clang looks for the
   # per-triple one (lib/<triple>/libclang_rt.builtins.a), so rename on install
   # rather than leaving clang unable to find what was just built.
+  # A builtins build whose target arch compiler-rt doesn't recognise
+  # configures happily, reports "no work to do", and produces nothing -- so
+  # check for the artifact rather than trusting the exit codes above.
+  local built
+  built=$(find "$build_dir" -name 'libclang_rt.builtins*.a' | head -1)
+  if [ -z "$built" ]; then
+    echo "compiler-rt built no library for $MUSL_TARGET." >&2
+    echo "Its arch is most likely not in compiler-rt's supported list --" >&2
+    echo "check the first triple component against ALL_BUILTIN_SUPPORTED_ARCH" >&2
+    echo "in compiler-rt/cmake/builtin-config-ix.cmake." >&2
+    exit 1
+  fi
+
   mkdir -p "$out"
-  cp "$build_dir"/lib/linux/libclang_rt.builtins-*.a "$out/libclang_rt.builtins.a"
+  cp "$built" "$out/libclang_rt.builtins.a"
   cp "$build_dir"/lib/linux/clang_rt.crtbegin-*.o "$out/clang_rt.crtbegin.o"
   cp "$build_dir"/lib/linux/clang_rt.crtend-*.o "$out/clang_rt.crtend.o"
 }
