@@ -46,6 +46,18 @@ ARCH=${1:-}
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 PREFIX=${QUICTUN_TOOLCHAIN_PREFIX:-$REPO_ROOT/build/toolchain/out}
 
+# Where sources are unpacked and cmake/ninja run, as opposed to $PREFIX,
+# which holds only the finished toolchain. Inside the checkout rather than
+# /tmp for the same reason $PREFIX isn't /opt: everything this script
+# touches stays in the working directory, so it needs no root and leaves
+# nothing behind on the machine.
+#
+# A sibling of $PREFIX, deliberately not a subdirectory of it: CI caches
+# $PREFIX verbatim, and these trees (an LLVM checkout plus a cmake build
+# dir per architecture) are hundreds of megabytes that would then be
+# saved and restored on every run for nothing.
+BUILD_ROOT=$REPO_ROOT/build/toolchain/.build
+
 # --- Pins ---
 # Chromium's actual current clang, from tools/clang/scripts/update.py
 # (CLANG_REVISION/CLANG_SUB_REVISION) as of 2026-06-16.
@@ -222,7 +234,7 @@ build_compiler_rt() {
   [ -e "$out/libclang_rt.builtins.a" ] && return 0
 
   echo "== Building compiler-rt builtins for $MUSL_TARGET =="
-  local build_dir="/tmp/compiler-rt-build-$ARCH"
+  local build_dir="$BUILD_ROOT/compiler-rt-$ARCH"
   # cmake -B would create this itself, but the log redirections below are
   # opened by the shell before cmake ever runs.
   rm -rf "$build_dir"
@@ -279,7 +291,7 @@ MUSL_DIR="$PREFIX/musl-$ARCH"
 LIBCXX_DIR="$PREFIX/libcxx-$ARCH"
 CLANG="$CLANG_DIR/bin/clang"
 
-mkdir -p "$PREFIX"
+mkdir -p "$PREFIX" "$BUILD_ROOT"
 
 # --- 1. Chromium's pinned clang/lld/llvm-* ---
 if [ ! -e "$CLANG" ]; then
@@ -306,7 +318,7 @@ RT_MUSL_TRIPLE=$(basename "$(dirname "$("$CLANG" --target="$MUSL_TARGET" \
 # --- 2. musl, built from source by that same clang ---
 if [ ! -e "$MUSL_DIR/lib/libc.a" ]; then
   echo "== Building musl $MUSL_VERSION for $MUSL_TARGET =="
-  SRC_ROOT=/tmp/musl-src
+  SRC_ROOT=$BUILD_ROOT/musl-src
   mkdir -p "$SRC_ROOT"
   TARBALL="$SRC_ROOT/musl-$MUSL_VERSION.tar.gz"
   # Deliberately not musl.libc.org: upstream's own host has never once been
@@ -385,7 +397,7 @@ fi
 # Fetched unconditionally rather than inside either consumer's "already built?"
 # check: compiler-rt used to be nested inside libc++'s, so once libc++ existed
 # the whole block was skipped and a compiler-rt rebuild silently did nothing.
-SRC_ROOT=/tmp/llvm-src
+SRC_ROOT=$BUILD_ROOT/llvm-src
 SRC="$SRC_ROOT/llvm-project-$LLVM_COMMIT"
 if [ ! -d "$SRC" ]; then
   mkdir -p "$SRC_ROOT"
@@ -416,7 +428,7 @@ build_compiler_rt
 if [ ! -e "$LIBCXX_DIR/lib/libc++.a" ]; then
   echo "== Building libc++ for $MUSL_TARGET =="
 
-  BUILD_DIR="/tmp/libcxx-build-$ARCH"
+  BUILD_DIR="$BUILD_ROOT/libcxx-$ARCH"
   rm -rf "$BUILD_DIR"
   mkdir -p "$BUILD_DIR"
 

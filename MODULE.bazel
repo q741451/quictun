@@ -79,18 +79,25 @@ http_archive(
     urls = ["https://github.com/google/anonymous-tokens/archive/e31089547b3d14a8a441bb58df086b171ebc915e.tar.gz"],
 )
 
-# From-scratch, pinned cc_toolchains for x86_64/i386/aarch64/armv7/mipsel/riscv64 -- Chromium's own pinned clang, a from-source libc++ built
-# by that same clang, a from-source musl, and a from-source compiler-rt.
+# From-scratch, pinned cc_toolchains for x86_64, x86, arm64, armv7, mipsel
+# and riscv64: Chromium's own pinned clang, plus musl, compiler-rt and
+# libc++ all built from source by that same clang.
+#
 # See build/toolchain/BUILD.bazel and build/toolchain/setup_toolchain.sh
 # for what's pinned to what and why (in short: relying on the host OS's
 # own clang/gcc-*-cross packages drifts across Ubuntu releases in ways
 # that broke this project's mipsel build once already), and for why plain
 # big-endian mips is deliberately not included.
+#
+# One name per architecture, spelled the same way everywhere -- these used
+# to carry a `_clang` infix on some architectures and not others, left over
+# from when a couple of them had a GCC-based variant to be distinguished
+# from. Every one of them is clang now, so the infix distinguished nothing.
 register_toolchains(
     "//build/toolchain:x64_cc_toolchain",
     "//build/toolchain:x86_cc_toolchain",
-    "//build/toolchain:aarch64_clang_cc_toolchain",
-    "//build/toolchain:armv7_clang_cc_toolchain",
-    "//build/toolchain:mipsel_clang_cc_toolchain",
+    "//build/toolchain:arm64_cc_toolchain",
+    "//build/toolchain:armv7_cc_toolchain",
+    "//build/toolchain:mipsel_cc_toolchain",
     "//build/toolchain:riscv64_cc_toolchain",
 )

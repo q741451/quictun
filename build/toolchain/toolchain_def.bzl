@@ -1,0 +1,131 @@
+"""One definition of what a target architecture's cc_toolchain looks like.
+
+Every architecture here is built the same way -- same clang, same musl, same
+compiler-rt, same libc++ -- so the four rules each one needs (platform,
+cc_toolchain_config, cc_toolchain, toolchain) differ only in the three values
+`musl_cc_toolchain` takes as arguments. Writing them out per architecture
+meant ~70 near-identical lines apiece, which is both noise and a hazard: the
+last per-architecture special case (mipsel's borrowed libgcc) is gone, so
+anything that looks different between two blocks from here on is a mistake,
+and six copies is a poor way to make a mistake visible.
+
+Adding an architecture is now: build/toolchain/uapi/asm-<kernel arch>, an
+entry in setup_toolchain.sh's arch_musl_target/arch_kernel_arch, one
+musl_cc_toolchain() call, and one register_toolchains() line.
+"""
+
+load(
+    "@bazel_tools//tools/cpp:unix_cc_toolchain_config.bzl",
+    "cc_toolchain_config",
+)
+load(":toolchain_paths.bzl", "MUSL_TARGETS", "TOOLCHAIN_PREFIX")
+load(
+    ":toolchain_flags.bzl",
+    "libcxx_compile_flags",
+    "libcxx_link_flags",
+    "libcxx_link_libs",
+    "sysroot_flags",
+)
+
+# The -c opt flag set, carried over unchanged from the six per-architecture
+# blocks this replaced (which all had the identical list). These mirror
+# Bazel's own stock unix_cc_toolchain_config defaults; -ffunction-sections/
+# -fdata-sections pair with the -Wl,--gc-sections below.
+_OPT_COMPILE_FLAGS = [
+    "-g0",
+    "-O2",
+    "-D_FORTIFY_SOURCE=1",
+    "-DNDEBUG",
+    "-ffunction-sections",
+    "-fdata-sections",
+]
+
+def musl_cc_toolchain(arch, cpu, bazel_cpu, clang_builtin_includes, tool_paths):
+    """Defines the platform + toolchain quartet for one target architecture.
+
+    Args:
+      arch: this repo's short name for the architecture (x64, armv7, ...).
+        Keys MUSL_TARGETS and names the sysroot/libc++ directories that
+        setup_toolchain.sh installs, so it has to match that script's
+        arch_musl_target(). Also names every rule defined here.
+      cpu: the value for cc_toolchain_config's `cpu` attribute. Kept separate
+        from both names above because it matches neither: `mipsel` is
+        `mips32` to @platforms, and `arm64` is `aarch64` here.
+      bazel_cpu: the @platforms//cpu: constraint this architecture selects on.
+      clang_builtin_includes: shared clang resource-dir include paths, to
+        which this function appends the two per-arch ones.
+      tool_paths: the shared LLVM tool_paths dict (one clang for all targets).
+    """
+    target = MUSL_TARGETS[arch]
+
+    native.platform(
+        name = "linux_" + arch,
+        constraint_values = [
+            "@platforms//os:linux",
+            "@platforms//cpu:" + bazel_cpu,
+        ],
+    )
+
+    cc_toolchain_config(
+        name = arch + "_config",
+        toolchain_identifier = "chromium-clang-" + arch,
+        # The exec platform is always the x86_64 runner/dev machine: this
+        # toolchain is only ever a cross (or, for x64, a self-hosted) build.
+        host_system_name = "x86_64-unknown-linux-gnu",
+        target_system_name = target,
+        cpu = cpu,
+        target_libc = "musl",
+        compiler = "clang",
+        abi_version = "clang",
+        abi_libc_version = "musl",
+        tool_paths = tool_paths,
+        compile_flags = ["--target=" + target] +
+                        sysroot_flags(arch) +
+                        libcxx_compile_flags(arch),
+        link_flags = ["--target=" + target] +
+                     sysroot_flags(arch) +
+                     libcxx_link_flags(arch),
+        link_libs = libcxx_link_libs(),
+        archive_flags = [],
+        unfiltered_compile_flags = ["-no-canonical-prefixes"],
+        opt_compile_flags = _OPT_COMPILE_FLAGS,
+        opt_link_flags = ["-Wl,--gc-sections"],
+        dbg_compile_flags = ["-g"],
+        # Exactly the three places a header may come from: clang's own
+        # resource dir, the from-source libc++, and the musl sysroot. No
+        # /usr/include, no /usr/local/include -- a header this build reads
+        # that isn't in one of these is a header it shouldn't have found.
+        cxx_builtin_include_directories = clang_builtin_includes + [
+            "%s/libcxx-%s/include/c++/v1" % (TOOLCHAIN_PREFIX, arch),
+            "%s/musl-%s/include" % (TOOLCHAIN_PREFIX, arch),
+        ],
+    )
+
+    native.cc_toolchain(
+        name = arch + "_toolchain",
+        toolchain_identifier = "chromium-clang-" + arch,
+        toolchain_config = ":" + arch + "_config",
+        all_files = ":empty",
+        ar_files = ":empty",
+        as_files = ":empty",
+        compiler_files = ":empty",
+        dwp_files = ":empty",
+        linker_files = ":empty",
+        objcopy_files = ":empty",
+        strip_files = ":empty",
+        supports_param_files = 0,
+    )
+
+    native.toolchain(
+        name = arch + "_cc_toolchain",
+        exec_compatible_with = [
+            "@platforms//os:linux",
+            "@platforms//cpu:x86_64",
+        ],
+        target_compatible_with = [
+            "@platforms//os:linux",
+            "@platforms//cpu:" + bazel_cpu,
+        ],
+        toolchain = ":" + arch + "_toolchain",
+        toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    )
