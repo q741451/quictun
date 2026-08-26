@@ -40,6 +40,35 @@ _OPT_COMPILE_FLAGS = [
     "-fdata-sections",
 ]
 
+# Link-time size reductions, measured on a real x86_64 quictun_client rather
+# than assumed: -7.30% all together, and the same -7.30% on quictun_server.
+#
+#   -z pack-relative-relocs  -131KB. A static PIE needs one relocation per
+#       pointer constant, and every relocation in every one of this project's
+#       six binaries is the R_*_RELATIVE kind (5.5k-6.6k of them each, 100%
+#       on all six). RELR encodes exactly those as a bitmap. musl handles it
+#       in crt/rcrt1.c -> ldso/dlstart.c, which processes DT_RELR
+#       unconditionally in the same pass as DT_REL/DT_RELA, so it applies to
+#       static-pie and not just to dynamically linked programs.
+#   --icf=safe                -71KB. Folds identical functions. "safe" rather
+#       than "all" because it honours .llvm_addrsig, so a function whose
+#       address is taken is never folded and pointer inequality still holds;
+#       every object file in this build carries that table. --icf=all saves
+#       only 6KB more and gives that guarantee up, which is a bad trade.
+#   -Wl,-O2                   -2KB. lld's aggressive string tail merging.
+#
+# None of these change code generation -- they are all decisions the linker
+# makes about layout and duplicate elimination -- so unlike -O2 or LTO there
+# is nothing here that alters what the compiler emitted. They live in
+# opt_link_flags rather than .bazelrc so that -c dbg builds keep unfolded
+# functions and plain relocations for debugging.
+_OPT_LINK_FLAGS = [
+    "-Wl,--gc-sections",
+    "-Wl,-z,pack-relative-relocs",
+    "-Wl,--icf=safe",
+    "-Wl,-O2",
+]
+
 def musl_cc_toolchain(arch, cpu, bazel_cpu, clang_builtin_includes, tool_paths):
     """Defines the platform + toolchain quartet for one target architecture.
 
@@ -89,7 +118,7 @@ def musl_cc_toolchain(arch, cpu, bazel_cpu, clang_builtin_includes, tool_paths):
         archive_flags = [],
         unfiltered_compile_flags = ["-no-canonical-prefixes"],
         opt_compile_flags = _OPT_COMPILE_FLAGS,
-        opt_link_flags = ["-Wl,--gc-sections"],
+        opt_link_flags = _OPT_LINK_FLAGS,
         dbg_compile_flags = ["-g"],
         # Exactly the three places a header may come from: clang's own
         # resource dir, the from-source libc++, and the musl sysroot. No
