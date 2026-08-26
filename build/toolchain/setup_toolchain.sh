@@ -67,6 +67,11 @@ MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 # MUSL_TARGET drives musl's own build, compiler-rt's, and clang's --target.
 # KERNEL_ARCH selects which vendored asm/ tree to install (build/toolchain/uapi).
 #
+# i386, not i686: same trap as armv7l below -- compiler-rt's X86 arch list is
+# literally "i386", so any other spelling configures with nothing to build.
+# The vendored asm-x86 UAPI tree serves both 32- and 64-bit x86, so KERNEL_ARCH
+# is shared with x64.
+#
 # armv7, not armv7l: the trailing l is uname's spelling, not LLVM's, and
 # compiler-rt's ARM32 arch list has no entry for it, so a builtins build
 # configures with nothing to do and silently produces no library. Both
@@ -75,6 +80,7 @@ MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 arch_musl_target() {
   case "$1" in
     x64)    echo x86_64-linux-musl ;;
+    x86)    echo i386-linux-musl ;;
     arm64)  echo aarch64-linux-musl ;;
     armv7)  echo armv7-linux-musleabihf ;;
     mipsel) echo mipsel-linux-musl ;;
@@ -84,13 +90,14 @@ arch_musl_target() {
 arch_kernel_arch() {
   case "$1" in
     x64)    echo x86 ;;
+    x86)    echo x86 ;;
     arm64)  echo arm64 ;;
     armv7)  echo arm ;;
     mipsel) echo mips ;;
   esac
 }
 
-ALL_ARCHES="x64 arm64 armv7 mipsel"
+ALL_ARCHES="x64 x86 arm64 armv7 mipsel"
 
 MUSL_TARGET=$(arch_musl_target "$ARCH")
 KERNEL_ARCH=$(arch_kernel_arch "$ARCH")
@@ -201,6 +208,13 @@ RANDOM_EOF
 # dependency this file exists to remove. Building it here instead makes every
 # architecture identical, needs no triple-aliasing to make clang's lookup
 # resolve, and drops the executable-stack concession.
+#
+# EXCLUDE_ATOMIC_BUILTIN is off because compiler-rt defaults it on, reasoning
+# that "these should normally be provided by a shared library" -- true when a
+# libatomic.so is around, false here. 32-bit MIPS has no native 64-bit atomic
+# instructions, so absl (SequenceLock among others) needs __atomic_load_8 and
+# friends out of line; without them mipsel links with undefined symbols, which
+# is the same gap the old toolchain filled with an apt -latomic.
 build_compiler_rt() {
   local out="$CLANG_RESOURCE_DIR/lib/$RT_MUSL_TRIPLE"
   [ -e "$out/libclang_rt.builtins.a" ] && return 0
@@ -227,6 +241,8 @@ build_compiler_rt() {
     -DCMAKE_BUILD_TYPE=Release \
     -DCOMPILER_RT_STANDALONE_BUILD=ON \
     -DCOMPILER_RT_BUILD_CRT=ON \
+    -DCOMPILER_RT_EXCLUDE_ATOMIC_BUILTIN=OFF \
+    -DCOMPILER_RT_LIBATOMIC_USE_PTHREAD=ON \
     -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
     -DLLVM_CMAKE_DIR="$SRC/llvm/cmake/modules" > "$build_dir/cmake.log" 2>&1 \
     || { echo "compiler-rt configure failed:" >&2; tail -40 "$build_dir/cmake.log" >&2; exit 1; }
@@ -324,6 +340,12 @@ if [ ! -e "$MUSL_DIR/lib/libc.a" ]; then
 
   (
     cd "$BUILD_DIR"
+    # --target belongs in CC, not CFLAGS: configure runs feature probes with a
+    # bare $CC, so anything only in CFLAGS is invisible to them. LoongArch is
+    # where that bites -- musl probes whether the assembler understands $fcsr0
+    # and falls back to a legacy spelling if not, so a probe compiled for the
+    # host quietly selects assembly that then fails to build for the target.
+    #
     # --enable-wrapper=no: the musl-gcc/musl-clang wrapper scripts are for
     # driving a *host* compiler at a musl sysroot. Bazel drives clang with
     # an explicit --target/--sysroot instead (see toolchain_flags.bzl), so
@@ -333,8 +355,8 @@ if [ ! -e "$MUSL_DIR/lib/libc.a" ]; then
       --prefix="$MUSL_DIR" \
       --disable-shared \
       --enable-wrapper=no \
-      CC="$CLANG" \
-      CFLAGS="--target=$MUSL_TARGET -Os -fPIC" \
+      CC="$CLANG --target=$MUSL_TARGET" \
+      CFLAGS="-Os -fPIC" \
       LDFLAGS="-fuse-ld=lld" \
       AR="$CLANG_DIR/bin/llvm-ar" \
       RANLIB="$CLANG_DIR/bin/llvm-ranlib"
@@ -357,35 +379,40 @@ if [ ! -e "$MUSL_DIR/lib/libc.a" ]; then
   cp -r "$UAPI_SRC/asm-generic" "$MUSL_DIR/include/asm-generic"
 fi
 
-# --- 3. libc++/libc++abi/libunwind, from LLVM source at the same commit as
-# the clang binary, compiled against the musl sysroot above ---
+# --- 3. LLVM source, shared by compiler-rt and libc++ below ---
+# Fetched unconditionally rather than inside either consumer's "already built?"
+# check: compiler-rt used to be nested inside libc++'s, so once libc++ existed
+# the whole block was skipped and a compiler-rt rebuild silently did nothing.
+SRC_ROOT=/tmp/llvm-src
+SRC="$SRC_ROOT/llvm-project-$LLVM_COMMIT"
+if [ ! -d "$SRC" ]; then
+  mkdir -p "$SRC_ROOT"
+  curl -fsSL "https://github.com/llvm/llvm-project/archive/${LLVM_COMMIT}.tar.gz" \
+    | tar -xz -C "$SRC_ROOT" \
+      "llvm-project-$LLVM_COMMIT/compiler-rt" \
+      "llvm-project-$LLVM_COMMIT/libcxx" \
+      "llvm-project-$LLVM_COMMIT/libcxxabi" \
+      "llvm-project-$LLVM_COMMIT/libunwind" \
+      "llvm-project-$LLVM_COMMIT/runtimes" \
+      "llvm-project-$LLVM_COMMIT/cmake" \
+      "llvm-project-$LLVM_COMMIT/third-party" \
+      "llvm-project-$LLVM_COMMIT/llvm/cmake" \
+      "llvm-project-$LLVM_COMMIT/llvm/utils/lit" \
+      "llvm-project-$LLVM_COMMIT/llvm/include/llvm-c" \
+      "llvm-project-$LLVM_COMMIT/llvm/include/llvm/Config" \
+      "llvm-project-$LLVM_COMMIT/llvm/include/llvm/Support" \
+      "llvm-project-$LLVM_COMMIT/llvm/include/llvm/ADT" \
+      "llvm-project-$LLVM_COMMIT/llvm/include/llvm/Demangle" \
+      "llvm-project-$LLVM_COMMIT/llvm/include/llvm/TargetParser" \
+      "llvm-project-$LLVM_COMMIT/libc"
+fi
+
+# --- 4. compiler-rt (builtins + crtbegin/crtend) ---
+build_compiler_rt
+
+# --- 5. libc++/libc++abi/libunwind, compiled against the musl sysroot ---
 if [ ! -e "$LIBCXX_DIR/lib/libc++.a" ]; then
   echo "== Building libc++ for $MUSL_TARGET =="
-  SRC_ROOT=/tmp/llvm-src
-  SRC="$SRC_ROOT/llvm-project-$LLVM_COMMIT"
-  if [ ! -d "$SRC" ]; then
-    mkdir -p "$SRC_ROOT"
-    curl -fsSL "https://github.com/llvm/llvm-project/archive/${LLVM_COMMIT}.tar.gz" \
-      | tar -xz -C "$SRC_ROOT" \
-        "llvm-project-$LLVM_COMMIT/compiler-rt" \
-        "llvm-project-$LLVM_COMMIT/libcxx" \
-        "llvm-project-$LLVM_COMMIT/libcxxabi" \
-        "llvm-project-$LLVM_COMMIT/libunwind" \
-        "llvm-project-$LLVM_COMMIT/runtimes" \
-        "llvm-project-$LLVM_COMMIT/cmake" \
-        "llvm-project-$LLVM_COMMIT/third-party" \
-        "llvm-project-$LLVM_COMMIT/llvm/cmake" \
-        "llvm-project-$LLVM_COMMIT/llvm/utils/lit" \
-        "llvm-project-$LLVM_COMMIT/llvm/include/llvm-c" \
-        "llvm-project-$LLVM_COMMIT/llvm/include/llvm/Config" \
-        "llvm-project-$LLVM_COMMIT/llvm/include/llvm/Support" \
-        "llvm-project-$LLVM_COMMIT/llvm/include/llvm/ADT" \
-        "llvm-project-$LLVM_COMMIT/llvm/include/llvm/Demangle" \
-        "llvm-project-$LLVM_COMMIT/llvm/include/llvm/TargetParser" \
-        "llvm-project-$LLVM_COMMIT/libc"
-  fi
-
-  build_compiler_rt
 
   BUILD_DIR="/tmp/libcxx-build-$ARCH"
   rm -rf "$BUILD_DIR"
@@ -433,7 +460,7 @@ if [ ! -e "$LIBCXX_DIR/lib/libc++.a" ]; then
   cp -r "$BUILD_DIR/lib" "$BUILD_DIR/include" "$LIBCXX_DIR/"
 fi
 
-# --- 4. Hand the resolved paths to Bazel ---
+# --- 6. Hand the resolved paths to Bazel ---
 # BUILD.bazel can't call getenv or resolve the workspace root, and $PREFIX is
 # no longer the fixed /opt it used to be, so the concrete paths are written
 # out here for it to load(). Regenerated on every run; never checked in.

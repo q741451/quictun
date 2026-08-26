@@ -51,6 +51,9 @@ jobs:
           - name: x86_64
             platform: linux_x64
             file_match: "x86-64"
+          - name: x86
+            platform: linux_x86
+            file_match: "Intel 80386"
           - name: arm64
             platform: linux_arm64
             file_match: "ARM aarch64"
