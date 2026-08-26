@@ -142,9 +142,11 @@ No compiler is installed from the distro, and none is used: `cmake`,
 they are only there to *drive* the build of the pinned toolchain.
 
 `bash build/toolchain/setup_toolchain.sh x64` downloads Chromium's pinned
-clang and builds musl, compiler-rt and libc++ against it, under
-`build/toolchain/out/` -- a working directory inside the repo, so it needs
-no root and touches nothing outside the checkout. It also writes
+clang and builds musl, compiler-rt and libc++ against it, into
+`build/toolchain/out/` (from sources it unpacks into
+`build/toolchain/.build/`) -- both working directories inside the repo and
+both gitignored, so it needs no root and touches nothing outside the
+checkout. It also writes
 `build/toolchain/toolchain_paths.bzl`, which `build/toolchain/BUILD.bazel`
 loads, so this step is **required**: it is gitignored rather than checked
 in, and skipping it fails the build at analysis time with a missing-file
