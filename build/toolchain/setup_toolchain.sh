@@ -84,6 +84,7 @@ arch_musl_target() {
     arm64)  echo aarch64-linux-musl ;;
     armv7)  echo armv7-linux-musleabihf ;;
     mipsel) echo mipsel-linux-musl ;;
+    riscv64) echo riscv64-linux-musl ;;
   esac
 }
 
@@ -94,10 +95,11 @@ arch_kernel_arch() {
     arm64)  echo arm64 ;;
     armv7)  echo arm ;;
     mipsel) echo mips ;;
+    riscv64) echo riscv ;;
   esac
 }
 
-ALL_ARCHES="x64 x86 arm64 armv7 mipsel"
+ALL_ARCHES="x64 x86 arm64 armv7 mipsel riscv64"
 
 MUSL_TARGET=$(arch_musl_target "$ARCH")
 KERNEL_ARCH=$(arch_kernel_arch "$ARCH")

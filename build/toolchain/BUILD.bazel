@@ -398,6 +398,81 @@ toolchain(
     toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
 )
 
+# --- riscv64 ---
+
+platform(
+    name = "linux_riscv64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:riscv64",
+    ],
+)
+
+cc_toolchain_config(
+    name = "riscv64_config",
+    toolchain_identifier = "chromium-clang-riscv64",
+    host_system_name = "x86_64-unknown-linux-gnu",
+    target_system_name = MUSL_TARGETS["riscv64"],
+    cpu = "riscv64",
+    target_libc = "musl",
+    compiler = "clang",
+    abi_version = "clang",
+    abi_libc_version = "musl",
+    tool_paths = LLVM_TOOL_PATHS,
+    compile_flags = [
+        "--target=" + MUSL_TARGETS["riscv64"],
+    ] + sysroot_flags("riscv64") + libcxx_compile_flags("riscv64"),
+    link_flags = [
+        "--target=" + MUSL_TARGETS["riscv64"],
+    ] + sysroot_flags("riscv64") + libcxx_link_flags("riscv64"),
+    link_libs = libcxx_link_libs(),
+    archive_flags = [],
+    unfiltered_compile_flags = ["-no-canonical-prefixes"],
+    opt_compile_flags = [
+        "-g0",
+        "-O2",
+        "-D_FORTIFY_SOURCE=1",
+        "-DNDEBUG",
+        "-ffunction-sections",
+        "-fdata-sections",
+    ],
+    opt_link_flags = ["-Wl,--gc-sections"],
+    dbg_compile_flags = ["-g"],
+    cxx_builtin_include_directories = CLANG_BUILTIN_INCLUDES + [
+        TOOLCHAIN_PREFIX + "/libcxx-riscv64/include/c++/v1",
+        TOOLCHAIN_PREFIX + "/musl-riscv64/include",
+    ],
+)
+
+cc_toolchain(
+    name = "riscv64_toolchain",
+    toolchain_identifier = "chromium-clang-riscv64",
+    toolchain_config = ":riscv64_config",
+    all_files = ":empty",
+    ar_files = ":empty",
+    as_files = ":empty",
+    compiler_files = ":empty",
+    dwp_files = ":empty",
+    linker_files = ":empty",
+    objcopy_files = ":empty",
+    strip_files = ":empty",
+    supports_param_files = 0,
+)
+
+toolchain(
+    name = "riscv64_cc_toolchain",
+    exec_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:riscv64",
+    ],
+    toolchain = ":riscv64_toolchain",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+
 # --- mipsel (little-endian MIPS) ---
 #
 # Plain big-endian "mips" is deliberately not built for at all: quiche's

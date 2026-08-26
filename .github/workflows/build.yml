@@ -63,6 +63,9 @@ jobs:
           - name: mipsel
             platform: linux_mipsel
             file_match: "MIPS,"
+          - name: riscv64
+            platform: linux_riscv64
+            file_match: "UCB RISC-V"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
