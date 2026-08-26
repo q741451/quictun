@@ -58,34 +58,46 @@ MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 # MUSL_TARGET drives musl's own build, compiler-rt's, and clang's --target for
 # everything compiled against them. KERNEL_ARCH selects which vendored asm/
 # tree to install (see build/toolchain/uapi/).
-case "$ARCH" in
-  x64)
-    MUSL_TARGET=x86_64-linux-musl
-    KERNEL_ARCH=x86
-    ;;
-  arm64)
-    MUSL_TARGET=aarch64-linux-musl
-    KERNEL_ARCH=arm64
-    ;;
-  armv7)
-    # armv7, not armv7l: the trailing l is uname's spelling, not LLVM's, and
-    # compiler-rt's ARM32 arch list has no entry for it, so a builtins build
-    # configures with nothing to do and silently produces no library. Both
-    # spellings normalise to the same effective triple
-    # (armv7-unknown-linux-musleabihf), so this changes nothing else. Plain
-    # "arm-" is not the fix: clang normalises that down to armv6kz.
-    MUSL_TARGET=armv7-linux-musleabihf
-    KERNEL_ARCH=arm
-    ;;
-  mipsel)
-    MUSL_TARGET=mipsel-linux-musl
-    KERNEL_ARCH=mips
-    ;;
-  *)
-    echo "Usage: $0 <x64|arm64|armv7|mipsel>" >&2
-    exit 1
-    ;;
-esac
+# Single source of truth for the per-architecture triples. BUILD.bazel gets
+# this same table through the generated toolchain_paths.bzl rather than
+# repeating it: having the triple written in two places is exactly how armv7
+# broke once already -- the setup script built compiler-rt for one spelling
+# while Bazel linked against the other.
+#
+# MUSL_TARGET drives musl's own build, compiler-rt's, and clang's --target.
+# KERNEL_ARCH selects which vendored asm/ tree to install (build/toolchain/uapi).
+#
+# armv7, not armv7l: the trailing l is uname's spelling, not LLVM's, and
+# compiler-rt's ARM32 arch list has no entry for it, so a builtins build
+# configures with nothing to do and silently produces no library. Both
+# spellings normalise to the same effective triple. Plain "arm-" is not the
+# fix either: clang normalises that down to armv6kz.
+arch_musl_target() {
+  case "$1" in
+    x64)    echo x86_64-linux-musl ;;
+    arm64)  echo aarch64-linux-musl ;;
+    armv7)  echo armv7-linux-musleabihf ;;
+    mipsel) echo mipsel-linux-musl ;;
+  esac
+}
+
+arch_kernel_arch() {
+  case "$1" in
+    x64)    echo x86 ;;
+    arm64)  echo arm64 ;;
+    armv7)  echo arm ;;
+    mipsel) echo mips ;;
+  esac
+}
+
+ALL_ARCHES="x64 arm64 armv7 mipsel"
+
+MUSL_TARGET=$(arch_musl_target "$ARCH")
+KERNEL_ARCH=$(arch_kernel_arch "$ARCH")
+if [ -z "$MUSL_TARGET" ]; then
+  echo "Usage: $0 <$(echo "$ALL_ARCHES" | tr ' ' '|')>" >&2
+  exit 1
+fi
 
 # musl deliberately ships no kernel UAPI headers (<linux/*>), and pulling a
 # whole kernel-headers package in for them would be both enormous and exactly
@@ -434,6 +446,12 @@ on every setup run; see .gitignore.
 
 TOOLCHAIN_PREFIX = "$PREFIX"
 CLANG_RESOURCE_DIR = "$CLANG_RESOURCE_DIR"
+
+# Every architecture's clang --target, not just the one just set up: this is
+# the table BUILD.bazel reads so the triple is defined in one place only.
+MUSL_TARGETS = {
+$(for a in $ALL_ARCHES; do printf '    "%s": "%s",\n' "$a" "$(arch_musl_target "$a")"; done)
+}
 EOF
 
 echo "== Done: $ARCH toolchain ready =="

@@ -63,7 +63,7 @@
 # than a system location, so no step of this needs root.
 
 load("@bazel_tools//tools/cpp:unix_cc_toolchain_config.bzl", "cc_toolchain_config")
-load(":toolchain_paths.bzl", "CLANG_RESOURCE_DIR", "TOOLCHAIN_PREFIX")
+load(":toolchain_paths.bzl", "CLANG_RESOURCE_DIR", "MUSL_TARGETS", "TOOLCHAIN_PREFIX")
 load(
     ":toolchain_flags.bzl",
     "libcxx_compile_flags",
@@ -110,9 +110,9 @@ platform(
 
 cc_toolchain_config(
     name = "x64_config",
-    toolchain_identifier = "chromium-clang-x86_64-linux-gnu",
+    toolchain_identifier = "chromium-clang-x64",
     host_system_name = "x86_64-unknown-linux-gnu",
-    target_system_name = "x86_64-linux-musl",
+    target_system_name = MUSL_TARGETS["x64"],
     cpu = "x86_64",
     target_libc = "musl",
     compiler = "clang",
@@ -120,10 +120,10 @@ cc_toolchain_config(
     abi_libc_version = "musl",
     tool_paths = LLVM_TOOL_PATHS,
     compile_flags = [
-        "--target=x86_64-linux-musl",
+        "--target=" + MUSL_TARGETS["x64"],
     ] + sysroot_flags("x64") + libcxx_compile_flags("x64"),
     link_flags = [
-        "--target=x86_64-linux-musl",
+        "--target=" + MUSL_TARGETS["x64"],
     ] + sysroot_flags("x64") + libcxx_link_flags("x64"),
     link_libs = libcxx_link_libs(),
     archive_flags = [],
@@ -146,7 +146,7 @@ cc_toolchain_config(
 
 cc_toolchain(
     name = "x64_toolchain",
-    toolchain_identifier = "chromium-clang-x86_64-linux-gnu",
+    toolchain_identifier = "chromium-clang-x64",
     toolchain_config = ":x64_config",
     all_files = ":empty",
     ar_files = ":empty",
@@ -185,9 +185,9 @@ platform(
 
 cc_toolchain_config(
     name = "aarch64_config",
-    toolchain_identifier = "chromium-clang-aarch64-linux-gnu",
+    toolchain_identifier = "chromium-clang-arm64",
     host_system_name = "x86_64-unknown-linux-gnu",
-    target_system_name = "aarch64-linux-musl",
+    target_system_name = MUSL_TARGETS["arm64"],
     cpu = "aarch64",
     target_libc = "musl",
     compiler = "clang",
@@ -195,10 +195,10 @@ cc_toolchain_config(
     abi_libc_version = "musl",
     tool_paths = LLVM_TOOL_PATHS,
     compile_flags = [
-        "--target=aarch64-linux-musl",
+        "--target=" + MUSL_TARGETS["arm64"],
     ] + sysroot_flags("arm64") + libcxx_compile_flags("arm64"),
     link_flags = [
-        "--target=aarch64-linux-musl",
+        "--target=" + MUSL_TARGETS["arm64"],
     ] + sysroot_flags("arm64") + libcxx_link_flags("arm64"),
     link_libs = libcxx_link_libs(),
     archive_flags = [],
@@ -221,7 +221,7 @@ cc_toolchain_config(
 
 cc_toolchain(
     name = "aarch64_toolchain",
-    toolchain_identifier = "chromium-clang-aarch64-linux-gnu",
+    toolchain_identifier = "chromium-clang-arm64",
     toolchain_config = ":aarch64_config",
     all_files = ":empty",
     ar_files = ":empty",
@@ -260,9 +260,9 @@ platform(
 
 cc_toolchain_config(
     name = "armv7_config",
-    toolchain_identifier = "chromium-clang-arm-linux-gnueabihf",
+    toolchain_identifier = "chromium-clang-armv7",
     host_system_name = "x86_64-unknown-linux-gnu",
-    target_system_name = "arm-unknown-linux-gnueabihf",
+    target_system_name = MUSL_TARGETS["armv7"],
     cpu = "armv7",
     target_libc = "musl",
     compiler = "clang",
@@ -270,10 +270,10 @@ cc_toolchain_config(
     abi_libc_version = "musl",
     tool_paths = LLVM_TOOL_PATHS,
     compile_flags = [
-        "--target=armv7l-linux-musleabihf",
+        "--target=" + MUSL_TARGETS["armv7"],
     ] + sysroot_flags("armv7") + libcxx_compile_flags("armv7"),
     link_flags = [
-        "--target=armv7l-linux-musleabihf",
+        "--target=" + MUSL_TARGETS["armv7"],
     ] + sysroot_flags("armv7") + libcxx_link_flags("armv7"),
     link_libs = libcxx_link_libs(),
     archive_flags = [],
@@ -296,7 +296,7 @@ cc_toolchain_config(
 
 cc_toolchain(
     name = "armv7_toolchain",
-    toolchain_identifier = "chromium-clang-arm-linux-gnueabihf",
+    toolchain_identifier = "chromium-clang-armv7",
     toolchain_config = ":armv7_config",
     all_files = ":empty",
     ar_files = ":empty",
@@ -340,9 +340,9 @@ platform(
 
 cc_toolchain_config(
     name = "mipsel_config",
-    toolchain_identifier = "chromium-clang-mipsel-linux-musl",
+    toolchain_identifier = "chromium-clang-mipsel",
     host_system_name = "x86_64-unknown-linux-gnu",
-    target_system_name = "mipsel-linux-musl",
+    target_system_name = MUSL_TARGETS["mipsel"],
     cpu = "mipsel",
     target_libc = "musl",
     compiler = "clang",
@@ -350,10 +350,10 @@ cc_toolchain_config(
     abi_libc_version = "musl",
     tool_paths = LLVM_TOOL_PATHS,
     compile_flags = [
-        "--target=mipsel-linux-musl",
+        "--target=" + MUSL_TARGETS["mipsel"],
     ] + sysroot_flags("mipsel") + libcxx_compile_flags("mipsel"),
     link_flags = [
-        "--target=mipsel-linux-musl",
+        "--target=" + MUSL_TARGETS["mipsel"],
     ] + sysroot_flags("mipsel") + libcxx_link_flags("mipsel"),
     link_libs = libcxx_link_libs(),
     archive_flags = [],
@@ -376,7 +376,7 @@ cc_toolchain_config(
 
 cc_toolchain(
     name = "mipsel_toolchain",
-    toolchain_identifier = "chromium-clang-mipsel-linux-musl",
+    toolchain_identifier = "chromium-clang-mipsel",
     toolchain_config = ":mipsel_config",
     all_files = ":empty",
     ar_files = ":empty",
