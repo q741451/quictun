@@ -28,7 +28,8 @@
 # __has_include guards at their use sites. See quictun_connection_factory.cc,
 # flow_label.h and quic_udp_socket_posix.inc.
 #
-# Usage: setup_toolchain.sh <x64|arm64|armv7|mipsel>
+# Usage: setup_toolchain.sh <x64|x86|arm64|armv7|mipsel|riscv64>
+#        (ALL_ARCHES below is the authoritative list; keep this in step)
 #
 # Installs under $QUICTUN_TOOLCHAIN_PREFIX, defaulting to this repo's
 # build/toolchain/out/ -- a working directory, not a system path, so this
@@ -50,14 +51,13 @@ PREFIX=${QUICTUN_TOOLCHAIN_PREFIX:-$REPO_ROOT/build/toolchain/out}
 # (CLANG_REVISION/CLANG_SUB_REVISION) as of 2026-06-16.
 CLANG_PACKAGE_VERSION=llvmorg-23-init-19482-g53d18800-2
 LLVM_COMMIT=53d18800eda3b7407e53366f27ca78e922c6e0db
-# musl release, checksum from https://musl.libc.org/releases/ (verified
-# against the downloaded tarball, not transcribed from memory).
+# musl release. The checksum is the one computed from the tarball actually
+# downloaded here and cross-checked against a second, independent mirror --
+# not copied from upstream's site, which isn't reachable from here at all
+# (see the download block below).
 MUSL_VERSION=1.2.5
 MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 
-# MUSL_TARGET drives musl's own build, compiler-rt's, and clang's --target for
-# everything compiled against them. KERNEL_ARCH selects which vendored asm/
-# tree to install (see build/toolchain/uapi/).
 # Single source of truth for the per-architecture triples. BUILD.bazel gets
 # this same table through the generated toolchain_paths.bzl rather than
 # repeating it: having the triple written in two places is exactly how armv7

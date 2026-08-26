@@ -113,7 +113,7 @@ echo "=================================================================="
 printf 'scan roots:\n'
 for r in "${SCAN_ROOTS[@]}"; do printf '  %s\n' "$(basename "$r")"; done
 printf 'macros only in ref : %d\n' "$(wc -l < "$WORK/only_ref.txt")"
-printf 'macros only in musl: %d\n' "$(wc -l < "$WORK/musl.names" >/dev/null; wc -l < "$WORK/only_musl.txt")"
+printf 'macros only in musl: %d\n' "$(wc -l < "$WORK/only_musl.txt")"
 printf 'same name, different value: %d\n' "$(wc -l < "$WORK/differing_values.txt")"
 echo
 

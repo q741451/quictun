@@ -116,36 +116,58 @@ traffic on the same socket.
 ## Getting binaries
 
 Every push to the `quictun` branch builds static, self-contained Linux
-binaries for `x86_64`, `arm64`, `armv7`, and `mipsel` via
+binaries for `x86_64`, `x86`, `arm64`, `armv7`, `mipsel`, and `riscv64` via
 [`.github/workflows/build.yml`](.github/workflows/build.yml), using a
-pinned, from-scratch, Chromium-style toolchain (pinned clang, a from-source
-libc++, and a pinned glibc snapshot) so builds don't depend on the Ubuntu
-version running the build. Grab them from the *Artifacts* section of the
+pinned, from-scratch toolchain (Chromium's pinned clang, plus a musl libc,
+a compiler-rt, and a libc++/libc++abi/libunwind all built from source by
+that same clang) so builds don't depend on the Ubuntu version running the
+build -- or on its libc at all. Grab them from the *Artifacts* section of the
 corresponding run under the [Actions tab](../../actions) -- there is no
 separate GitHub Releases page.
 
 ## Building from source
 
 ```
-sudo apt install libicu-dev clang lld
+sudo apt install cmake ninja-build
 git clone -b quictun https://github.com/q741451/quictun.git
 cd quictun
+bash build/toolchain/setup_toolchain.sh x64
 ./build/regen_quictun_build_timestamp.sh
 bazel build -c opt --platforms=//build/toolchain:linux_x64 //quiche:quictun_client //quiche:quictun_server
 ./bazel-bin/quiche/quictun_client --helpfull
 ```
 
+No compiler is installed from the distro, and none is used: `cmake`,
+`ninja`, `curl`, `make` and `tar` are the only host tools involved, and
+they are only there to *drive* the build of the pinned toolchain.
+
+`bash build/toolchain/setup_toolchain.sh x64` downloads Chromium's pinned
+clang and builds musl, compiler-rt and libc++ against it, under
+`build/toolchain/out/` -- a working directory inside the repo, so it needs
+no root and touches nothing outside the checkout. It also writes
+`build/toolchain/toolchain_paths.bzl`, which `build/toolchain/BUILD.bazel`
+loads, so this step is **required**: it is gitignored rather than checked
+in, and skipping it fails the build at analysis time with a missing-file
+error on that `load()`. Rerunning it is cheap -- each piece is skipped if
+already built.
+
 `./build/regen_quictun_build_timestamp.sh` writes the current time into a
 small generated header the [startup banner](#startup-banner) reads --
-required (the build fails without it: it's gitignored, not checked in),
-and worth rerunning before each later rebuild too, or the banner will
-just keep showing this first build's time.
+required for the same reason (gitignored, not checked in), and worth
+rerunning before each later rebuild too, or the banner will just keep
+showing this first build's time.
 
 `--platforms=//build/toolchain:linux_x64` selects this repo's pinned
 toolchain (see `build/toolchain/BUILD.bazel`); other supported values are
-`linux_arm64`, `linux_armv7`, and `linux_mipsel`. Add
-`--linkopt=-static-pie` (x86_64/arm64) or `--linkopt=-static` (armv7/mipsel)
-for the same fully static binaries CI produces.
+`linux_x86`, `linux_arm64`, `linux_armv7`, `linux_mipsel` and
+`linux_riscv64`. Cross-compiling to any of them means running
+`setup_toolchain.sh` for that architecture too (and for `x64` as well,
+which is what Bazel builds host-side tools like protoc with).
+
+No `--linkopt` is needed for a fully static binary: musl is configured
+with `--disable-shared`, so `-static-pie` is part of the toolchain itself
+(`build/toolchain/toolchain_flags.bzl`) on every architecture rather than
+something the command line adds.
 
 ---
 

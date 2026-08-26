@@ -89,7 +89,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/toolchain/out
-          key: toolchain-${{ matrix.name }}-${{ hashFiles('build/toolchain/setup_toolchain.sh') }}
+          # uapi/** is in the key as well as the script: setup_toolchain.sh
+          # copies the vendored asm/ headers into the sysroot from inside its
+          # "is musl already built?" guard, so a cache hit skips that copy
+          # entirely. Without the headers in the key, regenerating them (a
+          # kernel bump via uapi/regenerate.sh) leaves every runner building
+          # against the *old* UAPI, silently and with no version to notice.
+          key: toolchain-${{ matrix.name }}-${{ hashFiles('build/toolchain/setup_toolchain.sh', 'build/toolchain/uapi/**') }}
 
       - name: Set up pinned toolchain (${{ matrix.name }})
         run: |
