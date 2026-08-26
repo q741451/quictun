@@ -46,11 +46,13 @@
 # build/toolchain/libc_macro_audit.sh exists to enumerate that class of
 # difference rather than rediscover it at runtime.
 #
-# mipsel is not wired up on this toolchain: Chromium's clang package ships
-# no compiler-rt at all for MIPS (Chromium/V8 dropped MIPS support in 2019).
-# The glibc toolchain borrowed libgcc from a gcc-mipsel-cross package, which
-# is exactly the distro dependency this design removes, so mipsel needs
-# compiler-rt built from source rather than a straight port.
+# Every architecture uses the same runtime, compiler-rt, built from the same
+# LLVM source as libc++. Chromium's clang package ships prebuilt compiler-rt
+# only under *-linux-gnu triples and none at all for MIPS (Chromium/V8 dropped
+# MIPS in 2019); the glibc toolchain covered that gap by borrowing libgcc,
+# libgcc_eh and libatomic from an apt gcc-mipsel-cross package, which is the
+# distro dependency this design removes. Building it makes mipsel stop being a
+# special case entirely -- no libgcc, no executable-stack concession.
 #
 # All of the download/build work happens in setup_toolchain.sh (run once
 # per architecture before Bazel runs, in CI or locally), which writes the
@@ -338,7 +340,7 @@ platform(
 
 cc_toolchain_config(
     name = "mipsel_config",
-    toolchain_identifier = "chromium-clang-mipsel-linux-gnu",
+    toolchain_identifier = "chromium-clang-mipsel-linux-musl",
     host_system_name = "x86_64-unknown-linux-gnu",
     target_system_name = "mipsel-linux-musl",
     cpu = "mipsel",
@@ -353,14 +355,6 @@ cc_toolchain_config(
     link_flags = [
         "--target=mipsel-linux-musl",
     ] + sysroot_flags("mipsel") + libcxx_link_flags("mipsel"),
-    # NOT functional yet: Chromium's clang package ships no compiler-rt for
-    # MIPS at all, so --rtlib=compiler-rt above has nothing to resolve to and
-    # setup_toolchain.sh deliberately skips the triple alias for this arch.
-    # The glibc toolchain borrowed libgcc/libatomic from a gcc-mipsel-cross
-    # package for this, which is exactly the kind of distro dependency the
-    # musl switch exists to remove -- so mipsel needs its own answer (build
-    # compiler-rt from source, most likely) rather than a straight port.
-    # Left in place so the platform/toolchain wiring stays complete.
     link_libs = libcxx_link_libs(),
     archive_flags = [],
     unfiltered_compile_flags = ["-no-canonical-prefixes"],
@@ -382,7 +376,7 @@ cc_toolchain_config(
 
 cc_toolchain(
     name = "mipsel_toolchain",
-    toolchain_identifier = "chromium-clang-mipsel-linux-gnu",
+    toolchain_identifier = "chromium-clang-mipsel-linux-musl",
     toolchain_config = ":mipsel_config",
     all_files = ":empty",
     ar_files = ":empty",

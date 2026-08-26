@@ -55,36 +55,24 @@ LLVM_COMMIT=53d18800eda3b7407e53366f27ca78e922c6e0db
 MUSL_VERSION=1.2.5
 MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 
-# MUSL_TARGET drives both musl's own build and clang's --target for
-# everything compiled against it. RT_TRIPLE is the *gnu* triple whose
-# compiler-rt builtins archive Chromium's clang package actually ships:
-# there is no musl-triple copy, and builtins (__udivti3, __muloti4, ...) are
-# pure compiler helpers with no libc dependency, so the gnu-built archive is
-# ABI-compatible with a musl link. See toolchain_flags.bzl, which wires it in
-# by absolute path rather than letting clang's triple-keyed lookup fail.
+# MUSL_TARGET drives musl's own build, compiler-rt's, and clang's --target for
+# everything compiled against them. KERNEL_ARCH selects which vendored asm/
+# tree to install (see build/toolchain/uapi/).
 case "$ARCH" in
   x64)
     MUSL_TARGET=x86_64-linux-musl
-    RT_TRIPLE=x86_64-unknown-linux-gnu
     KERNEL_ARCH=x86
     ;;
   arm64)
     MUSL_TARGET=aarch64-linux-musl
-    RT_TRIPLE=aarch64-unknown-linux-gnu
     KERNEL_ARCH=arm64
     ;;
   armv7)
     MUSL_TARGET=armv7l-linux-musleabihf
-    RT_TRIPLE=armv7-unknown-linux-gnueabihf
     KERNEL_ARCH=arm
     ;;
   mipsel)
-    # Chromium's clang package ships no compiler-rt for MIPS at all
-    # (Chromium/V8 dropped MIPS support in 2019), so this arch still has no
-    # builtins source and is deliberately not wired up yet -- see the
-    # BUILD.bazel notes. Left here so the case statement stays exhaustive.
     MUSL_TARGET=mipsel-linux-musl
-    RT_TRIPLE=
     KERNEL_ARCH=mips
     ;;
   *)
@@ -207,28 +195,84 @@ fi
 # the alias below.
 CLANG_RESOURCE_DIR=$("$CLANG" -print-resource-dir)
 
-# Chromium's clang package ships compiler-rt only under *-linux-gnu triples.
-# Everything compiled here targets *-linux-musl, and clang looks up both the
-# builtins archive and its crtbegin/crtend objects in a directory named after
-# the *effective* (normalized) target triple -- so with no alias it goes
-# looking for .../x86_64-unknown-linux-musl/ and fails on all three files at
-# once. Aliasing the musl triple onto the gnu one fixes the lookup for good:
-# builtins (__udivti3, __muloti4, ...) and the crt objects are pure compiler
-# runtime with no libc dependency, so the gnu-built copies link fine against
-# musl. Doing it here rather than passing explicit archive paths keeps
-# BUILD.bazel free of compiler-rt plumbing entirely -- a plain
-# --rtlib=compiler-rt just works.
-# The directory name is taken from clang itself rather than derived: it is
-# *not* -print-effective-triple, which normalises armv7l down to armv7 while
-# the runtime lookup keeps the l, so deriving it silently produced an alias
-# that matched nothing on armv7.
-if [ -n "$RT_TRIPLE" ]; then
-  RT_MUSL_TRIPLE=$(basename "$(dirname "$("$CLANG" --target="$MUSL_TARGET" \
-    --rtlib=compiler-rt -print-libgcc-file-name)")")
-  if [ -n "$RT_MUSL_TRIPLE" ] && [ ! -e "$CLANG_RESOURCE_DIR/lib/$RT_MUSL_TRIPLE" ]; then
-    ln -sfn "$RT_TRIPLE" "$CLANG_RESOURCE_DIR/lib/$RT_MUSL_TRIPLE"
-  fi
+# The directory clang will actually search for compiler-rt. Taken from clang
+# itself rather than derived: it is *not* -print-effective-triple, which
+# normalises armv7l down to armv7 while the runtime lookup keeps the l.
+RT_MUSL_TRIPLE=$(basename "$(dirname "$("$CLANG" --target="$MUSL_TARGET" \
+  --rtlib=compiler-rt -print-libgcc-file-name)")")
+
+# compiler-rt (builtins + crtbegin/crtend), built from the same LLVM source as
+# libc++ and targeting musl directly.
+#
+# Chromium's clang package ships prebuilt compiler-rt only under *-linux-gnu
+# triples, and none at all for MIPS -- Chromium/V8 dropped MIPS in 2019. The
+# glibc toolchain worked around the MIPS gap by pulling libgcc, libgcc_eh and
+# libatomic out of an apt gcc-mipsel-cross package (and turning on an
+# executable stack to satisfy its crt objects), which is exactly the distro
+# dependency this file exists to remove. Building it here instead makes every
+# architecture identical, needs no triple-aliasing to make clang's lookup
+# resolve, and drops the executable-stack concession.
+build_compiler_rt() {
+  local out="$CLANG_RESOURCE_DIR/lib/$RT_MUSL_TRIPLE"
+  [ -e "$out/libclang_rt.builtins.a" ] && return 0
+
+  echo "== Building compiler-rt builtins for $MUSL_TARGET =="
+  local build_dir="/tmp/compiler-rt-build-$ARCH"
+  rm -rf "$build_dir"
+  cmake -GNinja -S "$SRC/compiler-rt/lib/builtins" -B "$build_dir" \
+    -DCMAKE_C_COMPILER="$CLANG" \
+    -DCMAKE_ASM_COMPILER="$CLANG" \
+    -DCMAKE_AR="$CLANG_DIR/bin/llvm-ar" \
+    -DCMAKE_RANLIB="$CLANG_DIR/bin/llvm-ranlib" \
+    -DCMAKE_C_COMPILER_TARGET="$MUSL_TARGET" \
+    -DCMAKE_ASM_COMPILER_TARGET="$MUSL_TARGET" \
+    -DCMAKE_SYSROOT="$MUSL_DIR" \
+    -DCMAKE_C_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCOMPILER_RT_STANDALONE_BUILD=ON \
+    -DCOMPILER_RT_BUILD_CRT=ON \
+    -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+    -DLLVM_CMAKE_DIR="$SRC/llvm/cmake/modules" >/dev/null
+  ninja -C "$build_dir" -j"$(nproc)" >/dev/null
+
+  # The builtins-only build emits the old per-arch-suffix layout
+  # (lib/linux/libclang_rt.builtins-<arch>.a) while clang looks for the
+  # per-triple one (lib/<triple>/libclang_rt.builtins.a), so rename on install
+  # rather than leaving clang unable to find what was just built.
+  mkdir -p "$out"
+  cp "$build_dir"/lib/linux/libclang_rt.builtins-*.a "$out/libclang_rt.builtins.a"
+  cp "$build_dir"/lib/linux/clang_rt.crtbegin-*.o "$out/clang_rt.crtbegin.o"
+  cp "$build_dir"/lib/linux/clang_rt.crtend-*.o "$out/clang_rt.crtend.o"
+}
+
+CLANG_DIR="$PREFIX/chromium-clang"
+MUSL_DIR="$PREFIX/musl-$ARCH"
+LIBCXX_DIR="$PREFIX/libcxx-$ARCH"
+CLANG="$CLANG_DIR/bin/clang"
+
+mkdir -p "$PREFIX"
+
+# --- 1. Chromium's pinned clang/lld/llvm-* ---
+if [ ! -e "$CLANG" ]; then
+  echo "== Downloading Chromium's pinned clang ($CLANG_PACKAGE_VERSION) =="
+  mkdir -p "$CLANG_DIR"
+  curl -fsSL "https://commondatastorage.googleapis.com/chromium-browser-clang/Linux_x64/clang-${CLANG_PACKAGE_VERSION}.tar.xz" \
+    | tar -xJ -C "$CLANG_DIR"
+  # llvm-ar acts as ranlib/nm/etc when invoked under those names; the
+  # package only ships the canonical binary.
+  ln -sf llvm-ar "$CLANG_DIR/bin/llvm-ranlib"
 fi
+
+# Clang's resource directory is versioned by major release; derive it rather
+# than hardcoding, so bumping CLANG_PACKAGE_VERSION doesn't silently break
+# the alias below.
+CLANG_RESOURCE_DIR=$("$CLANG" -print-resource-dir)
+
+# The directory clang will actually search for compiler-rt. Taken from clang
+# itself rather than derived: it is *not* -print-effective-triple, which
+# normalises armv7l down to armv7 while the runtime lookup keeps the l.
+RT_MUSL_TRIPLE=$(basename "$(dirname "$("$CLANG" --target="$MUSL_TARGET" \
+  --rtlib=compiler-rt -print-libgcc-file-name)")")
 
 # --- 2. musl, built from source by that same clang ---
 if [ ! -e "$MUSL_DIR/lib/libc.a" ]; then
@@ -312,6 +356,7 @@ if [ ! -e "$LIBCXX_DIR/lib/libc++.a" ]; then
     mkdir -p "$SRC_ROOT"
     curl -fsSL "https://github.com/llvm/llvm-project/archive/${LLVM_COMMIT}.tar.gz" \
       | tar -xz -C "$SRC_ROOT" \
+        "llvm-project-$LLVM_COMMIT/compiler-rt" \
         "llvm-project-$LLVM_COMMIT/libcxx" \
         "llvm-project-$LLVM_COMMIT/libcxxabi" \
         "llvm-project-$LLVM_COMMIT/libunwind" \
@@ -328,6 +373,8 @@ if [ ! -e "$LIBCXX_DIR/lib/libc++.a" ]; then
         "llvm-project-$LLVM_COMMIT/llvm/include/llvm/TargetParser" \
         "llvm-project-$LLVM_COMMIT/libc"
   fi
+
+  build_compiler_rt
 
   BUILD_DIR="/tmp/libcxx-build-$ARCH"
   rm -rf "$BUILD_DIR"

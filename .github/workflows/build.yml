@@ -25,7 +25,6 @@ jobs:
   build:
     name: Build (${{ matrix.name }})
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.experimental || false }}
     # Every architecture (including x86_64) uses the same from-scratch,
     # pinned toolchain -- Chromium's own pinned clang, a from-source musl,
     # and a from-source libc++ built by that clang against that musl --
@@ -58,18 +57,9 @@ jobs:
           - name: armv7
             platform: linux_armv7
             file_match: "ARM,"
-          # Known-failing on the musl toolchain and deliberately not gating
-          # the other three: Chromium's clang package ships no compiler-rt for
-          # MIPS, so --rtlib=compiler-rt has nothing to resolve to. The glibc
-          # toolchain papered over this by borrowing libgcc from a
-          # gcc-mipsel-cross package -- precisely the distro dependency this
-          # rewrite removes -- so mipsel needs compiler-rt built from source
-          # rather than a straight port. Left in the matrix so its status
-          # stays visible instead of silently disappearing.
           - name: mipsel
             platform: linux_mipsel
             file_match: "MIPS,"
-            experimental: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
