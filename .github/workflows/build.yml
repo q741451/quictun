@@ -145,6 +145,16 @@ jobs:
           # matrix.static_flag picks -static-pie vs plain -static -- see
           # the matrix comment above for why this differs per arch.
           #
+          # -fno-asynchronous-unwind-tables: .bazelrc already builds with
+          # -fno-exceptions, but the x86-64 psABI still emits .eh_frame for
+          # every function regardless, and nothing here unwinds through it
+          # (no exceptions, no pthread_cancel). Dropping it takes ~300KB off
+          # each binary -- ~7% raw, ~5% after the xz that OpenWrt's squashfs
+          # applies -- with .text byte-identical either way. The cost is that
+          # perf/gdb can no longer walk user-space stacks in release
+          # artifacts, so this is deliberately set here rather than in
+          # .bazelrc: local builds keep full unwind info for debugging.
+          #
           # --disk_cache / --repository_cache: the "Cache Bazel" step above
           # only restores ~/.cache/bazel-${{ matrix.name }} as a plain
           # tarball -- it doesn't make Bazel actually *use* that directory
@@ -161,6 +171,7 @@ jobs:
             --disk_cache=$HOME/.cache/bazel-${{ matrix.name }}/disk \
             --repository_cache=$HOME/.cache/bazel-${{ matrix.name }}/repo \
             --platforms=//build/toolchain:${{ matrix.platform }} \
+            --copt=-fno-asynchronous-unwind-tables \
             --linkopt=${{ matrix.static_flag }} \
             --linkopt=-s \
             $TARGETS
