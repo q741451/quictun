@@ -22,9 +22,24 @@
 #include "quiche/common/platform/api/quiche_bug_tracker.h"
 #include "quiche/common/platform/api/quiche_logging.h"
 
-// accept4() is a Linux-specific extension that is available in glibc 2.10+.
-#if defined(__linux__) && defined(_GNU_SOURCE) && defined(__GLIBC_PREREQ)
+// accept4() is a Linux-specific extension, in the kernel since 2.6.28 and in
+// glibc since 2.10.
+//
+// Detected by capability rather than by libc vendor. The obvious test --
+// __GLIBC_PREREQ(2, 10) -- is a glibc-only macro, so on any other Linux libc
+// it silently reports "no accept4" even where accept4 exists. That is not a
+// harmless fallback: socket.cc's Accept() only re-applies O_NONBLOCK by hand
+// under `#if !defined(__linux__) || !defined(SOCK_NONBLOCK)`, so on Linux the
+// fallback path hands back a *blocking* socket, which wedges a single-threaded
+// event loop the first time it reads. Found exactly that way on musl.
+#if defined(__linux__) && defined(_GNU_SOURCE) && defined(SOCK_NONBLOCK)
+#if defined(__GLIBC_PREREQ)
 #if __GLIBC_PREREQ(2, 10)
+#define HAS_ACCEPT4
+#endif
+#else
+// Not glibc (musl, bionic, ...). accept4 has been in the kernel since 2.6.28
+// and these all expose it; __GLIBC_PREREQ simply isn't theirs to define.
 #define HAS_ACCEPT4
 #endif
 #endif

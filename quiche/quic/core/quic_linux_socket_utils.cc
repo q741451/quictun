@@ -4,7 +4,11 @@
 
 #include "quiche/quic/core/quic_linux_socket_utils.h"
 
-#include <linux/net_tstamp.h>
+// No <linux/net_tstamp.h>: nothing here uses anything from it. SO_TXTIME
+// comes from <sys/socket.h> via the header above, and the sock_txtime layout
+// is hand-declared in EnableReleaseTime() rather than taken from the kernel
+// header (see the TODO there). musl ships no <linux/*> headers at all, so
+// keeping a dependency nothing needs would break that build for nothing.
 #include <netinet/in.h>
 
 #include <cerrno>

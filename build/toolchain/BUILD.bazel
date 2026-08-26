@@ -29,59 +29,71 @@
 #      across architectures: it no longer depends on whatever libstdc++
 #      version happens to ship with a given target's GCC cross-package.
 #
-#   3. glibc (headers, crt*.o, and -- unlike Chromium's own sysroot
-#      tarballs, which are dynamic-linking-only and ship no static
-#      libraries at all -- real .a static libraries), pinned to a fixed
-#      Ubuntu archive snapshot (snapshot.ubuntu.com) rather than "whatever
-#      apt has installed right now". This is the piece that actually
-#      caused the mipsel breakage above; pinning it is what fixes it for
-#      good, independent of which Ubuntu release happens to be running
-#      the build.
+#   3. musl, built from a checksum-pinned source tarball by that same
+#      clang, used as the sysroot for both headers and static libraries.
+#      This replaced a glibc pinned to an Ubuntu archive snapshot, which
+#      worked but still meant the libc came from a distro. musl is smaller
+#      (~25% off each stripped binary), ships rcrt1.o on every
+#      architecture so -static-pie works uniformly, and removes the last
+#      reason for this build to read anything out of /usr.
 #
-# mipsel is the one exception to using compiler-rt for the runtime
-# (libgcc.a/crtbeginS.o/libatomic.a instead): Chromium's clang package
-# ships no compiler-rt at all for MIPS (Chromium/V8 dropped MIPS support
-# in 2019), so mipsel still needs a real GCC's runtime pieces, pinned to
-# the same snapshot as everything else rather than left as a live
-# `apt install`. See setup_toolchain.sh for specifics.
+# musl ships no kernel UAPI headers (<linux/*>). quictun's own code needs
+# none -- the few constants involved are defined inline behind
+# __has_include guards -- and the three headers third-party dependencies
+# include are shimmed by setup_toolchain.sh. Swapping libc silently changes
+# which #if branches the preprocessor takes, which is how a
+# __GLIBC_PREREQ-gated accept4 check ended up handing back blocking sockets;
+# build/toolchain/libc_macro_audit.sh exists to enumerate that class of
+# difference rather than rediscover it at runtime.
+#
+# mipsel is not wired up on this toolchain: Chromium's clang package ships
+# no compiler-rt at all for MIPS (Chromium/V8 dropped MIPS support in 2019).
+# The glibc toolchain borrowed libgcc from a gcc-mipsel-cross package, which
+# is exactly the distro dependency this design removes, so mipsel needs
+# compiler-rt built from source rather than a straight port.
 #
 # All of the download/build work happens in setup_toolchain.sh (run once
-# per architecture before Bazel runs, in CI or locally), producing fixed
-# paths (/opt/chromium-clang, /opt/libcxx-<arch>) that this BUILD file's
-# tool_paths/compile_flags/link_flags reference directly -- the same
-# "CI installs to a known path, Bazel hardcodes that path" pattern already
-# used for the JDK/Python toolchains Bazel itself auto-configures.
+# per architecture before Bazel runs, in CI or locally), which writes the
+# resolved install paths to toolchain_paths.bzl for the tool_paths /
+# compile_flags / link_flags below to load -- the same "set up once, then
+# reference a known path" pattern Bazel itself uses for JDK/Python
+# toolchains, except the path is a working directory in the repo rather
+# than a system location, so no step of this needs root.
 
 load("@bazel_tools//tools/cpp:unix_cc_toolchain_config.bzl", "cc_toolchain_config")
+load(":toolchain_paths.bzl", "CLANG_RESOURCE_DIR", "TOOLCHAIN_PREFIX")
 load(
     ":toolchain_flags.bzl",
     "libcxx_compile_flags",
     "libcxx_link_flags",
     "libcxx_link_libs",
+    "sysroot_flags",
 )
 
 package(default_visibility = ["//visibility:public"])
 
 filegroup(name = "empty")
 
-CLANG = "/opt/chromium-clang/bin/clang"
+CLANG = TOOLCHAIN_PREFIX + "/chromium-clang/bin/clang"
 
 LLVM_TOOL_PATHS = {
     "gcc": CLANG,
-    "ld": "/opt/chromium-clang/bin/ld.lld",
-    "ar": "/opt/chromium-clang/bin/llvm-ar",
+    "ld": TOOLCHAIN_PREFIX + "/chromium-clang/bin/ld.lld",
+    "ar": TOOLCHAIN_PREFIX + "/chromium-clang/bin/llvm-ar",
     "cpp": CLANG,
     "gcov": "/bin/false",
-    "nm": "/opt/chromium-clang/bin/llvm-nm",
-    "objdump": "/opt/chromium-clang/bin/llvm-objdump",
-    "strip": "/opt/chromium-clang/bin/llvm-strip",
+    "nm": TOOLCHAIN_PREFIX + "/chromium-clang/bin/llvm-nm",
+    "objdump": TOOLCHAIN_PREFIX + "/chromium-clang/bin/llvm-objdump",
+    "strip": TOOLCHAIN_PREFIX + "/chromium-clang/bin/llvm-strip",
 }
 
 # clang/lld's own resource-dir headers -- identical for every target,
 # since it's one clang binary for all of them.
+# Deliberately just clang's own resource-dir headers: no /usr/local/include,
+# no /usr/include. Everything else comes from the musl sysroot, so the build
+# cannot silently pick anything up from the host.
 CLANG_BUILTIN_INCLUDES = [
-    "/opt/chromium-clang/lib/clang/23/include",
-    "/usr/local/include",
+    CLANG_RESOURCE_DIR + "/include",
 ]
 
 # --- x86_64 ---
@@ -98,19 +110,19 @@ cc_toolchain_config(
     name = "x64_config",
     toolchain_identifier = "chromium-clang-x86_64-linux-gnu",
     host_system_name = "x86_64-unknown-linux-gnu",
-    target_system_name = "x86_64-unknown-linux-gnu",
+    target_system_name = "x86_64-linux-musl",
     cpu = "x86_64",
-    target_libc = "glibc_unknown",
+    target_libc = "musl",
     compiler = "clang",
     abi_version = "clang",
-    abi_libc_version = "glibc_unknown",
+    abi_libc_version = "musl",
     tool_paths = LLVM_TOOL_PATHS,
     compile_flags = [
-        "--target=x86_64-unknown-linux-gnu",
-    ] + libcxx_compile_flags("x64"),
+        "--target=x86_64-linux-musl",
+    ] + sysroot_flags("x64") + libcxx_compile_flags("x64"),
     link_flags = [
-        "--target=x86_64-unknown-linux-gnu",
-    ] + libcxx_link_flags("x64"),
+        "--target=x86_64-linux-musl",
+    ] + sysroot_flags("x64") + libcxx_link_flags("x64"),
     link_libs = libcxx_link_libs(),
     archive_flags = [],
     unfiltered_compile_flags = ["-no-canonical-prefixes"],
@@ -125,9 +137,8 @@ cc_toolchain_config(
     opt_link_flags = ["-Wl,--gc-sections"],
     dbg_compile_flags = ["-g"],
     cxx_builtin_include_directories = CLANG_BUILTIN_INCLUDES + [
-        "/opt/libcxx-x64/include/c++/v1",
-        "/usr/include/x86_64-linux-gnu",
-        "/usr/include",
+        TOOLCHAIN_PREFIX + "/libcxx-x64/include/c++/v1",
+        TOOLCHAIN_PREFIX + "/musl-x64/include",
     ],
 )
 
@@ -174,19 +185,19 @@ cc_toolchain_config(
     name = "aarch64_config",
     toolchain_identifier = "chromium-clang-aarch64-linux-gnu",
     host_system_name = "x86_64-unknown-linux-gnu",
-    target_system_name = "aarch64-unknown-linux-gnu",
+    target_system_name = "aarch64-linux-musl",
     cpu = "aarch64",
-    target_libc = "glibc_unknown",
+    target_libc = "musl",
     compiler = "clang",
     abi_version = "clang",
-    abi_libc_version = "glibc_unknown",
+    abi_libc_version = "musl",
     tool_paths = LLVM_TOOL_PATHS,
     compile_flags = [
-        "--target=aarch64-unknown-linux-gnu",
-    ] + libcxx_compile_flags("arm64"),
+        "--target=aarch64-linux-musl",
+    ] + sysroot_flags("arm64") + libcxx_compile_flags("arm64"),
     link_flags = [
-        "--target=aarch64-unknown-linux-gnu",
-    ] + libcxx_link_flags("arm64"),
+        "--target=aarch64-linux-musl",
+    ] + sysroot_flags("arm64") + libcxx_link_flags("arm64"),
     link_libs = libcxx_link_libs(),
     archive_flags = [],
     unfiltered_compile_flags = ["-no-canonical-prefixes"],
@@ -201,9 +212,8 @@ cc_toolchain_config(
     opt_link_flags = ["-Wl,--gc-sections"],
     dbg_compile_flags = ["-g"],
     cxx_builtin_include_directories = CLANG_BUILTIN_INCLUDES + [
-        "/opt/libcxx-arm64/include/c++/v1",
-        "/usr/aarch64-linux-gnu/include",
-        "/usr/include",
+        TOOLCHAIN_PREFIX + "/libcxx-arm64/include/c++/v1",
+        TOOLCHAIN_PREFIX + "/musl-arm64/include",
     ],
 )
 
@@ -252,17 +262,17 @@ cc_toolchain_config(
     host_system_name = "x86_64-unknown-linux-gnu",
     target_system_name = "arm-unknown-linux-gnueabihf",
     cpu = "armv7",
-    target_libc = "glibc_unknown",
+    target_libc = "musl",
     compiler = "clang",
     abi_version = "clang",
-    abi_libc_version = "glibc_unknown",
+    abi_libc_version = "musl",
     tool_paths = LLVM_TOOL_PATHS,
     compile_flags = [
-        "--target=armv7-unknown-linux-gnueabihf",
-    ] + libcxx_compile_flags("armv7"),
+        "--target=armv7l-linux-musleabihf",
+    ] + sysroot_flags("armv7") + libcxx_compile_flags("armv7"),
     link_flags = [
-        "--target=armv7-unknown-linux-gnueabihf",
-    ] + libcxx_link_flags("armv7"),
+        "--target=armv7l-linux-musleabihf",
+    ] + sysroot_flags("armv7") + libcxx_link_flags("armv7"),
     link_libs = libcxx_link_libs(),
     archive_flags = [],
     unfiltered_compile_flags = ["-no-canonical-prefixes"],
@@ -277,10 +287,8 @@ cc_toolchain_config(
     opt_link_flags = ["-Wl,--gc-sections"],
     dbg_compile_flags = ["-g"],
     cxx_builtin_include_directories = CLANG_BUILTIN_INCLUDES + [
-        "/opt/libcxx-armv7/include/c++/v1",
-        "/usr/arm-linux-gnueabihf/include",
-        "/usr/include/arm-linux-gnueabihf",
-        "/usr/include",
+        TOOLCHAIN_PREFIX + "/libcxx-armv7/include/c++/v1",
+        TOOLCHAIN_PREFIX + "/musl-armv7/include",
     ],
 )
 
@@ -332,20 +340,28 @@ cc_toolchain_config(
     name = "mipsel_config",
     toolchain_identifier = "chromium-clang-mipsel-linux-gnu",
     host_system_name = "x86_64-unknown-linux-gnu",
-    target_system_name = "mipsel-unknown-linux-gnu",
+    target_system_name = "mipsel-linux-musl",
     cpu = "mipsel",
-    target_libc = "glibc_unknown",
+    target_libc = "musl",
     compiler = "clang",
     abi_version = "clang",
-    abi_libc_version = "glibc_unknown",
+    abi_libc_version = "musl",
     tool_paths = LLVM_TOOL_PATHS,
     compile_flags = [
-        "--target=mipsel-unknown-linux-gnu",
-    ] + libcxx_compile_flags("mipsel"),
+        "--target=mipsel-linux-musl",
+    ] + sysroot_flags("mipsel") + libcxx_compile_flags("mipsel"),
     link_flags = [
-        "--target=mipsel-unknown-linux-gnu",
-    ] + libcxx_link_flags("mipsel", mips_runtime = True),
-    link_libs = libcxx_link_libs(mips_runtime = True),
+        "--target=mipsel-linux-musl",
+    ] + sysroot_flags("mipsel") + libcxx_link_flags("mipsel"),
+    # NOT functional yet: Chromium's clang package ships no compiler-rt for
+    # MIPS at all, so --rtlib=compiler-rt above has nothing to resolve to and
+    # setup_toolchain.sh deliberately skips the triple alias for this arch.
+    # The glibc toolchain borrowed libgcc/libatomic from a gcc-mipsel-cross
+    # package for this, which is exactly the kind of distro dependency the
+    # musl switch exists to remove -- so mipsel needs its own answer (build
+    # compiler-rt from source, most likely) rather than a straight port.
+    # Left in place so the platform/toolchain wiring stays complete.
+    link_libs = libcxx_link_libs(),
     archive_flags = [],
     unfiltered_compile_flags = ["-no-canonical-prefixes"],
     opt_compile_flags = [
@@ -359,9 +375,8 @@ cc_toolchain_config(
     opt_link_flags = ["-Wl,--gc-sections"],
     dbg_compile_flags = ["-g"],
     cxx_builtin_include_directories = CLANG_BUILTIN_INCLUDES + [
-        "/opt/libcxx-mipsel/include/c++/v1",
-        "/usr/mipsel-linux-gnu/include",
-        "/usr/include",
+        TOOLCHAIN_PREFIX + "/libcxx-mipsel/include/c++/v1",
+        TOOLCHAIN_PREFIX + "/musl-mipsel/include",
     ],
 )
 

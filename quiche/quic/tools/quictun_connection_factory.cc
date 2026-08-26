@@ -14,7 +14,19 @@
 
 #include <netinet/in.h>
 #include <sys/socket.h>
+
+// Kernel UAPI headers are a glibc-sysroot convenience, not something a libc
+// has to ship: musl deliberately provides none of <linux/*>, so this build's
+// musl sysroot has no netfilter_ipv4.h to include. The one constant needed
+// from it is numerically 80 on every real Linux kernel (verified against
+// this build's own sysroot headers), so fall back to defining it when the
+// header isn't there.
+#if __has_include(<linux/netfilter_ipv4.h>)
 #include <linux/netfilter_ipv4.h>
+#endif
+#ifndef SO_ORIGINAL_DST
+#define SO_ORIGINAL_DST 80
+#endif
 
 // Deliberately not #include <linux/netfilter_ipv6/ip6_tables.h> -- unlike
 // netfilter_ipv4.h, it isn't valid C++ (pointer arithmetic on void*, a

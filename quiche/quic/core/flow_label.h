@@ -8,7 +8,11 @@
 #include <cstdint>
 
 #if defined(__linux__)
+// musl ships no <linux/*> kernel UAPI headers at all; the two constants
+// used below are defined unconditionally just past this include either way.
+#if __has_include(<linux/in6.h>)
 #include <linux/in6.h>
+#endif
 #include <sys/socket.h>
 
 #ifndef IPV6_FLOWLABEL

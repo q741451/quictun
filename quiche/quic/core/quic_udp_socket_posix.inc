@@ -27,8 +27,21 @@
 
 #if defined(__linux__)
 #include <alloca.h>
-// For SO_TIMESTAMPING.
+// For SO_TIMESTAMPING. musl ships no <linux/*> kernel UAPI headers at all,
+// so define the two flags quic_udp_socket.cc uses when the header is absent.
+//
+// These are enum constants, not macros, so an #ifndef guard would never see
+// them and a macro defined alongside the enum would turn its declaration
+// into `(1 << 3) = (1 << 3)`. What makes the fallback safe is the
+// __has_include gate rather than any guard: SOF_TIMESTAMPING_* is declared
+// in this one header and nowhere else, so "header absent" implies "enum
+// absent". Values are fixed ABI, verified against real UAPI headers.
+#if __has_include(<linux/net_tstamp.h>)
 #include <linux/net_tstamp.h>
+#else
+#define SOF_TIMESTAMPING_RX_SOFTWARE (1 << 3)
+#define SOF_TIMESTAMPING_SOFTWARE (1 << 4)
+#endif
 #endif
 
 #if defined(__linux__) && !defined(__ANDROID__)

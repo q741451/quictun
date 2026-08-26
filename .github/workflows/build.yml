@@ -25,15 +25,16 @@ jobs:
   build:
     name: Build (${{ matrix.name }})
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental || false }}
     # Every architecture (including x86_64) uses the same from-scratch,
-    # pinned, Chromium-style toolchain -- Chromium's own pinned clang, a
-    # from-source libc++ built by that clang, and glibc pinned to a fixed
-    # Ubuntu archive snapshot -- built by build/toolchain/setup_toolchain.sh
+    # pinned toolchain -- Chromium's own pinned clang, a from-source musl,
+    # and a from-source libc++ built by that clang against that musl --
+    # built by build/toolchain/setup_toolchain.sh
     # and wired into Bazel via build/toolchain/BUILD.bazel's --platforms.
     # See that BUILD.bazel file's header comment for the full rationale:
-    # in short, none of this depends on which Ubuntu release happens to be
-    # running the build, which is what broke this project's mipsel build
-    # once already (see git history).
+    # in short, none of this depends on the runner image at all: no apt, no
+    # sudo, no /usr/include, no system libc. Depending on the distro is what
+    # broke this project's mipsel build once already (see git history).
     #
     # Plain big-endian mips is deliberately not in this matrix: quiche's
     # own README states it only supports little-endian platforms, and
@@ -43,33 +44,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # static_flag: -static-pie where the pinned glibc snapshot ships
-          # rcrt1.o (x86_64, arm64); plain -static elsewhere. Debian/Ubuntu's
-          # armhf and mipsel cross-glibc builds at this snapshot don't ship
-          # rcrt1.o (the static-PIE start file) at all -- verified locally,
-          # confirmed by identical "ld.lld: error: cannot open rcrt1.o" on
-          # real CI for both. Plain -static works fine on both (verified
-          # locally for armv7's full quic_client; mipsel was already
-          # verified with plain -static earlier this session, before this
-          # toolchain rewrite) -- neither hits the dlopen/-fPIC relocation
-          # issue that forced -static-pie on x86_64 in the first place,
-          # since that's specific to glibc 2.34+'s x86_64 static libc.a.
+          # No per-arch static_flag any more: musl ships rcrt1.o on every
+          # architecture, so -static-pie works uniformly and now lives in
+          # toolchain_flags.bzl rather than here -- it has to reach the exec
+          # configuration too, which a CI --linkopt does not (host tools would
+          # come out linked against a musl loader the runner doesn't have).
           - name: x86_64
             platform: linux_x64
             file_match: "x86-64"
-            static_flag: -static-pie
           - name: arm64
             platform: linux_arm64
             file_match: "ARM aarch64"
-            static_flag: -static-pie
           - name: armv7
             platform: linux_armv7
             file_match: "ARM,"
-            static_flag: -static
+          # Known-failing on the musl toolchain and deliberately not gating
+          # the other three: Chromium's clang package ships no compiler-rt for
+          # MIPS, so --rtlib=compiler-rt has nothing to resolve to. The glibc
+          # toolchain papered over this by borrowing libgcc from a
+          # gcc-mipsel-cross package -- precisely the distro dependency this
+          # rewrite removes -- so mipsel needs compiler-rt built from source
+          # rather than a straight port. Left in the matrix so its status
+          # stays visible instead of silently disappearing.
           - name: mipsel
             platform: linux_mipsel
             file_match: "MIPS,"
-            static_flag: -static
+            experimental: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -87,15 +87,12 @@ jobs:
       # x64 GitHub runner itself, regardless of --platforms=. Confirmed by
       # a real CI failure (all three cross jobs failed identically with
       # "cstdint file not found" while compiling absl "[for tool]" targets
-      # against -isystem /opt/libcxx-x64/..., because that directory simply
+      # against the x64 libc++ include path, because that directory simply
       # didn't exist yet on those runners).
       - name: Cache toolchain (${{ matrix.name }})
         uses: actions/cache@v4
         with:
-          path: |
-            /opt/chromium-clang
-            /opt/libcxx-x64
-            /opt/libcxx-${{ matrix.name == 'x86_64' && 'x64' || matrix.name }}
+          path: build/toolchain/out
           key: toolchain-${{ matrix.name }}-${{ hashFiles('build/toolchain/setup_toolchain.sh') }}
 
       - name: Set up pinned toolchain (${{ matrix.name }})
@@ -142,9 +139,6 @@ jobs:
           # (OPENSSL_SMALL, fno-rtti/exceptions, hidden visibility,
           # function/data sections, bundled ICU, etc). Only add what's
           # specific to this CI artifact: static linking + stripped size.
-          # matrix.static_flag picks -static-pie vs plain -static -- see
-          # the matrix comment above for why this differs per arch.
-          #
           # -fno-asynchronous-unwind-tables: .bazelrc already builds with
           # -fno-exceptions, but the x86-64 psABI still emits .eh_frame for
           # every function regardless, and nothing here unwinds through it
@@ -172,7 +166,6 @@ jobs:
             --repository_cache=$HOME/.cache/bazel-${{ matrix.name }}/repo \
             --platforms=//build/toolchain:${{ matrix.platform }} \
             --copt=-fno-asynchronous-unwind-tables \
-            --linkopt=${{ matrix.static_flag }} \
             --linkopt=-s \
             $TARGETS
 
