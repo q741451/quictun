@@ -123,10 +123,37 @@ arch_kernel_arch() {
   esac
 }
 
+# ABI flags that are not implied by the triple and therefore have to be
+# applied identically to musl, compiler-rt, libc++ and quictun itself. Like
+# the triples above, they are written once here and reach BUILD.bazel through
+# the generated toolchain_paths.bzl.
+#
+# mipsel: -msoft-float. The triple alone gives clang's MIPS default, which is
+# hard float with a 64-bit FPU (FP ABI "Hard float (32-bit CPU, 64-bit FPU)",
+# i.e. FR=1). The routers this targets do not have that. MT7620 -- the reason
+# this exists -- is a MIPS 24KEc, and in the 24KE family the "c" suffix means
+# no FPU at all; OpenWrt's own ramips/mt7620 toolchain is soft-float for the
+# same reason. On such a part every floating-point instruction traps into the
+# kernel's FPU emulator, and quiche's congestion control (BBR, BBRv2, BBRv3
+# and cubic) is full of them -- on the per-ACK path, not somewhere cold. If
+# the emulator is absent or does not implement FR=1, the process dies with
+# SIGILL instead.
+#
+# A partial conversion cannot slip through: lld refuses to link objects whose
+# FP ABIs disagree, so leaving any one of the four out fails the build rather
+# than producing a binary that is half soft and half hard.
+arch_target_flags() {
+  case "$1" in
+    mipsel) echo "-msoft-float" ;;
+    *)      echo "" ;;
+  esac
+}
+
 ALL_ARCHES="x64 x86 arm64 armv7 mipsel riscv64"
 
 MUSL_TARGET=$(arch_musl_target "$ARCH")
 KERNEL_ARCH=$(arch_kernel_arch "$ARCH")
+TARGET_FLAGS=$(arch_target_flags "$ARCH")
 if [ -z "$MUSL_TARGET" ]; then
   echo "Usage: $0 <$(echo "$ALL_ARCHES" | tr ' ' '|')>" >&2
   exit 1
@@ -261,9 +288,9 @@ build_compiler_rt() {
     -DCMAKE_CXX_COMPILER_TARGET="$MUSL_TARGET" \
     -DCMAKE_ASM_COMPILER_TARGET="$MUSL_TARGET" \
     -DCMAKE_SYSROOT="$MUSL_DIR" \
-    -DCMAKE_C_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR $FILE_PREFIX_MAP" \
-    -DCMAKE_CXX_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR $FILE_PREFIX_MAP" \
-    -DCMAKE_ASM_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR $FILE_PREFIX_MAP" \
+    -DCMAKE_C_FLAGS="--target=$MUSL_TARGET $TARGET_FLAGS --sysroot=$MUSL_DIR $FILE_PREFIX_MAP" \
+    -DCMAKE_CXX_FLAGS="--target=$MUSL_TARGET $TARGET_FLAGS --sysroot=$MUSL_DIR $FILE_PREFIX_MAP" \
+    -DCMAKE_ASM_FLAGS="--target=$MUSL_TARGET $TARGET_FLAGS --sysroot=$MUSL_DIR $FILE_PREFIX_MAP" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCOMPILER_RT_STANDALONE_BUILD=ON \
     -DCOMPILER_RT_BUILD_CRT=ON \
@@ -298,12 +325,43 @@ build_compiler_rt() {
   cp "$build_dir"/lib/linux/clang_rt.crtend-*.o "$out/clang_rt.crtend.o"
 }
 
+# Each stage below decides whether to rebuild by asking whether its output
+# exists -- which is right for a pinned version, and wrong for an ABI. A musl,
+# compiler-rt or libc++ built before arch_target_flags() gained an entry is
+# still there, still looks built, and is now the wrong ABI. lld does catch the
+# mismatch, but only at the final link of quictun and with an error that names
+# an object file rather than the stale directory that produced it. (That is
+# not hypothetical -- it is how -msoft-float was first landed.)
+#
+# So stamp the flags next to the toolchain and discard that architecture's
+# outputs when they change. CI never needs this: its cache key is a hash of
+# this script, so any edit here already forces a cold rebuild. It is the
+# incremental local case this exists for.
+abi_stamp_check() {
+  local stamp="$PREFIX/.abi-stamp-$ARCH"
+  local want="$MUSL_TARGET $TARGET_FLAGS"
+  if [ -e "$stamp" ] && [ "$(cat "$stamp")" != "$want" ]; then
+    echo "== ABI changed for $ARCH ($(cat "$stamp") -> $want): discarding its toolchain =="
+    rm -rf "$PREFIX/musl-$ARCH" "$PREFIX/libcxx-$ARCH" \
+           "$BUILD_ROOT/libcxx-$ARCH" "$BUILD_ROOT/compiler-rt-$ARCH"
+    # compiler-rt installs under clang's own normalised spelling of the
+    # triple, which is not $MUSL_TARGET -- mipsel-linux-musl is installed as
+    # mipsel-unknown-linux-musl. Match on the arch prefix rather than
+    # reconstructing the name and missing it, which is a mistake already made.
+    find "$PREFIX/chromium-clang/lib/clang" -maxdepth 3 -type d \
+         -name "${MUSL_TARGET%%-*}-*" -exec rm -rf {} + 2>/dev/null || true
+  fi
+  mkdir -p "$PREFIX"
+  printf '%s' "$want" > "$stamp"
+}
+
 CLANG_DIR="$PREFIX/chromium-clang"
 MUSL_DIR="$PREFIX/musl-$ARCH"
 LIBCXX_DIR="$PREFIX/libcxx-$ARCH"
 CLANG="$CLANG_DIR/bin/clang"
 
 mkdir -p "$PREFIX" "$BUILD_ROOT"
+abi_stamp_check
 
 # --- 1. Chromium's pinned clang/lld/llvm-* ---
 if [ ! -e "$CLANG" ]; then
@@ -381,7 +439,7 @@ if [ ! -e "$MUSL_DIR/lib/libc.a" ]; then
       --prefix="$MUSL_DIR" \
       --disable-shared \
       --enable-wrapper=no \
-      CC="$CLANG --target=$MUSL_TARGET" \
+      CC="$CLANG --target=$MUSL_TARGET $TARGET_FLAGS" \
       CFLAGS="-Os -fPIC" \
       LDFLAGS="-fuse-ld=lld" \
       AR="$CLANG_DIR/bin/llvm-ar" \
@@ -466,13 +524,22 @@ if [ ! -e "$LIBCXX_DIR/lib/libc++.a" ]; then
   # --unwindlib=none, not libunwind: this build is what *produces* libunwind,
   # so CMake's link probes have to work before it exists. The real build gets
   # --unwindlib=libunwind from toolchain_flags.bzl.
-  MUSL_FLAGS="--target=$MUSL_TARGET --sysroot=$MUSL_DIR -fuse-ld=lld -I$SRC/libc $FILE_PREFIX_MAP"
+  MUSL_FLAGS="--target=$MUSL_TARGET $TARGET_FLAGS --sysroot=$MUSL_DIR -fuse-ld=lld -I$SRC/libc $FILE_PREFIX_MAP"
   MUSL_LINK_FLAGS="$MUSL_FLAGS --rtlib=compiler-rt --unwindlib=none -nostdlib++"
 
+  # CMAKE_ASM_FLAGS as well as the C and CXX ones: libunwind's register
+  # save/restore are hand-written .S files, and CMake assembles those through
+  # a separate flags variable. Setting only CMAKE_ASM_COMPILER_TARGET gives
+  # them the right triple but not an ABI flag the triple does not imply, which
+  # on mipsel left exactly two objects at -mfpxx inside an otherwise
+  # soft-float libunwind.a. lld caught it at the final link -- "floating point
+  # ABI '-mfpxx' is incompatible with target floating point ABI
+  # '-msoft-float'" -- but only after everything else had been built.
   cmake -GNinja -S "$SRC/runtimes" -B "$BUILD_DIR" \
     -DCMAKE_C_COMPILER="$CLANG" \
     -DCMAKE_CXX_COMPILER="$CLANG_DIR/bin/clang++" \
     -DCMAKE_ASM_COMPILER_TARGET="$MUSL_TARGET" \
+    -DCMAKE_ASM_FLAGS="$MUSL_FLAGS" \
     -DCMAKE_AR="$CLANG_DIR/bin/llvm-ar" \
     -DCMAKE_RANLIB="$CLANG_DIR/bin/llvm-ranlib" \
     -DCMAKE_C_COMPILER_TARGET="$MUSL_TARGET" \
@@ -524,6 +591,13 @@ CLANG_RESOURCE_DIR = "$CLANG_RESOURCE_DIR"
 # the table BUILD.bazel reads so the triple is defined in one place only.
 MUSL_TARGETS = {
 $(for a in $ALL_ARCHES; do printf '    "%s": "%s",\n' "$a" "$(arch_musl_target "$a")"; done)
+}
+
+# ABI flags the triple does not imply, which therefore have to be passed to
+# every compile and link of quictun's own code exactly as they were passed to
+# musl, compiler-rt and libc++. See arch_target_flags() in setup_toolchain.sh.
+ARCH_TARGET_FLAGS = {
+$(for a in $ALL_ARCHES; do printf '    "%s": [%s],\n' "$a" "$(f=$(arch_target_flags "$a"); [ -n "$f" ] && printf '"%s"' "$f")"; done)
 }
 EOF
 
