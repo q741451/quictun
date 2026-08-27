@@ -444,6 +444,25 @@ if [ ! -e "$LIBCXX_DIR/lib/libc++.a" ]; then
   rm -rf "$BUILD_DIR"
   mkdir -p "$BUILD_DIR"
 
+  # -DLIBCXXABI_NON_DEMANGLING_TERMINATE below: libc++abi's terminate handler
+  # prints the type name of an uncaught exception, and to make that readable it
+  # calls __cxa_demangle -- which drags the entire Itanium ABI name demangler
+  # (cxa_demangle.cpp, 127KB) into every binary this toolchain links. quictun
+  # is built -fno-exceptions, so that handler is not reachable from its own
+  # code, and the flag only changes what an unreachable message would have
+  # printed: a mangled name instead of a demangled one.
+  #
+  # Worth 133,376 bytes off quictun_client and 133,456 off quictun_server,
+  # measured, with the 1 MiB end-to-end tunnel round-trip passing three times
+  # on each. It is the only one of libc++'s size knobs this project can take:
+  # LIBCXX_ENABLE_LOCALIZATION=OFF would save far more (libc++.a 2.49MB ->
+  # 968KB) but abseil's log_severity.cc needs std::ostream, and
+  # LIBCXX_ENABLE_WIDE_CHARACTERS=OFF fails on googleurl's UTF16ToWide needing
+  # std::wstring. Both fail at compile time, loudly, which is why trimming our
+  # own libc++ is a different kind of risk from trimming a crypto library.
+  # LIBCXX_ENABLE_UNICODE=OFF and LIBCXX_ENABLE_TIME_ZONE_DATABASE=OFF were
+  # measured too and change nothing here, so they are deliberately not set.
+
   # --unwindlib=none, not libunwind: this build is what *produces* libunwind,
   # so CMake's link probes have to work before it exists. The real build gets
   # --unwindlib=libunwind from toolchain_flags.bzl.
@@ -468,6 +487,7 @@ if [ ! -e "$LIBCXX_DIR/lib/libc++.a" ]; then
     -DLIBCXXABI_USE_LLVM_UNWINDER=ON \
     -DLIBCXX_CXX_ABI=libcxxabi \
     -DLIBCXX_HAS_MUSL_LIBC=ON \
+    -DLIBCXXABI_NON_DEMANGLING_TERMINATE=ON \
     -DLIBCXX_ENABLE_SHARED=OFF \
     -DLIBCXX_ENABLE_STATIC=ON \
     -DLIBCXXABI_ENABLE_SHARED=OFF \
