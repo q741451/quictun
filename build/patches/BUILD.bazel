@@ -1,1 +1,7 @@
-exports_files(["protobuf-mips-musttail.patch"])
+# Patches applied to pinned external dependencies from MODULE.bazel's
+# single_version_override. bzlmod reads these by path during module
+# resolution, so a patch works even when it isn't exported here -- which is
+# exactly why this is a glob rather than a list: a missing entry would not
+# break the build, it would only make `bazel query` disagree with reality
+# about a file that is very much part of it.
+exports_files(glob(["*.patch"]))

@@ -40,6 +40,29 @@ single_version_override(
 # Last updated 2026-05-22
 bazel_dep(name = "boringssl", version = "0.20260508.0")
 
+# BoringSSL reaches every algorithm it implements from static tables, so
+# --gc-sections cannot drop even the ones this build can never negotiate.
+# Both ends of a quictun tunnel are this same binary, which makes what gets
+# negotiated a property of this build rather than of a peer: never ML-KEM or
+# Kyber (absent from DefaultSupportedGroupIds), and never ML-DSA (the server
+# signs with a P-256 ECDSA certificate and the client does not list ML-DSA
+# among the signature algorithms it will verify). Dropping them from the five
+# tables that reach them takes 193KB off quictun_client and 200KB off
+# quictun_server, close to 8% of each.
+#
+# The patch narrows default sets; it deletes no implementation, and every one
+# of these algorithms stays compiled and directly callable. Eleven of
+# BoringSSL's own 3599 test cases do fail as a result -- exactly the ones that
+# exercise those defaults, and no others. The patch header lists them by name
+# as its acceptance criterion, along with the command to re-run the suite.
+# That check, not just a green quictun build, is what a bump of the pinned
+# version above needs to repeat.
+single_version_override(
+    module_name = "boringssl",
+    patches = ["//build/patches:boringssl-drop-unreachable-pq.patch"],
+    patch_strip = 1,
+)
+
 # Last updated 2025-12-15
 bazel_dep(name = "googletest", version = "1.17.0", repo_name = "com_google_googletest")
 

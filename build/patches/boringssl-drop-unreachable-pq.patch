@@ -1,0 +1,157 @@
+Drop post-quantum algorithms this build can never negotiate.
+
+Both ends of a quictun tunnel are this same binary, so what gets negotiated
+is a property of this build rather than of an unknown peer -- and it is never
+any of these:
+
+  - ML-KEM and Kyber are absent from DefaultSupportedGroupIds() (X25519,
+    P-256, P-384), so no handshake can select them as a key share. A peer
+    cannot steer the TLS 1.3 server into one either: the group_id it passes to
+    SSLKeyShare::Create() has already been through tls1_check_group_id(),
+    which accepts only what is in supported_group_list. Should any path reach
+    Create() with one of these anyway, it now returns nullptr -- which all
+    five of its call sites already check, failing the handshake rather than
+    dereferencing it.
+  - ML-DSA appears in kSignSignatureAlgorithms, but the server signs with a
+    P-256 ECDSA certificate and the client's kVerifySignatureAlgorithms does
+    not list ML-DSA at all, so neither side can produce or accept one.
+
+They are linked in anyway, because BoringSSL reaches every algorithm it
+implements from static tables that --gc-sections cannot prune. Upstream is
+aware of the shape of this -- see the comment above the array in
+ssl_privkey.cc: "Ideally the set of reachable algorithms would flow from
+|SSL_CTX| for dead code elimination, but for now we just specify every
+algorithm that might be reachable from libssl."
+
+Five tables reference them, and all five have to go for the linker to drop
+the code:
+
+  crypto/evp/internal.h        default set for EVP_parse_{public,private}_key
+  crypto/evp/evp_ctx.cc        key-type -> algorithm lookup
+  ssl/ssl_key_share.cc         TLS key-share factory
+  ssl/ssl_privkey.cc           SPKI parsing inside libssl
+  pki/verify_signed_data.cc    SPKI parsing for certificate verification
+
+This narrows default sets; it deletes no implementation. Every one of these
+algorithms remains compiled and directly callable through its public API.
+Entries that are merely enum constants -- the ML-DSA rows of
+kSignatureAlgorithms, the ssl_is_key_type_supported cases, the
+SignatureAlgorithm::kMldsa* cases in verify_signed_data.cc -- are deliberately
+left alone: they pull in no code, so removing them would be behaviour change
+without benefit.
+
+Verified against BoringSSL's own suite -- crypto_test, ssl_test, pki_test and
+decrepit_test -- built and run on this project's own musl, static-pie,
+compiler-rt toolchain. 3599 cases execute (crypto_test 1798, ssl_test 468,
+pki_test 1321, decrepit_test 12; --gtest_list_tests reports a slightly higher
+number because some are filtered at run time). All 3599 pass unpatched.
+
+The expected result with the patch is not "all green". These eleven fail, and
+they are the acceptance criterion: every one of them exercises precisely the
+defaults this patch narrows, and a failure outside this list means the patch
+has done something it should not.
+
+  crypto_test  EVPTest.MLDSATestVectors
+               EVPTest.MLKEMTestVectors
+               EVPExtraTest.MLDSAKeyGen
+               EVPExtraTest.NewRawKey
+               X509Test.TestMlDsa65
+               X509Test.TestMlDsa65BadParameters
+  ssl_test     SSLTest.ServerSupportedGroupsHint
+  pki_test     VerifySignedDataTest.Mldsa44
+               VerifySignedDataTest.Mldsa65
+               VerifySignedDataTest.Mldsa87
+               VerifyTest.MldsaAlgorithms
+  decrepit_test  (none -- all 12 pass)
+
+To re-run after a version bump:
+
+  bazel test @boringssl//:crypto_test @boringssl//:ssl_test \
+             @boringssl//:pki_test @boringssl//:decrepit_test \
+             --platforms=//build/toolchain:linux_x64 -c opt --dynamic_mode=off
+
+--dynamic_mode=off is required: these tests pull in gtest, which Bazel would
+otherwise build as a shared library, and this toolchain links -static-pie.
+
+diff -u -r a/crypto/evp/evp_ctx.cc b/crypto/evp/evp_ctx.cc
+--- a/crypto/evp/evp_ctx.cc
++++ b/crypto/evp/evp_ctx.cc
+@@ -91,21 +91,6 @@
+     case EVP_PKEY_HKDF:
+       alg = evp_pkey_hkdf();
+       break;
+-    case EVP_PKEY_ML_DSA_44:
+-      alg = EVP_pkey_ml_dsa_44();
+-      break;
+-    case EVP_PKEY_ML_DSA_65:
+-      alg = EVP_pkey_ml_dsa_65();
+-      break;
+-    case EVP_PKEY_ML_DSA_87:
+-      alg = EVP_pkey_ml_dsa_87();
+-      break;
+-    case EVP_PKEY_ML_KEM_768:
+-      alg = EVP_pkey_ml_kem_768();
+-      break;
+-    case EVP_PKEY_ML_KEM_1024:
+-      alg = EVP_pkey_ml_kem_1024();
+-      break;
+   }
+   if (alg == nullptr || alg->pkey_method == nullptr) {
+     OPENSSL_PUT_ERROR(EVP, EVP_R_UNSUPPORTED_ALGORITHM);
+diff -u -r a/crypto/evp/internal.h b/crypto/evp/internal.h
+--- a/crypto/evp/internal.h
++++ b/crypto/evp/internal.h
+@@ -397,11 +397,6 @@
+       EVP_pkey_ed25519(),
+       EVP_pkey_rsa(),
+       EVP_pkey_x25519(),
+-      EVP_pkey_ml_dsa_44(),
+-      EVP_pkey_ml_dsa_65(),
+-      EVP_pkey_ml_dsa_87(),
+-      EVP_pkey_ml_kem_768(),
+-      EVP_pkey_ml_kem_1024(),
+       // TODO(crbug.com/438761503): Remove DSA from this set, after callers that
+       // need DSA pass in |EVP_pkey_dsa| explicitly.
+       EVP_pkey_dsa(),
+diff -u -r a/pki/verify_signed_data.cc b/pki/verify_signed_data.cc
+--- a/pki/verify_signed_data.cc
++++ b/pki/verify_signed_data.cc
+@@ -160,9 +160,6 @@
+       // TODO(davidben): Remove P-521 from here, or let callers configure this.
+       // We don't advertise it in TLS.
+       EVP_pkey_ec_p521(),
+-      EVP_pkey_ml_dsa_44(),
+-      EVP_pkey_ml_dsa_65(),
+-      EVP_pkey_ml_dsa_87(),
+   };
+   public_key->reset(EVP_PKEY_from_subject_public_key_info(
+       public_key_spki.data(), public_key_spki.size(), algs, std::size(algs)));
+diff -u -r a/ssl/ssl_key_share.cc b/ssl/ssl_key_share.cc
+--- a/ssl/ssl_key_share.cc
++++ b/ssl/ssl_key_share.cc
+@@ -472,12 +472,6 @@
+       return MakeUnique<ECKeyShare>(EC_group_p521(), SSL_GROUP_SECP521R1);
+     case SSL_GROUP_X25519:
+       return MakeUnique<X25519KeyShare>();
+-    case SSL_GROUP_X25519_KYBER768_DRAFT00:
+-      return MakeUnique<X25519Kyber768KeyShare>();
+-    case SSL_GROUP_X25519_MLKEM768:
+-      return MakeUnique<X25519MLKEM768KeyShare>();
+-    case SSL_GROUP_MLKEM1024:
+-      return MakeUnique<MLKEM1024KeyShare>();
+     default:
+       return nullptr;
+   }
+diff -u -r a/ssl/ssl_privkey.cc b/ssl/ssl_privkey.cc
+--- a/ssl/ssl_privkey.cc
++++ b/ssl/ssl_privkey.cc
+@@ -135,8 +135,7 @@
+   // reachable from libssl.
+   const EVP_PKEY_ALG *const algs[] = {
+       EVP_pkey_rsa(),       EVP_pkey_ec_p256(),   EVP_pkey_ec_p384(),
+-      EVP_pkey_ec_p521(),   EVP_pkey_ed25519(),   EVP_pkey_ml_dsa_44(),
+-      EVP_pkey_ml_dsa_65(), EVP_pkey_ml_dsa_87(),
++      EVP_pkey_ec_p521(),   EVP_pkey_ed25519(),
+   };
+   return bssl::UniquePtr<EVP_PKEY>(EVP_PKEY_from_subject_public_key_info(
+       spki.data(), spki.size(), algs, std::size(algs)));
