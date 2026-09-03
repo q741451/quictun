@@ -316,8 +316,11 @@ void QuictunClientConnection::CollectStreamGarbage() {
 }
 
 QuictunClientConnection::~QuictunClientConnection() {
-  if (event_loop_->UnregisterSocket(*udp_fd_)) {
-    // Expected: still registered unless Close() already ran.
+  // See QuictunServerConnection's identical destructor for why closed_ is the
+  // right guard here rather than accepting a false return unconditionally.
+  if (!closed_) {
+    bool unregistered = event_loop_->UnregisterSocket(*udp_fd_);
+    QUICHE_DCHECK(unregistered);
   }
 }
 

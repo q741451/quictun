@@ -226,10 +226,17 @@ QuictunServerConnection::QuictunServerConnection(
 }
 
 QuictunServerConnection::~QuictunServerConnection() {
-  if (event_loop_->UnregisterSocket(*udp_fd_)) {
-    // Expected: still registered unless Close() already ran. Mirrors
-    // QuictunClientConnection's destructor -- deliberately not DCHECKed,
-    // because false is the normal case here, not an invariant violation.
+  // Close() unregisters and is the normal path, so by the time this runs the
+  // socket is usually already gone. Guarding on closed_ turns "false is
+  // sometimes expected" into a real invariant: if Close() has not run, the
+  // constructor's RegisterSocket() is still in effect and this must succeed.
+  // Safe because Close() sets closed_ and unregisters with no early return
+  // between the two, and unregisters before invoking on_closed_ -- whose
+  // owner defers destruction to CollectGarbage() rather than destroying this
+  // connection on the callback's own stack.
+  if (!closed_) {
+    bool unregistered = event_loop_->UnregisterSocket(*udp_fd_);
+    QUICHE_DCHECK(unregistered);
   }
 }
 
