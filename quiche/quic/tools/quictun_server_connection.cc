@@ -226,7 +226,11 @@ QuictunServerConnection::QuictunServerConnection(
 }
 
 QuictunServerConnection::~QuictunServerConnection() {
-  event_loop_->UnregisterSocket(*udp_fd_);
+  if (event_loop_->UnregisterSocket(*udp_fd_)) {
+    // Expected: still registered unless Close() already ran. Mirrors
+    // QuictunClientConnection's destructor -- deliberately not DCHECKed,
+    // because false is the normal case here, not an invariant violation.
+  }
 }
 
 void QuictunServerConnection::DisconnectStreamTarget(StreamTarget& target) {
@@ -310,7 +314,8 @@ void QuictunServerConnection::Close() {
   // already safely deferred the same way (see wherever this connection's
   // own on_closed_ callback leads) -- always outside any callback's stack.
   stream_garbage_alarm_->Cancel();
-  event_loop_->UnregisterSocket(*udp_fd_);
+  bool unregistered = event_loop_->UnregisterSocket(*udp_fd_);
+  QUICHE_DCHECK(unregistered);
   std::function<void(QuictunServerConnection*)> on_closed = std::move(on_closed_);
   if (on_closed) {
     on_closed(this);
@@ -355,7 +360,8 @@ void QuictunServerConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
           /*packets_dropped=*/nullptr);
     }
     if (!event_loop_->SupportsEdgeTriggered()) {
-      event_loop_->RearmSocket(*udp_fd_, kSocketEventReadable);
+      bool rearmed = event_loop_->RearmSocket(*udp_fd_, kSocketEventReadable);
+      QUICHE_DCHECK(rearmed);
     }
   }
   if (events & kSocketEventWritable) {
@@ -387,7 +393,8 @@ void QuictunServerConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
     // dispatcher_.HasPendingWrites()) { RearmSocket(...); }`).
     if (!event_loop_->SupportsEdgeTriggered() &&
         connection_->IsWriterBlocked()) {
-      event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
+      bool rearmed = event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
+      QUICHE_DCHECK(rearmed);
     }
   }
 }
@@ -428,7 +435,8 @@ void QuictunServerConnection::ConsumePendingSocketError() {
   // subscription when it fires, so without this the *next* error would
   // again be an unsubscribed POLLERR, i.e. the same spin.
   if (!event_loop_->SupportsEdgeTriggered()) {
-    event_loop_->RearmSocket(*udp_fd_, kSocketEventError);
+    bool rearmed = event_loop_->RearmSocket(*udp_fd_, kSocketEventError);
+    QUICHE_DCHECK(rearmed);
   }
 }
 
