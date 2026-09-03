@@ -1,32 +1,42 @@
 # quictun: TCP-over-raw-QUIC tunnel
 
-`quictun` tunnels raw TCP connections over QUIC transport -- no HTTP/3, no
-MASQUE, no multiplexing. Every TCP connection gets its own dedicated QUIC
-connection and its own dedicated UDP socket. It's two small binaries,
-`quictun_server` and `quictun_client`, built on top of Google's
-[QUICHE](#quiche) QUIC implementation.
+`quictun` tunnels raw TCP over QUIC transport -- no HTTP/3, no MASQUE, no
+framing of its own. Two small static binaries, `quictun_server` and
+`quictun_client`, built on Google's [QUICHE](#quiche).
 
 ```
 quictun_server --listen=[::]:4433 --target=127.0.0.1:12948 --key='a real shared secret'
 quictun_client --local=[::]:12948 --remote=<server-ip>:4433 --key='a real shared secret'
 ```
 
-`quictun_server` listens for QUIC connections on `--listen` and, for each
-one, opens a TCP connection to `--target` and pumps bytes bidirectionally.
-`quictun_client` listens for TCP connections on `--local` and, for each one,
-opens a new QUIC connection to `--remote` and pumps bytes bidirectionally.
-Both `--listen`/`--local` accept IPv6 wildcard addresses (`[::]`) and also
-accept IPv4 traffic on the same socket (dual-stack).
+`quictun_client` accepts TCP on `--local` and relays each connection over
+QUIC to `quictun_server`, which dials `--target` and pumps bytes both ways.
+Both listeners take IPv6 wildcards (`[::]`) and accept IPv4 on the same
+socket (dual-stack).
 
 ## Why raw QUIC
 
-Everything here is Google's own production QUIC transport implementation,
-minus the HTTP/3 layer QUICHE normally carries on top of it. That buys the
-usual QUIC properties -- 1-RTT (or 0-RTT) handshakes, congestion control,
-loss recovery, and connection migration -- without paying for a protocol
-layer this tool has no use for. One QUIC connection (and one UDP socket) per
-TCP connection keeps head-of-line blocking and fairness scoped to a single
-tunneled connection instead of shared across all of them.
+Google's production QUIC transport, minus the HTTP/3 layer QUICHE normally
+carries on top: BBR/BBRv2/BBRv3 congestion control, loss recovery, 1-RTT and
+0-RTT handshakes, connection migration -- and nothing else to pay for.
+
+Throughput comes from how much work each syscall does:
+
+- **Batched sends.** With `--so_txtime`, packets leave via UDP GSO -- up to
+  45 segments per `sendmsg` instead of one packet per call.
+- **Batched receives.** `recvmmsg` collects 16 packets per call.
+- **Per-connection keys.** AEAD keys are derived once per connection; each
+  packet costs a nonce XOR, not a fresh key schedule.
+- **Windows you can open up.** `--initial_*_flow_control_window_kb` plus
+  `--startup_bandwidth_kbps`/`--startup_rtt_ms` fill a high
+  bandwidth-delay-product path from the first RTT instead of crawling up
+  through slow start.
+
+By default every accepted TCP connection gets its own QUIC connection, UDP
+socket and congestion-control state, so one tunnel's loss never stalls
+another. `--quic_conn=N` caps that at `N` connections and carries the rest as
+extra streams on them -- fewer sockets and handshakes, at the cost of sharing
+loss recovery among the tunnels on one connection.
 
 ## Security model
 
@@ -37,7 +47,7 @@ authentication is `--key`: a shared secret checked as an application-layer
 preamble at the start of every tunnel, before any TCP data is relayed.
 Traffic without a matching key is rejected before it reaches `--target`.
 
-`--zero_rtt` (default `true`) lets repeat connections skip a round trip by
+`--zero_rtt` (default `true`, client-side) lets repeat connections skip a round trip by
 resuming the previous handshake. This tool does **not** defend against
 0-RTT replay attacks -- only enable it on trusted or low-risk paths; disable
 with `--zero_rtt=false` if that matters for your deployment.
@@ -60,7 +70,6 @@ quictun_server  (built 2026/08/06 20:14:23)
   max_new_connections_per_event_loop     = 100
   max_concurrent_connections             = 5000
   key                                    = <redacted, 20 bytes>
-  zero_rtt                               = true
   congestion_control                     = bbr2
   so_txtime                              = false
   transparent                            = false
@@ -81,7 +90,6 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--key` | *(required)* | Shared secret checked as an application-layer preamble at the start of every tunnel. The two endpoints must be configured with the identical value. |
-| `--zero_rtt` | `true` | Attempt 0-RTT resumption for QUIC connections made after the first, within one process's lifetime. See [Security model](#security-model) for the replay caveat. |
 | `--congestion_control` | `cubic` | `cubic`, `bbr`, `bbr2`, or `bbr3`. Applies independently to *this endpoint's own send direction* -- client and server each pick their own, and the two need not match. An unrecognized value falls back to `cubic` with a logged warning rather than failing to start. |
 | `--so_txtime` | `false` | Use `SO_TXTIME` (Linux packet pacing offload) on the UDP send path. Falls back silently if the kernel doesn't support it. |
 | `--transparent` | `false` | Transparent-proxy mode (Linux only). `quictun_client` captures each accepted TCP connection's original destination via `SO_ORIGINAL_DST` (populated by an external iptables/nftables `REDIRECT` rule the operator sets up separately -- quictun itself never touches netfilter config) instead of always tunneling to one fixed address; `quictun_server` connects out to that per-stream destination instead of `--target`. Mutually exclusive with `--target` on the server -- setting both is a startup error, since the two modes speak incompatible wire formats (`--target`'s existing mode has zero framing after the `--key` preamble; transparent mode prepends an address header, IPv4/IPv6 only, no domain names). Both `quictun_client` and `quictun_server` must be started with the same value, the same as `--key`. |
@@ -91,7 +99,7 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | `--udp_socket_buffer_kb` | `1024` | `SO_RCVBUF`/`SO_SNDBUF` size set on every UDP socket quictun creates (one per QUIC connection), in KiB; applies to both the receive and send buffer. Too small a value under load can cause the kernel to drop packets before quictun ever sees them, which looks like network loss to the congestion controller rather than a local buffering problem -- if `/proc/net/snmp`'s `Udp: RcvbufErrors` column (or `nstat -az UdpRcvbufErrors`) climbs during a transfer, raise this. |
 | `--startup_bandwidth_kbps` | `0` | If > 0, bootstrap every new connection's congestion controller with this assumed starting bandwidth (Kbps, i.e. kilobits/sec -- *not* KB/s or bytes) instead of ramping up from scratch. Only affects the controller while still in its startup/slow-start phase; has no effect once a connection reaches steady state. `0` disables this (normal cold-start ramp-up). Pairs with `--startup_rtt_ms`; set both sides (client and server) to the same values, since each governs only that endpoint's own send direction. |
 | `--startup_rtt_ms` | `0` | Assumed starting RTT in milliseconds, paired with `--startup_bandwidth_kbps` -- only used, and only meaningful, if that flag is also `> 0`. `0` falls back to QUICHE's own initial RTT guess (100ms). |
-| `--max_streams_per_connection` | `100` | Max concurrent bidirectional streams this endpoint will accept as incoming from its peer at once. quictun's streams are always client-initiated, so in practice only the *server's* value does anything -- the client's own copy is accepted for symmetry but has nothing to bite, since the server never opens a stream to the client. Matters for `--quic_conn` pooling: with `N` pool slots round-robining accepted TCP connections, one pooled connection's concurrently-open stream count is the pool's live TCP count divided across those `N` slots, not `N` itself -- a *small* `--quic_conn` concentrates more load onto fewer connections, making this cap more likely to matter than a large one does. The default (`100`) is QUICHE's own real default -- quictun applies no override unless you change this. Not a hard lifetime cap: it's a sliding window that grows back by one every time an existing stream closes, so it only blocks new streams while this many are open *at once*, not after this many have ever been opened in total. A peer that opens a stream beyond what's currently granted anyway is a protocol violation -- not a per-stream rejection but the *whole connection* closing, taking every other stream sharing it down too. |
+| `--max_streams_per_connection` | `100` | Max concurrent bidirectional streams this endpoint will accept as incoming from its peer at once. quictun's streams are always client-initiated, so in practice only the *server's* value does anything -- the client's own copy is accepted for symmetry but has nothing to bite, since the server never opens a stream to the client. Matters when the client pools with `--quic_conn`: with `N` slots round-robining accepted TCP connections, one pooled connection's concurrently-open stream count is the pool's live TCP count divided across those `N` slots, not `N` itself -- a *small* pool concentrates more load onto fewer connections, making this cap more likely to matter than a large one does. The default (`100`) is QUICHE's own real default -- quictun applies no override unless you change this. Not a hard lifetime cap: it's a sliding window that grows back by one every time an existing stream closes, so it only blocks new streams while this many are open *at once*, not after this many have ever been opened in total. A peer that opens a stream beyond what's currently granted anyway is a protocol violation -- not a per-stream rejection but the *whole connection* closing, taking every other stream sharing it down too. |
 
 ### `quictun_server`-only
 
@@ -108,6 +116,8 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | --- | --- | --- |
 | `--local` | `[::]:12948` | Address:port to accept incoming TCP connections on. |
 | `--remote` | *(required)* | Address:port of the `quictun_server` to connect to for each accepted TCP connection. |
+| `--quic_conn` | `0` | Caps how many QUIC connections to keep open to `--remote` at once; further TCP connections become extra streams on an existing one, picked round-robin. `0` means unlimited -- one QUIC connection, UDP socket and congestion-control state per TCP connection. Pooling trades per-tunnel loss isolation for fewer sockets and handshakes. |
+| `--zero_rtt` | `true` | Attempt 0-RTT resumption for QUIC connections made after the first, within one process's lifetime. See [Security model](#security-model) for the replay caveat. The server issues session tickets either way, so this is a client-side choice only. |
 
 All address flags accept `host:port` or `[ipv6-literal]:port`; DNS names are
 not supported (IP literals only). `[::]` (IPv6 wildcard) also accepts IPv4

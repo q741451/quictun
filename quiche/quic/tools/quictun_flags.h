@@ -35,6 +35,11 @@ struct QuictunTuningOptions {
 
   // Whether to attempt 0-RTT resumption for new QUIC connections. See
   // quictun_client_driver.h for where this is actually consumed.
+  // Client-only, and set by quictun_client_bin.cc rather than by
+  // GetQuictunTuningOptionsFromFlags(): the server issues session tickets
+  // unconditionally, so this only decides whether the client attempts
+  // resumption. Left at its default in quictun_server, where nothing reads
+  // it -- see this field's flag definition for the rest.
   bool zero_rtt = true;
 
   // "cubic" | "bbr" | "bbr2" | "bbr3". Applies to this endpoint's own send
@@ -140,6 +145,9 @@ struct QuictunTuningOptions {
   // logic. Ignored by quictun_server, which is purely reactive to however
   // many streams a client legitimately opens on a connection -- see
   // QuictunServerConnection's class comment.
+  // Client-only, set by quictun_client_bin.cc. Pooling is a property of how
+  // the client assigns accepted TCP connections to QUIC connections; the
+  // server sees only the streams that result and needs no matching setting.
   int32_t quic_conn = 0;
 };
 

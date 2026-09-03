@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "quiche/quic/core/io/quic_default_event_loop.h"
 #include "quiche/quic/core/io/quic_event_loop.h"
 #include "quiche/quic/core/quic_default_clock.h"
@@ -37,6 +38,27 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     std::string, remote, "",
     "Address:port of the quictun_server to connect to for each accepted "
     "TCP connection. Required.");
+
+// Client-only: quictun_server reads neither. It issues session tickets
+// unconditionally (see quictun_certificate.h), so --zero_rtt only decides
+// whether this client attempts resumption; and pooling is purely a property
+// of how this client assigns accepted TCP connections to QUIC connections,
+// which the server never needs to know.
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    bool, zero_rtt, true,
+    "Attempt 0-RTT session resumption for QUIC connections made after the "
+    "first, within this process's lifetime. This tool deliberately does not "
+    "defend against 0-RTT replay; only rely on it on trusted/low-risk paths. "
+    "Disable with --zero_rtt=false.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, quic_conn, 0,
+    "Caps how many QUIC connections to keep open to --remote at once. Once "
+    "that many are open, each further accepted TCP connection becomes an "
+    "additional stream on one of them (picked round-robin) instead of "
+    "opening another QUIC connection. 0 (default) means unlimited: every "
+    "accepted TCP connection gets its own QUIC connection, its own UDP "
+    "socket, and its own congestion-control state.");
 
 #ifdef QUICTUN_COVERAGE_BUILD
 // See quictun_server_bin.cc's identical block for why this exists --
@@ -100,9 +122,17 @@ int main(int argc, char* argv[]) {
     std::cerr << "--key is required" << std::endl;
     return 1;
   }
+  options.zero_rtt = quiche::GetQuicheCommandLineFlag(FLAGS_zero_rtt);
+  options.quic_conn = quiche::GetQuicheCommandLineFlag(FLAGS_quic_conn);
+
   quic::PrintQuictunStartupBanner(
       "quictun_client",
-      {{"local", local_flag}, {"remote", remote_flag}}, options);
+      {{"local", local_flag},
+       {"remote", remote_flag},
+       {"zero_rtt", options.zero_rtt ? "true" : "false"},
+       {"quic_conn", options.quic_conn > 0 ? absl::StrCat(options.quic_conn)
+                                           : "0 (unlimited)"}},
+      options);
 
   std::unique_ptr<quic::QuicEventLoop> event_loop =
       quic::GetDefaultEventLoop()->Create(quic::QuicDefaultClock::Get());

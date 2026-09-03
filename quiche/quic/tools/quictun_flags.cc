@@ -30,25 +30,6 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "identical value.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
-    bool, zero_rtt, true,
-    "Enable 0-RTT session resumption for repeated QUIC connections made "
-    "within this process's lifetime. This tool deliberately does not "
-    "defend against 0-RTT replay; only rely on it on trusted/low-risk "
-    "paths. Disable with --zero_rtt=false.");
-
-DEFINE_QUICHE_COMMAND_LINE_FLAG(
-    int32_t, quic_conn, 0,
-    "Client-only (accepted but unused by quictun_server -- see "
-    "QuictunServerConnection). Caps how many QUIC connections "
-    "quictun_client keeps open to --remote at once; once that many are "
-    "open, new TCP connections are multiplexed as additional streams on "
-    "an existing one (picked round-robin) instead of opening another QUIC "
-    "connection. 0 (default) means unlimited: every accepted TCP "
-    "connection gets its own brand-new QUIC connection, quictun's "
-    "original behavior, completely unchanged from before this flag "
-    "existed.");
-
-DEFINE_QUICHE_COMMAND_LINE_FLAG(
     std::string, congestion_control, "cubic",
     "Congestion control algorithm for this endpoint's own send direction: "
     "one of cubic, bbr, bbr2, bbr3.");
@@ -83,9 +64,11 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, initial_stream_flow_control_window_kb, 512,
     "Initial per-stream flow-control window advertised to the peer, in "
     "KiB. Independent of --initial_session_flow_control_window_kb -- with "
-    "--quic_conn=0 (default, one stream per connection) the smaller of "
+    "the client's --quic_conn=0 (default, one stream per connection) the "
+    "smaller of "
     "the two is what actually caps throughput in practice; with "
-    "--quic_conn pooling multiple streams, the session window also caps "
+    "the client pooling multiple streams onto one connection, the session "
+    "window also caps "
     "their combined total. Raise both together for high-bandwidth-delay-"
     "product paths.");
 
@@ -125,10 +108,10 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "Max concurrent bidirectional streams this endpoint will accept as "
     "incoming from its peer at once -- in practice only the server's "
     "value does anything, since quictun's streams are always client-"
-    "initiated. Matters for --quic_conn pooling: with N pool slots "
+    "initiated. Matters when the client pools with --quic_conn: with N slots "
     "round-robining accepted TCPs, a single pooled connection's "
     "concurrently-open stream count is the pool's live TCP count divided "
-    "across those N slots, not N itself -- a small --quic_conn "
+    "across those N slots, not N itself -- a small pool "
     "concentrates more load onto fewer connections, making this cap more "
     "likely to matter than a large one does. Default (100) matches "
     "QUICHE's own real default -- quictun applies no override unless you "
@@ -144,8 +127,6 @@ namespace quic {
 QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
   QuictunTuningOptions options;
   options.psk = quiche::GetQuicheCommandLineFlag(FLAGS_key);
-  options.zero_rtt = quiche::GetQuicheCommandLineFlag(FLAGS_zero_rtt);
-  options.quic_conn = quiche::GetQuicheCommandLineFlag(FLAGS_quic_conn);
   options.congestion_control =
       quiche::GetQuicheCommandLineFlag(FLAGS_congestion_control);
   options.so_txtime = quiche::GetQuicheCommandLineFlag(FLAGS_so_txtime);
@@ -218,10 +199,6 @@ void PrintQuictunStartupBanner(
   std::vector<QuictunConfigLine> lines = binary_specific_config;
   lines.push_back(
       {"key", absl::StrCat("<redacted, ", options.psk.size(), " bytes>")});
-  lines.push_back({"zero_rtt", options.zero_rtt ? "true" : "false"});
-  lines.push_back(
-      {"quic_conn", options.quic_conn > 0 ? absl::StrCat(options.quic_conn)
-                                          : "0 (unlimited)"});
   lines.push_back({"congestion_control", options.congestion_control});
   lines.push_back({"so_txtime", options.so_txtime ? "true" : "false"});
   lines.push_back({"transparent", options.transparent ? "true" : "false"});
