@@ -166,8 +166,7 @@ void QuictunServerDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
           this, /*packets_dropped=*/nullptr);
     }
     if (!event_loop_->SupportsEdgeTriggered()) {
-      bool rearmed = event_loop_->RearmSocket(*rendezvous_fd_, kSocketEventReadable);
-      QUICHE_DCHECK(rearmed);
+      event_loop_->RearmSocket(*rendezvous_fd_, kSocketEventReadable);
     }
   }
 }

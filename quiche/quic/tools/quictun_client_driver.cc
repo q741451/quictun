@@ -136,8 +136,7 @@ void QuictunClientDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
   if (events & kSocketEventReadable) {
     AcceptLoop();
     if (!event_loop_->SupportsEdgeTriggered()) {
-      bool rearmed = event_loop_->RearmSocket(*listen_fd_, kSocketEventReadable);
-      QUICHE_DCHECK(rearmed);
+      event_loop_->RearmSocket(*listen_fd_, kSocketEventReadable);
     }
   }
 }
@@ -189,7 +188,7 @@ void QuictunClientDriver::AcceptLoop() {
     if (options_.transparent) {
       captured_dest = CaptureQuictunOriginalDestination(accepted->fd);
       if (!captured_dest.has_value()) {
-        (void)socket_api::Close(accepted->fd);
+        socket_api::Close(accepted->fd);
         continue;
       }
     }
@@ -202,7 +201,7 @@ void QuictunClientDriver::AcceptLoop() {
       std::shared_ptr<QuictunClientConnection> connection =
           CreateNewConnection();
       if (connection == nullptr) {
-        (void)socket_api::Close(accepted->fd);
+        socket_api::Close(accepted->fd);
         continue;
       }
       connection->AssignNewTcp(accepted->fd, accepted->peer_address,
@@ -224,7 +223,7 @@ void QuictunClientDriver::AcceptLoop() {
     if (conn == nullptr || conn->closed()) {
       conn = CreateNewConnection();
       if (conn == nullptr) {
-        (void)socket_api::Close(accepted->fd);
+        socket_api::Close(accepted->fd);
         continue;
       }
       pool_slots_[idx] = conn;

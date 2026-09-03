@@ -226,18 +226,7 @@ QuictunServerConnection::QuictunServerConnection(
 }
 
 QuictunServerConnection::~QuictunServerConnection() {
-  // Close() unregisters and is the normal path, so by the time this runs the
-  // socket is usually already gone. Guarding on closed_ turns "false is
-  // sometimes expected" into a real invariant: if Close() has not run, the
-  // constructor's RegisterSocket() is still in effect and this must succeed.
-  // Safe because Close() sets closed_ and unregisters with no early return
-  // between the two, and unregisters before invoking on_closed_ -- whose
-  // owner defers destruction to CollectGarbage() rather than destroying this
-  // connection on the callback's own stack.
-  if (!closed_) {
-    bool unregistered = event_loop_->UnregisterSocket(*udp_fd_);
-    QUICHE_DCHECK(unregistered);
-  }
+  event_loop_->UnregisterSocket(*udp_fd_);
 }
 
 void QuictunServerConnection::DisconnectStreamTarget(StreamTarget& target) {
@@ -321,8 +310,7 @@ void QuictunServerConnection::Close() {
   // already safely deferred the same way (see wherever this connection's
   // own on_closed_ callback leads) -- always outside any callback's stack.
   stream_garbage_alarm_->Cancel();
-  bool unregistered = event_loop_->UnregisterSocket(*udp_fd_);
-  QUICHE_DCHECK(unregistered);
+  event_loop_->UnregisterSocket(*udp_fd_);
   std::function<void(QuictunServerConnection*)> on_closed = std::move(on_closed_);
   if (on_closed) {
     on_closed(this);
@@ -367,8 +355,7 @@ void QuictunServerConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
           /*packets_dropped=*/nullptr);
     }
     if (!event_loop_->SupportsEdgeTriggered()) {
-      bool rearmed = event_loop_->RearmSocket(*udp_fd_, kSocketEventReadable);
-      QUICHE_DCHECK(rearmed);
+      event_loop_->RearmSocket(*udp_fd_, kSocketEventReadable);
     }
   }
   if (events & kSocketEventWritable) {
@@ -400,8 +387,7 @@ void QuictunServerConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
     // dispatcher_.HasPendingWrites()) { RearmSocket(...); }`).
     if (!event_loop_->SupportsEdgeTriggered() &&
         connection_->IsWriterBlocked()) {
-      bool rearmed = event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
-      QUICHE_DCHECK(rearmed);
+      event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
     }
   }
 }
@@ -442,8 +428,7 @@ void QuictunServerConnection::ConsumePendingSocketError() {
   // subscription when it fires, so without this the *next* error would
   // again be an unsubscribed POLLERR, i.e. the same spin.
   if (!event_loop_->SupportsEdgeTriggered()) {
-    bool rearmed = event_loop_->RearmSocket(*udp_fd_, kSocketEventError);
-    QUICHE_DCHECK(rearmed);
+    event_loop_->RearmSocket(*udp_fd_, kSocketEventError);
   }
 }
 

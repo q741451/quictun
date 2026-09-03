@@ -149,7 +149,7 @@ void QuictunClientConnection::AssignNewTcp(
     SocketFd accepted_tcp_fd, const QuicSocketAddress& tcp_peer_address,
     std::optional<QuicSocketAddress> captured_dest) {
   if (closed_) {
-    (void)socket_api::Close(accepted_tcp_fd);
+    socket_api::Close(accepted_tcp_fd);
     return;
   }
   QUICHE_DCHECK_EQ(transparent_, captured_dest.has_value());
@@ -249,7 +249,7 @@ void QuictunClientConnection::StartTunnel(QuictunStream* stream,
   // the only thing that could have just run reentrantly, and it's what
   // sets this).
   if (closed_) {
-    (void)socket_api::Close(pending.fd);
+    socket_api::Close(pending.fd);
     return;
   }
 
@@ -316,11 +316,8 @@ void QuictunClientConnection::CollectStreamGarbage() {
 }
 
 QuictunClientConnection::~QuictunClientConnection() {
-  // See QuictunServerConnection's identical destructor for why closed_ is the
-  // right guard here rather than accepting a false return unconditionally.
-  if (!closed_) {
-    bool unregistered = event_loop_->UnregisterSocket(*udp_fd_);
-    QUICHE_DCHECK(unregistered);
+  if (event_loop_->UnregisterSocket(*udp_fd_)) {
+    // Expected: still registered unless Close() already ran.
   }
 }
 
@@ -379,11 +376,10 @@ void QuictunClientConnection::Close() {
   // Any TCPs that never even got a stream opened for them yet: nothing
   // owns these but this queue, so close the raw fd directly.
   for (const PendingTcp& pending : pending_tcps_) {
-    (void)socket_api::Close(pending.fd);
+    socket_api::Close(pending.fd);
   }
   pending_tcps_.clear();
-  bool unregistered = event_loop_->UnregisterSocket(*udp_fd_);
-  QUICHE_DCHECK(unregistered);
+  event_loop_->UnregisterSocket(*udp_fd_);
   std::function<void(QuictunClientConnection*)> on_closed =
       std::move(on_closed_);
   if (on_closed) {
@@ -437,8 +433,7 @@ void QuictunClientConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
           /*packets_dropped=*/nullptr);
     }
     if (!event_loop_->SupportsEdgeTriggered()) {
-      bool rearmed = event_loop_->RearmSocket(*udp_fd_, kSocketEventReadable);
-      QUICHE_DCHECK(rearmed);
+      event_loop_->RearmSocket(*udp_fd_, kSocketEventReadable);
     }
   }
   if (events & kSocketEventWritable) {
@@ -470,8 +465,7 @@ void QuictunClientConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
     // dispatcher_.HasPendingWrites()) { RearmSocket(...); }`).
     if (!event_loop_->SupportsEdgeTriggered() &&
         connection_->IsWriterBlocked()) {
-      bool rearmed = event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
-      QUICHE_DCHECK(rearmed);
+      event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
     }
   }
 }
@@ -493,8 +487,7 @@ void QuictunClientConnection::ConsumePendingSocketError() {
            "idle timeout";
   }
   if (!event_loop_->SupportsEdgeTriggered()) {
-    bool rearmed = event_loop_->RearmSocket(*udp_fd_, kSocketEventError);
-    QUICHE_DCHECK(rearmed);
+    event_loop_->RearmSocket(*udp_fd_, kSocketEventError);
   }
 }
 
