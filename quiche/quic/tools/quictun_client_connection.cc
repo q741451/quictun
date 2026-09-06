@@ -202,7 +202,7 @@ void QuictunClientConnection::StartTunnel(QuictunStream* stream,
   preamble.push_back(static_cast<char>(psk_.size() & 0xff));
   preamble.append(psk_);
   if (transparent_) {
-    // ss-server-style address header (1-byte ATYP + raw address + 2-byte
+    // SOCKS5-style address header (1-byte ATYP + raw address + 2-byte
     // big-endian port), IPv4/IPv6 only -- no domain-name ATYP, since this
     // is always a concrete IP captured off SO_ORIGINAL_DST, never a
     // hostname. Sent as part of the same preamble write, right after the

@@ -80,8 +80,8 @@ struct QuictunTuningOptions {
   // See QuictunTunnel::idle_alarm_. Application policy rather than a
   // resource reaper: a peer that has genuinely vanished is caught by
   // idle_timeout above long before this can matter, so this one is free to
-  // be as lax as shadowsocks-libev's own MIN_TCP_IDLE_TIMEOUT (24h), i.e.
-  // lax enough never to cut a connection that is merely quiet.
+  // be very lax -- the 24h default is meant never to cut a connection that
+  // is simply idle rather than dead.
   QuicTime::Delta tcp_idle_timeout = QuicTime::Delta::FromSeconds(24 * 60 * 60);
 
   // Initial per-stream flow-control window. With --quic_conn=0 (default,

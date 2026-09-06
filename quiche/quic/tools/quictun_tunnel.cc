@@ -140,13 +140,12 @@ void QuictunTunnel::OnStreamCanWriteMore(QuicStreamId /*id*/) {
     MaybeFinalizeClose();
     return;
   }
-  // Strict backpressure, mirroring shadowsocks-libev's remote_recv_cb/
-  // server_send_cb pair (server.c): only resume reading from the TCP side
-  // once every previously-read byte has actually been handed off by the
-  // stream (HasBufferedData() false), not just once there's *some* room
-  // (the old CanBufferMoreWrites() check). This makes "we just read EOF"
-  // and "we still have unsent data from a previous read" structurally
-  // mutually exclusive, the same way ss-libev's io-watcher toggling does --
+  // Strict backpressure: only resume reading from the TCP side once every
+  // previously-read byte has actually been handed off by the stream
+  // (HasBufferedData() false), not just once there's *some* room (the old
+  // CanBufferMoreWrites() check). This makes "we just read EOF" and "we
+  // still have unsent data from a previous read" structurally mutually
+  // exclusive, the way toggling a single read watcher on and off would --
   // see ReceiveComplete()'s empty-data branch, which no longer needs to
   // assume there might be unflushed data sitting around from a *previous*
   // read (flush_close_alarm_ still guards the *current*, just-written fin).
@@ -430,10 +429,10 @@ void QuictunTunnel::ResetIdleAlarm() {
   // each such entry also drags the event loop awake at that deadline just
   // to discard it (QuicPollEventLoop::ComputePollTimeout() reads the queue
   // head without checking whether it is still live). At a 60s timeout that
-  // self-limits; at shadowsocks-libev's 24h it would not. Scaling the
-  // granularity to the timeout caps both costs at a fixed ~64 per tunnel
-  // regardless of throughput or of how large idle_timeout_ is, at the cost
-  // of firing up to that granularity early -- 22 minutes out of 24 hours,
+  // self-limits; at a 24h one it would not. Scaling the granularity to the
+  // timeout caps both costs at a fixed ~64 per tunnel regardless of
+  // throughput or of how large idle_timeout_ is, at the cost of firing up
+  // to that granularity early -- 22 minutes out of 24 hours,
   // which for a silence timeout is noise. This is the same trade
   // QuicAlarmMultiplexer makes for the alarms it owns (see its
   // underlying_alarm_granularity_, quic_multiplexer_alarm_granularity_us).
@@ -446,11 +445,11 @@ void QuictunTunnel::OnIdleAlarm() {
   if (closed_) {
     return;
   }
-  // Mirrors shadowsocks-libev's server_timeout_cb: nothing productive has
-  // happened on either leg for idle_timeout_ -- most likely socket_ is
-  // connected to a target/peer that itself expects *us* to send the next
-  // byte, which (since the tunnel got here) will never come. Give up rather
-  // than hold the fd pair open forever; see idle_alarm_'s comment.
+  // Nothing productive has happened on either leg for idle_timeout_ --
+  // most likely socket_ is connected to a target/peer that itself expects
+  // *us* to send the next byte, which (since the tunnel got here) will
+  // never come. Give up rather than hold the fd pair open forever; see
+  // idle_alarm_'s comment.
   Close("idle timeout", /*reset_stream=*/true);
 }
 

@@ -103,10 +103,9 @@ void SetQuictunStartupBandwidthHint(QuicConnection* connection,
 // instead (SO_ORIGINAL_DST) -- quictun itself never touches netfilter
 // config, this only reads what a rule the operator set up separately
 // already did. Tries the IPv6 variant (IP6T_SO_ORIGINAL_DST) first, then
-// IPv4 (SO_ORIGINAL_DST) -- mirrors shadowsocks-libev's redir.c exactly,
-// including its own reasoning for trying both rather than picking one
-// upfront: there's no cheap way to know in advance which family a given
-// fd's REDIRECT rule matched as. Returns nullopt (after logging why, at
+// IPv4 (SO_ORIGINAL_DST) -- both, rather than picking one upfront, because
+// there's no cheap way to know in advance which family a given fd's
+// REDIRECT rule matched as. Returns nullopt (after logging why, at
 // WARNING) if both fail -- most commonly because `fd` was connected to
 // --local directly, never actually redirected by any rule at all.
 std::optional<QuicSocketAddress> CaptureQuictunOriginalDestination(

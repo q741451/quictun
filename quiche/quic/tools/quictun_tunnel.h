@@ -44,9 +44,8 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   // invoked (at most once) when the tunnel shuts down for any reason
   // (either side closing, or an I/O error) -- the owner should tear down the
   // whole connection (including the QUIC session/connection) in response.
-  // `idle_timeout` mirrors shadowsocks-libev's server_t: a single timer
-  // covering the whole tunnel, reset by real progress on either leg -- see
-  // idle_alarm_'s comment.
+  // `idle_timeout` arms a single timer covering the whole tunnel, reset by
+  // real progress on either leg -- see idle_alarm_'s comment.
   //
   // `socket`, unlike `stream`, may be omitted (nullptr) at construction and
   // supplied later via SetSocket() -- needed on the server side, where the
@@ -265,9 +264,9 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   // non-null but actually connected.
   bool started_ = false;
 
-  // Mirrors shadowsocks-libev's server_t: ONE shared idle timer for the
-  // whole tunnel (not per-direction), reset by ResetIdleAlarm() on any real
-  // data progress on EITHER leg (socket_ or stream_ -- see its call sites in
+  // ONE shared idle timer for the whole tunnel -- not per-direction, and
+  // not per-connection -- reset by ResetIdleAlarm() on any real data
+  // progress on EITHER leg (socket_ or stream_ -- see its call sites in
   // ReceiveComplete()/FillQueueFromStream()), closing the tunnel if it ever
   // fires. It exists as a backstop for a tunnel where neither leg is doing
   // anything productive -- e.g. socket_ connected to a target that itself
@@ -282,11 +281,11 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   // connection, and every tunnel on it, within a minute. This one resets
   // only on actual payload, so it is the only thing that can ever notice a
   // tunnel that is merely quiet -- and since a vanished peer is already
-  // handled above, it is free to be as lax as shadowsocks-libev's own
-  // MIN_TCP_IDLE_TIMEOUT (24h), which is its default. Sharing one flag for
-  // both, as this used to, forced one of the two to be wrong: at 60s it cut
-  // live-but-idle tunnels shadowsocks would have kept, and at 24h it left
-  // vanished peers' connections (and their target-side fds) held for a day.
+  // handled above, it is free to be very lax -- hence the 24h default.
+  // Sharing one flag for both, as this used to, forced one of the two to be
+  // wrong: at 60s it cut tunnels that were alive and simply idle, and at
+  // 24h it left vanished peers' connections -- and every target-side fd
+  // hanging off them -- held for a day.
   const QuicTime::Delta idle_timeout_;
   std::unique_ptr<QuicAlarm> idle_alarm_;
 

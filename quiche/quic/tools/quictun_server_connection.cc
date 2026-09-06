@@ -47,7 +47,7 @@ class StreamGarbageAlarmDelegate : public QuicAlarm::DelegateWithoutContext {
   QuictunServerConnection* const connection_;
 };
 
-// Result of trying to parse a --transparent address header (ss-server-style
+// Result of trying to parse a --transparent address header (SOCKS5-style
 // ATYP+addr+port, IPv4/IPv6 only -- no domain-name ATYP, since a
 // transparent proxy only ever captures a concrete IP off SO_ORIGINAL_DST,
 // never a hostname) out of whatever's been buffered so far.

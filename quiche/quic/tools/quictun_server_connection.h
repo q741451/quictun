@@ -78,7 +78,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   // `target_address` is nullopt iff `transparent` -- in that mode there is
   // no single fixed target; OnStreamDataAvailable() instead parses a
   // per-stream destination out of an address header the client sends right
-  // after the key preamble (ss-server-style ATYP+addr+port, IPv4/IPv6
+  // after the key preamble (SOCKS5-style ATYP+addr+port, IPv4/IPv6
   // only, no domain names -- see the .cc). `transparent` must never be
   // true at the same time `target_address` has a value; enforced by the
   // caller (see --transparent's mutual-exclusivity check in
@@ -152,7 +152,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   // QuictunTunnel exists to take over as that stream's delegate -- see
   // quictun_client_connection.cc for the wire format (2-byte big-endian
   // length + key bytes, always the first bytes on the stream; when
-  // transparent_, an ss-server-style ATYP+addr+port header immediately
+  // transparent_, a SOCKS5-style ATYP+addr+port header immediately
   // follows). Not used at all for a stream once StartTunnelForStream()
   // hands its delegate role to the QuictunTunnel that owns it from then on.
   void OnStreamDataAvailable(QuicStreamId id) override;

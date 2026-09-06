@@ -34,9 +34,8 @@
 // constant needed from it is hardcoded instead -- numerically 80 on every
 // real Linux kernel (verified against this build's own sysroot headers),
 // the same value as SO_ORIGINAL_DST, just read at a different socket
-// level (SOL_IPV6 vs. SOL_IP). shadowsocks-libev's redir.c carries an
-// identical `#ifndef IP6T_SO_ORIGINAL_DST` fallback-define for older/
-// minimal kernel headers, for the same reason.
+// level (SOL_IPV6 vs. SOL_IP). The #ifndef guard is so a sysroot whose
+// headers are older or more minimal than this constant still builds.
 #ifndef IP6T_SO_ORIGINAL_DST
 #define IP6T_SO_ORIGINAL_DST 80
 #endif
@@ -331,10 +330,9 @@ std::optional<QuicSocketAddress> CaptureQuictunOriginalDestination(
   struct sockaddr_storage dest_storage;
   socklen_t dest_len = sizeof(dest_storage);
   memset(&dest_storage, 0, sizeof(dest_storage));
-  // Mirrors shadowsocks-libev's redir.c getdestaddr(): try the IPv6 variant
-  // first, then IPv4 on failure -- its own comment explains why (no cheap
+  // Try the IPv6 variant first, then IPv4 on failure: there is no cheap
   // way to know in advance which family a given fd's REDIRECT rule matched
-  // as).
+  // as, so both have to be attempted rather than picking one upfront.
   if (getsockopt(fd, SOL_IPV6, IP6T_SO_ORIGINAL_DST, &dest_storage,
                  &dest_len) != 0) {
     dest_len = sizeof(dest_storage);
