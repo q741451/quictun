@@ -287,7 +287,7 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
           target_address_, options_.transparent,
           QuicConnectionId(destination_connection_id),
           options_.psk, congestion_control_, options_.so_txtime,
-          options_.udp_socket_buffer_bytes, options_.tcp_idle_timeout, packet,
+          options_.udp_socket_buffer_bytes, &idle_tracker_, packet,
           [this](QuictunServerConnection* c) { RemoveConnection(c); });
   if (connection == nullptr) {
     return;
@@ -320,6 +320,11 @@ void QuictunServerDriver::CollectGarbage() {
   // everything for the iteration that just finished, and before the next
   // one delivers anything -- see quictun_server_bin.cc's main loop.
   new_connections_allowed_this_event_loop_ = max_new_connections_per_event_loop_;
+}
+
+void QuictunServerDriver::CloseIdleTunnels() {
+  idle_tracker_.CloseIdleTunnels(event_loop_->GetClock()->ApproximateNow(),
+                                 options_.tcp_idle_timeout);
 }
 
 }  // namespace quic

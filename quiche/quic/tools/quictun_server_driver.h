@@ -110,6 +110,15 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
   // see that member's comment.
   void CollectGarbage();
 
+  // Closes every tunnel that has gone quiet for --tcp_idle_timeout_seconds.
+  // Called once per event-loop iteration alongside CollectGarbage(), and
+  // for the same reason it lives there rather than in an alarm: closing a
+  // tunnel reenters its owner, so it has to happen at a point where no
+  // tunnel's or connection's own call stack is still unwinding. Costs one
+  // comparison when nothing has expired -- see QuictunIdleTracker.
+  void CloseIdleTunnels();
+
+
  private:
   void RemoveConnection(QuictunServerConnection* connection);
 
@@ -131,6 +140,10 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
   QuicCompressedCertsCache compressed_certs_cache_;
   EventLoopSocketFactory socket_factory_;
   CongestionControlType congestion_control_;
+
+  // Every live tunnel across every connection this driver owns. Must
+  // outlive connections_, since each tunnel unlinks from it in Close().
+  QuictunIdleTracker idle_tracker_;
 
   // Keyed by peer address so a peer's retransmitted/coalesced first packets
   // that are still in flight (already queued on the rendezvous socket

@@ -172,5 +172,6 @@ int main(int argc, char* argv[]) {
   while (true) {
     event_loop->RunEventLoopOnce(quic::QuicTime::Delta::FromMilliseconds(50));
     driver.CollectGarbage();
+    driver.CloseIdleTunnels();
   }
 }

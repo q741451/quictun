@@ -150,7 +150,7 @@ QuictunClientDriver::CreateNewConnection() {
           server_id_, remote_address_, crypto_config_.get(), options_.psk,
           congestion_control_, options_.so_txtime,
           options_.udp_socket_buffer_bytes, /*poolable=*/options_.quic_conn > 0,
-          options_.transparent, options_.tcp_idle_timeout,
+          options_.transparent, &idle_tracker_,
           [this](QuictunClientConnection* c) { RemoveConnection(c); });
   if (connection == nullptr) {
     return nullptr;
@@ -246,6 +246,11 @@ void QuictunClientDriver::CollectGarbage() {
     connections_.erase(connection);
   }
   pending_removal_.clear();
+}
+
+void QuictunClientDriver::CloseIdleTunnels() {
+  idle_tracker_.CloseIdleTunnels(event_loop_->GetClock()->ApproximateNow(),
+                                 options_.tcp_idle_timeout);
 }
 
 }  // namespace quic

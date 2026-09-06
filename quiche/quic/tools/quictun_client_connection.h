@@ -78,7 +78,7 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
       QuicCryptoClientConfig* crypto_config, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
       QuicByteCount udp_socket_buffer_bytes, bool poolable, bool transparent,
-      QuicTime::Delta tcp_idle_timeout,
+      QuictunIdleTracker* idle_tracker,
       std::function<void(QuictunClientConnection*)> on_closed);
 
   ~QuictunClientConnection() override;
@@ -175,7 +175,7 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
       const QuicServerId& server_id, QuicCryptoClientConfig* crypto_config,
       const std::string& psk, CongestionControlType congestion_control,
       bool so_txtime_enabled, bool poolable, bool transparent,
-      QuicTime::Delta tcp_idle_timeout,
+      QuictunIdleTracker* idle_tracker,
       std::function<void(QuictunClientConnection*)> on_closed);
 
   // Opens outgoing streams for as many of pending_tcps_ as currently
@@ -231,11 +231,11 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   // stream_garbage_alarm_'s comment.
   std::unique_ptr<QuicAlarm> stream_garbage_alarm_;
 
-  // --tcp_idle_timeout_seconds, passed to each stream's QuictunTunnel (see
-  // its own idle_alarm_ comment). Latched here at construction since it
-  // isn't otherwise available where StartTunnel() constructs each tunnel.
+  // Where each stream's QuictunTunnel registers its activity -- owned by
+  // the driver, shared by every connection, swept from the main loop. Held
+  // here only because StartTunnel() needs it when constructing each tunnel.
   // Nothing to do with QUIC's own idle timeout, which lives in `config`.
-  const QuicTime::Delta tcp_idle_timeout_;
+  QuictunIdleTracker* const idle_tracker_;
 
   std::function<void(QuictunClientConnection*)> on_closed_;
   bool closed_ = false;

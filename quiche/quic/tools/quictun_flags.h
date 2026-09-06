@@ -77,7 +77,7 @@ struct QuictunTuningOptions {
 
   // How long a single tunnel may go with no real data in EITHER direction
   // before that one tunnel -- not the connection carrying it -- is closed.
-  // See QuictunTunnel::idle_alarm_. Application policy rather than a
+  // See QuictunTunnel::last_activity_. Application policy rather than a
   // resource reaper: a peer that has genuinely vanished is caught by
   // idle_timeout above long before this can matter, so this one is free to
   // be very lax -- the 24h default is meant never to cut a connection that

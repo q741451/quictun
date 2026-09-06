@@ -31,12 +31,80 @@
 #include "quiche/quic/core/quic_alarm.h"
 #include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/tools/quictun_session.h"
+#include "quiche/common/quiche_intrusive_list.h"
 #include "quiche/common/quiche_mem_slice.h"
 
 namespace quic {
 
-class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
-                                    public QuictunStreamDelegate {
+class QuictunTunnel;
+
+// Every live tunnel in the process, kept in one intrusive list ordered
+// oldest-activity-first, so "has anything gone quiet long enough to close?"
+// is an O(1) look at the head rather than a scan.
+//
+// Deliberately NOT a QuicAlarm per tunnel, which is what this replaced.
+// QuicAlarmFactory is a connection-scoped scheduler for QUIC's own protocol
+// events -- QuicConnection doesn't even give its twelve logical alarms one
+// platform alarm each, it multiplexes them down to two (see
+// QuicAlarmMultiplexer) -- and the queue backing QuicPollEventLoop holds a
+// cancelled alarm's slot until that alarm's original deadline comes due,
+// which is only affordable for the short deadlines QUICHE itself uses (its
+// longest is kMaximumIdleTimeoutSecs, ten minutes). A per-tunnel alarm
+// deadline of --tcp_idle_timeout_seconds turned every closed tunnel into a
+// queue slot held for up to a day: measured ~100 bytes per TCP connection
+// retained for the whole timeout, i.e. hundreds of MB at a few tens of new
+// connections per second. A tunnel's silence is quictun's own concern, not
+// the QUIC connection's, so it is tracked here with quictun's own
+// bookkeeping and swept from quictun's own main loop instead.
+class QUICHE_EXPORT QuictunIdleTracker {
+ public:
+  QuictunIdleTracker() = default;
+  QuictunIdleTracker(const QuictunIdleTracker&) = delete;
+  QuictunIdleTracker& operator=(const QuictunIdleTracker&) = delete;
+
+  // Records that `tunnel` just moved real data, making it the most recently
+  // active. Called only from QuictunTunnel::NoteActivity().
+  void Touch(QuictunTunnel* tunnel);
+
+  // Drops `tunnel` from the ordering. Called only from
+  // QuictunTunnel::Close(), which is the one and only unlink site -- see
+  // idle_tracker_'s comment there. No-op if not currently linked.
+  void Remove(QuictunTunnel* tunnel);
+
+  // Closes every tunnel with no activity on either leg for `timeout`.
+  // Cheap enough to call on every event-loop iteration: returns after one
+  // comparison unless something has actually expired. Must only be called
+  // from outside any tunnel's or connection's own call stack (the same
+  // requirement, and for the same reason, as
+  // QuictunClientDriver::CollectGarbage()) -- closing a tunnel reenters its
+  // owner.
+  void CloseIdleTunnels(QuicTime now, QuicTime::Delta timeout);
+
+ private:
+  // Oldest activity at the front, so the front is the only expiry
+  // candidate. Keeping it ordered is free: last_activity() only ever moves
+  // forward to "now" and activity always moves the tunnel to the back, so
+  // the list is sorted by construction -- nothing is ever compared, and
+  // nothing is ever re-sorted.
+  //
+  // Non-owning, deliberately: a tunnel is owned by its connection's
+  // stream_tcps_/stream_targets_ entry (a std::unique_ptr) and this is only
+  // an index into those. QuicheIntrusiveList is what QUICHE itself uses for
+  // exactly this shape -- see QuicBufferedPacketStore's
+  // buffered_sessions_, which orders buffered connections for expiry the
+  // same way -- and its own header spells out why it beats a
+  // std::list<QuictunTunnel*> here: a std::list would heap-allocate a node
+  // per element, an intrusive list allocates nothing at all.
+  quiche::QuicheIntrusiveList<QuictunTunnel> order_;
+};
+
+class QUICHE_EXPORT QuictunTunnel
+    : public ConnectingClientSocket::AsyncVisitor,
+      public QuictunStreamDelegate,
+      // Membership in QuictunIdleTracker's ordering. Exempt from the style
+      // guide's multiple-inheritance rule, per quiche_intrusive_list.h's own
+      // note; QuicBufferedPacketStore::BufferedPacketListNode does the same.
+      public quiche::QuicheIntrusiveLink<QuictunTunnel> {
  public:
   // `stream` must outlive this tunnel; the owning connection object
   // (QuictunClientConnection / QuictunServerConnection) is responsible for
@@ -44,8 +112,10 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   // invoked (at most once) when the tunnel shuts down for any reason
   // (either side closing, or an I/O error) -- the owner should tear down the
   // whole connection (including the QUIC session/connection) in response.
-  // `idle_timeout` arms a single timer covering the whole tunnel, reset by
-  // real progress on either leg -- see idle_alarm_'s comment.
+  // `idle_tracker` (never null, must outlive this tunnel) is where this
+  // tunnel registers its activity so the owner can find it if it ever goes
+  // quiet -- see QuictunIdleTracker. The timeout value itself lives with
+  // whoever sweeps, not here.
   //
   // `socket`, unlike `stream`, may be omitted (nullptr) at construction and
   // supplied later via SetSocket() -- needed on the server side, where the
@@ -57,7 +127,10 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   // arrives while the socket is merely write-blocked (see pending_to_tcp_);
   // it's flushed once the socket is set.
   QuictunTunnel(QuictunStream* stream, ConnectingClientSocket* socket,
-               QuicTime::Delta idle_timeout, std::function<void()> on_closed);
+               QuictunIdleTracker* idle_tracker,
+               std::function<void()> on_closed);
+
+  ~QuictunTunnel() override;
 
   // Supplies the socket when it wasn't available at construction (see the
   // constructor's comment). Must be called at most once, and only if
@@ -74,6 +147,11 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   // so the owner is the one that still needs to do that for whatever it
   // was about to hand over via SetSocket().
   bool HasSocket() const { return socket_ != nullptr; }
+
+  // When real data last moved on either leg. Read by QuictunIdleTracker
+  // when sweeping; exposed rather than befriending it, since that is the
+  // only thing it needs from this class.
+  QuicTime last_activity() const { return last_activity_; }
 
   // Whether Close() has already run (for any reason) on this tunnel.
   // Exposed for an owner that needs to tear down several tunnels at once
@@ -124,10 +202,9 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
     pending_seed_data_ = std::move(seed_quic_to_tcp_data);
   }
 
-  // Called by FlushCloseAlarmDelegate / IdleAlarmDelegate (quictun_tunnel.cc);
-  // not for other callers.
+  // Called by FlushCloseAlarmDelegate (quictun_tunnel.cc); not for other
+  // callers.
   void OnFlushCloseAlarm();
-  void OnIdleAlarm();
 
   // Tears this tunnel down: disconnects socket_ (if it has one) and, if
   // `reset_stream`, resets stream_ -- see the .cc definition's own
@@ -151,9 +228,10 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   void BeginReadFromTcp();
   void MaybeFlushQuicToTcp();
 
-  // Rearms idle_alarm_ for idle_timeout_ from now -- called on any real
-  // progress on either leg (see idle_alarm_'s comment).
-  void ResetIdleAlarm();
+  // Records that real data moved on one of the legs, and moves this tunnel
+  // to the tail of idle_tracker_ -- called on any real progress on either
+  // leg (see last_activity_'s comment).
+  void NoteActivity();
 
   // Marks our own send direction done -- writing the stream's FIN if it
   // hasn't been written yet -- once the peer has finished sending (QUIC FIN
@@ -264,30 +342,43 @@ class QUICHE_EXPORT QuictunTunnel : public ConnectingClientSocket::AsyncVisitor,
   // non-null but actually connected.
   bool started_ = false;
 
-  // ONE shared idle timer for the whole tunnel -- not per-direction, and
-  // not per-connection -- reset by ResetIdleAlarm() on any real data
+  // ONE shared idle marker for the whole tunnel -- not per-direction, and
+  // not per-connection -- updated by NoteActivity() on any real data
   // progress on EITHER leg (socket_ or stream_ -- see its call sites in
-  // ReceiveComplete()/FillQueueFromStream()), closing the tunnel if it ever
-  // fires. It exists as a backstop for a tunnel where neither leg is doing
-  // anything productive -- e.g. socket_ connected to a target that itself
-  // expects the peer to send the next request, which will never come.
+  // ReceiveComplete()/FillQueueFromStream()). Whoever sweeps idle_tracker_
+  // closes the tunnel once this stops moving for long enough. It exists as
+  // a backstop for a tunnel where neither leg is doing anything productive
+  // -- e.g. socket_ connected to a target that itself expects the peer to
+  // send the next request, which will never come.
   //
-  // Deliberately a separate knob (--tcp_idle_timeout_seconds) from QUIC's
-  // own idle timeout (--idle_timeout_seconds), because the two answer
-  // different questions about different objects and their sensible values
-  // differ by orders of magnitude. QUIC's resets on ANY packet received on
-  // the connection, keepalive PINGs included, so while the peer is alive it
-  // never fires; once the peer really is gone it is what reclaims the whole
-  // connection, and every tunnel on it, within a minute. This one resets
-  // only on actual payload, so it is the only thing that can ever notice a
-  // tunnel that is merely quiet -- and since a vanished peer is already
-  // handled above, it is free to be very lax -- hence the 24h default.
-  // Sharing one flag for both, as this used to, forced one of the two to be
-  // wrong: at 60s it cut tunnels that were alive and simply idle, and at
-  // 24h it left vanished peers' connections -- and every target-side fd
-  // hanging off them -- held for a day.
-  const QuicTime::Delta idle_timeout_;
-  std::unique_ptr<QuicAlarm> idle_alarm_;
+  // The timeout it is compared against (--tcp_idle_timeout_seconds) is
+  // deliberately a separate knob from QUIC's own idle timeout
+  // (--idle_timeout_seconds), because the two answer different questions
+  // about different objects and their sensible values differ by orders of
+  // magnitude. QUIC's resets on ANY packet received on the connection,
+  // keepalive PINGs included, so while the peer is alive it never fires;
+  // once the peer really is gone it is what reclaims the whole connection,
+  // and every tunnel on it, within a minute. This one moves only on actual
+  // payload, so it is the only thing that can ever notice a tunnel that is
+  // merely quiet -- and since a vanished peer is already handled above, it
+  // is free to be very lax, hence the 24h default. Sharing one flag for
+  // both, as this used to, forced one of the two to be wrong: at 60s it cut
+  // tunnels that were alive and simply idle, and at 24h it left vanished
+  // peers' connections -- and every target-side fd hanging off them -- held
+  // for a day.
+  QuicTime last_activity_ = QuicTime::Zero();
+
+  // Where this tunnel registers its activity. Linked by the first
+  // NoteActivity() (from Start()), unlinked by Close() -- which is the ONLY
+  // unlink site, not a best-effort one: between Close() and this object's
+  // actual destruction the owner keeps it alive in its closed_stream_*
+  // vector for a garbage-collection hop (see the owner's on_closed
+  // callback), and a sweep reaching an already-closed tunnel in that window
+  // would call Close() on it a second time. ~QuictunTunnel() therefore
+  // asserts rather than tidying up: still being linked there means Close()
+  // never ran, which already means a leaked fd and an owner that was never
+  // told, not merely a stale list entry.
+  QuictunIdleTracker* const idle_tracker_;
 
   static constexpr size_t kReadSize = 16 * 1024;
   static constexpr size_t kMaxQueuedChunks = 4;

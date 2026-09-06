@@ -95,7 +95,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
       std::optional<QuicSocketAddress> target_address, bool transparent,
       QuicConnectionId server_connection_id, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
-      QuicByteCount udp_socket_buffer_bytes, QuicTime::Delta tcp_idle_timeout,
+      QuicByteCount udp_socket_buffer_bytes, QuictunIdleTracker* idle_tracker,
       const QuicReceivedPacket& first_packet,
       std::function<void(QuictunServerConnection*)> on_closed);
 
@@ -186,7 +186,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
       std::optional<QuicSocketAddress> target_address, bool transparent,
       QuicConnectionId server_connection_id, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
-      QuicTime::Delta tcp_idle_timeout, const QuicReceivedPacket& first_packet,
+      QuictunIdleTracker* idle_tracker, const QuicReceivedPacket& first_packet,
       std::function<void(QuictunServerConnection*)> on_closed);
 
   // SetStreamCreatedCallback() target: starts the new stream's
@@ -274,11 +274,11 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   // exactly, including the same "already set, don't re-arm" check.
   std::unique_ptr<QuicAlarm> stream_garbage_alarm_;
 
-  // --tcp_idle_timeout_seconds, passed to each stream's QuictunTunnel (see
-  // its own idle_alarm_ comment). Latched here at construction since it
-  // isn't otherwise available where StartTunnelForStream() constructs each
-  // tunnel. Nothing to do with QUIC's own idle timeout, which is in `config`.
-  const QuicTime::Delta tcp_idle_timeout_;
+  // Where each stream's QuictunTunnel registers its activity -- owned by
+  // the driver, shared by every connection, swept from the main loop. Held
+  // here only because StartTunnelForStream() needs it when constructing
+  // each tunnel. Nothing to do with QUIC's own idle timeout, in `config`.
+  QuictunIdleTracker* const idle_tracker_;
 
   std::function<void(QuictunServerConnection*)> on_closed_;
   bool closed_ = false;

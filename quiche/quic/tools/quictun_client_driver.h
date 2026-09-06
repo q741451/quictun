@@ -57,6 +57,15 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener {
   // from within a connection's own close path.
   void CollectGarbage();
 
+  // Closes every tunnel that has gone quiet for --tcp_idle_timeout_seconds.
+  // Called once per event-loop iteration alongside CollectGarbage(), and
+  // for the same reason it lives there rather than in an alarm: closing a
+  // tunnel reenters its owner, so it has to happen at a point where no
+  // tunnel's or connection's own call stack is still unwinding. Costs one
+  // comparison when nothing has expired -- see QuictunIdleTracker.
+  void CloseIdleTunnels();
+
+
  private:
   void AcceptLoop();
   void RemoveConnection(QuictunClientConnection* connection);
@@ -85,6 +94,10 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener {
   std::unique_ptr<QuicCryptoClientConfig> crypto_config_;
   quiche::QuicheBufferAllocator* const buffer_allocator_;
   CongestionControlType congestion_control_;
+
+  // Every live tunnel across every connection this driver owns. Must
+  // outlive connections_, since each tunnel unlinks from it in Close().
+  QuictunIdleTracker idle_tracker_;
 
   absl::flat_hash_map<QuictunClientConnection*,
                       std::shared_ptr<QuictunClientConnection>>

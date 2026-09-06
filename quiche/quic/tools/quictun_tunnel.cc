@@ -41,24 +41,60 @@ class FlushCloseAlarmDelegate : public QuicAlarm::DelegateWithoutContext {
   QuictunTunnel* const tunnel_;
 };
 
-class IdleAlarmDelegate : public QuicAlarm::DelegateWithoutContext {
- public:
-  explicit IdleAlarmDelegate(QuictunTunnel* tunnel) : tunnel_(tunnel) {}
-  void OnAlarm() override { tunnel_->OnIdleAlarm(); }
-
- private:
-  QuictunTunnel* const tunnel_;
-};
-
 }  // namespace
 
+void QuictunIdleTracker::Touch(QuictunTunnel* tunnel) {
+  if (!order_.empty() && &order_.back() == tunnel) {
+    // Already the most recently active -- the overwhelmingly common case for
+    // a tunnel that is actively transferring, and for any connection
+    // carrying only one.
+    return;
+  }
+  Remove(tunnel);
+  order_.push_back(tunnel);
+}
+
+void QuictunIdleTracker::Remove(QuictunTunnel* tunnel) {
+  using List = quiche::QuicheIntrusiveList<QuictunTunnel>;
+  if (List::is_linked(tunnel)) {
+    List::erase(tunnel);
+  }
+}
+
+void QuictunIdleTracker::CloseIdleTunnels(QuicTime now,
+                                          QuicTime::Delta timeout) {
+  // Oldest activity is at the front, so the front is the only candidate: if
+  // it isn't expired, nothing is.
+  while (!order_.empty() && now - order_.front().last_activity() >= timeout) {
+    QuictunTunnel* tunnel = &order_.front();
+    tunnel->Close("idle timeout", /*reset_stream=*/true);
+    // Close() unlinks before it can reenter anything (see its own body), so
+    // the front always advances and this loop always terminates. Asserted
+    // rather than defended against: a Close() that stopped unlinking would
+    // spin here forever, and catching that in a debug run beats shipping a
+    // silent bound.
+    QUICHE_DCHECK(order_.empty() || &order_.front() != tunnel);
+  }
+}
+
 QuictunTunnel::QuictunTunnel(QuictunStream* stream, ConnectingClientSocket* socket,
-                             QuicTime::Delta idle_timeout,
+                             QuictunIdleTracker* idle_tracker,
                              std::function<void()> on_closed)
     : stream_(stream),
       socket_(socket),
       on_closed_(std::move(on_closed)),
-      idle_timeout_(idle_timeout) {}
+      idle_tracker_(idle_tracker) {
+  QUICHE_DCHECK(idle_tracker_ != nullptr);
+}
+
+QuictunTunnel::~QuictunTunnel() {
+  // Contract, not cleanup: see idle_tracker_'s comment in the header. A
+  // tunnel still linked here was destroyed without Close() ever running,
+  // which also means its socket was never Disconnect()ed and its owner was
+  // never notified -- deliberately not papered over by unlinking here,
+  // since that would let the far larger problem ship silently.
+  QUICHE_DCHECK(!quiche::QuicheIntrusiveList<QuictunTunnel>::is_linked(this));
+}
 
 void QuictunTunnel::SetSocket(ConnectingClientSocket* socket) {
   QUICHE_DCHECK(socket_ == nullptr) << "SetSocket() called more than once";
@@ -71,7 +107,7 @@ void QuictunTunnel::Start(absl::string_view seed_quic_to_tcp_data) {
   if (!seed_quic_to_tcp_data.empty()) {
     pending_to_tcp_.push_back(std::string(seed_quic_to_tcp_data));
   }
-  ResetIdleAlarm();
+  NoteActivity();
   // Pick up anything the stream's sequencer is already holding from before
   // this tunnel existed as its delegate: on the server side in particular,
   // QuictunServerConnection reads only up through the --key preamble itself
@@ -234,7 +270,7 @@ void QuictunTunnel::ReceiveComplete(
     MaybeFinalizeClose();
     return;
   }
-  ResetIdleAlarm();
+  NoteActivity();
   stream_->WriteToStream(data->AsStringView(), /*fin=*/false);
   // Strict backpressure -- see OnStreamCanWriteMore()'s comment: don't read
   // more until this write has fully drained, so a *later* EOF can never
@@ -268,7 +304,7 @@ void QuictunTunnel::FillQueueFromStream() {
     size_t bytes_read =
         stream_->Read(absl::MakeSpan(&buffer[0], buffer.size()), &fin);
     if (bytes_read > 0) {
-      ResetIdleAlarm();
+      NoteActivity();
       buffer.resize(bytes_read);
       pending_to_tcp_.push_back(std::move(buffer));
     }
@@ -410,47 +446,21 @@ void QuictunTunnel::MaybeFinalizeClose() {
 
 void QuictunTunnel::OnFlushCloseAlarm() { MaybeFinalizeClose(); }
 
-void QuictunTunnel::ResetIdleAlarm() {
+void QuictunTunnel::NoteActivity() {
+  // Load-bearing, and for a different reason than it used to be. It once
+  // only avoided pointlessly re-arming a timer on a tunnel that was already
+  // done; now it is what keeps a late callback -- one that lands after
+  // Close() has already unlinked this tunnel -- from splicing an
+  // about-to-be-destroyed object back into idle_tracker_, where the next
+  // sweep would find a dangling pointer. Nothing else guards that: unlike
+  // "destroyed without Close()", which shows up immediately as a leaked fd
+  // (~QuictunAcceptedTcpSocket() asserts on exactly that), a re-linked
+  // closed tunnel leaves the fd accounting perfectly clean.
   if (closed_) {
     return;
   }
-  if (!idle_alarm_) {
-    idle_alarm_.reset(stream_->connection()->alarm_factory()->CreateAlarm(
-        new IdleAlarmDelegate(this)));
-  }
-  // Deliberately NOT a zero granularity, which would re-arm on every single
-  // call -- i.e. once per kReadSize chunk in each direction. That matters
-  // because this alarm comes straight from the event loop's alarm factory
-  // rather than through QuicConnection's QuicAlarmMultiplexer, and the
-  // factory backing QuicPollEventLoop (QuicQueueAlarmFactory) cancels
-  // lazily: CancelImpl() only expires a weak_ptr, leaving the queue entry
-  // itself in place until its own -- now abandoned -- deadline comes due.
-  // So each re-arm leaves one entry behind for a full idle_timeout_, and
-  // each such entry also drags the event loop awake at that deadline just
-  // to discard it (QuicPollEventLoop::ComputePollTimeout() reads the queue
-  // head without checking whether it is still live). At a 60s timeout that
-  // self-limits; at a 24h one it would not. Scaling the granularity to the
-  // timeout caps both costs at a fixed ~64 per tunnel regardless of
-  // throughput or of how large idle_timeout_ is, at the cost of firing up
-  // to that granularity early -- 22 minutes out of 24 hours,
-  // which for a silence timeout is noise. This is the same trade
-  // QuicAlarmMultiplexer makes for the alarms it owns (see its
-  // underlying_alarm_granularity_, quic_multiplexer_alarm_granularity_us).
-  idle_alarm_->Update(
-      stream_->connection()->clock()->ApproximateNow() + idle_timeout_,
-      QuicTime::Delta::FromMicroseconds(idle_timeout_.ToMicroseconds() / 64));
-}
-
-void QuictunTunnel::OnIdleAlarm() {
-  if (closed_) {
-    return;
-  }
-  // Nothing productive has happened on either leg for idle_timeout_ --
-  // most likely socket_ is connected to a target/peer that itself expects
-  // *us* to send the next byte, which (since the tunnel got here) will
-  // never come. Give up rather than hold the fd pair open forever; see
-  // idle_alarm_'s comment.
-  Close("idle timeout", /*reset_stream=*/true);
+  last_activity_ = stream_->connection()->clock()->ApproximateNow();
+  idle_tracker_->Touch(this);
 }
 
 void QuictunTunnel::Close(absl::string_view reason, bool reset_stream) {
@@ -459,9 +469,11 @@ void QuictunTunnel::Close(absl::string_view reason, bool reset_stream) {
   if (flush_close_alarm_) {
     flush_close_alarm_->Cancel();
   }
-  if (idle_alarm_) {
-    idle_alarm_->Cancel();
-  }
+  // Before anything below can reenter -- on_closed_() in particular hands
+  // this tunnel to its owner, which may close siblings that reach back in
+  // here. See idle_tracker_'s comment: this is the one and only unlink
+  // site.
+  idle_tracker_->Remove(this);
   QUICHE_LOG(INFO) << "Closing quictun tunnel: " << reason
                    << ", reset_stream=" << reset_stream;
   // Tell the sequencer to give up on any not-yet-Read() bytes it's still
