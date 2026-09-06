@@ -368,6 +368,20 @@ class QUICHE_EXPORT QuictunTunnel
   // for a day.
   QuicTime last_activity_ = QuicTime::Zero();
 
+  // Whether socket_ has already been disconnected, so Close() must not do it
+  // again. Mirrors StreamTcp::tcp_socket_disconnected /
+  // StreamTarget::target_socket_disconnected, which the owners use for the
+  // same "don't disconnect twice" question one level up.
+  //
+  // Set by Close() itself when it does the disconnecting, and -- the case
+  // that actually needs it -- by ConnectComplete() on a failed dial-out,
+  // where the socket has already closed itself before calling back. Nothing
+  // else self-closes: ReceiveComplete()/SendComplete() errors arrive with
+  // the socket still open (FinishOrRearmAsyncReceive()/
+  // FinishOrRearmAsyncSend() never Close()), so those still disconnect
+  // normally.
+  bool socket_disconnected_ = false;
+
   // Where this tunnel registers its activity. Linked by the first
   // NoteActivity() (from Start()), unlinked by Close() -- which is the ONLY
   // unlink site, not a best-effort one: between Close() and this object's

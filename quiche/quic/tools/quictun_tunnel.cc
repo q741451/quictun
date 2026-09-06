@@ -234,6 +234,20 @@ void QuictunTunnel::ConnectComplete(absl::Status status) {
     return;
   }
   if (!status.ok()) {
+    // A failed connect leaves the socket already closed: every path that
+    // gets here -- ConnectAsync()'s own Open() failure, DoInitialConnect()'s
+    // synchronous failure, GetConnectResult()'s asynchronous one -- either
+    // never opened a descriptor or Close()d it and reset connect_status_ to
+    // kNotConnected before calling back (see
+    // event_loop_connecting_client_socket.cc). Disconnect()ing it now would
+    // trip that class's own two entry DCHECKs, which is a real crash on a
+    // debug build every time a --target refuses a connection, and a bogus
+    // close(-1) plus a logged warning on a release one. QUICHE's own
+    // consumers dodge this by never routing a failed connect into their
+    // shared teardown at all (ConnectTunnel terminates the stream and
+    // returns; masque_tcp_client_bin just logs and stops), which isn't an
+    // option here -- everything else Close() does is still needed.
+    socket_disconnected_ = true;
     Close("target connect failed", /*reset_stream=*/true);
     return;
   }
@@ -510,8 +524,11 @@ void QuictunTunnel::Close(absl::string_view reason, bool reset_stream) {
   // target dial-out (e.g. the QUIC stream itself resetting) before that
   // dial-out was ever wired in. HasSocket() lets the owner's on_closed
   // callback know it still needs to disconnect its own copy in that case --
-  // see that callback's comment.
-  if (socket_ != nullptr) {
+  // see that callback's comment. Same guarded shape as the owner's own
+  // QuictunServerConnection::DisconnectStreamTarget(), one level down; see
+  // socket_disconnected_ for the case that actually needs it.
+  if (socket_ != nullptr && !socket_disconnected_) {
+    socket_disconnected_ = true;
     socket_->Disconnect();
   }
 
