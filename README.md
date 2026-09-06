@@ -65,20 +65,20 @@ git hash or re-read a shell history:
 ==================================================================
 quictun_server  (built 2026/08/06 20:14:23)
 ------------------------------------------------------------------
-  listen                                 = [::]:4433
-  target                                 = 127.0.0.1:12948
-  max_new_connections_per_event_loop     = 100
-  max_concurrent_connections             = 5000
-  key                                    = <redacted, 20 bytes>
-  congestion_control                     = bbr2
-  so_txtime                              = false
-  transparent                            = false
-  idle_timeout_seconds                   = 60
-  tcp_idle_timeout_seconds               = 86400
-  initial_stream_flow_control_window_kb  = 512
-  initial_session_flow_control_window_kb = 512
-  udp_socket_buffer_kb                   = 1024
-  max_streams_per_connection             = 100
+  listen                                  = [::]:4433
+  target                                  = 127.0.0.1:12948
+  max_new_connections_per_event_loop      = 100
+  max_concurrent_connections              = 5000
+  key                                     = <redacted, 20 bytes>
+  congestion_control                      = bbr2
+  so_txtime                               = false
+  transparent                             = false
+  idle_timeout_seconds                    = 60
+  tcp_idle_timeout_seconds                = 86400
+  initial_stream_flow_control_window_kb   = 512
+  initial_session_flow_control_window_kb  = 512
+  udp_socket_buffer_kb                    = 1024
+  max_streams_per_connection              = 100
 ==================================================================
 ```
 
@@ -96,7 +96,7 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | `--transparent` | `false` | Transparent-proxy mode (Linux only). `quictun_client` captures each accepted TCP connection's original destination via `SO_ORIGINAL_DST` (populated by an external iptables/nftables `REDIRECT` rule the operator sets up separately -- quictun itself never touches netfilter config) instead of always tunneling to one fixed address; `quictun_server` connects out to that per-stream destination instead of `--target`. Mutually exclusive with `--target` on the server -- setting both is a startup error, since the two modes speak incompatible wire formats (`--target`'s existing mode has zero framing after the `--key` preamble; transparent mode prepends an address header, IPv4/IPv6 only, no domain names). Both `quictun_client` and `quictun_server` must be started with the same value, the same as `--key`. |
 | `--idle_timeout_seconds` | `60` | QUIC connection idle timeout, in seconds: how long a connection may go without receiving anything from the peer before it is torn down. Keepalive PINGs keep resetting it while the peer is alive, so in practice it only fires once the peer really is gone -- it bounds how long a vanished peer's connection (its UDP socket, its session state, and every tunnel's target-side TCP socket) is held before being reclaimed, so keep it short. Does not govern how long a quiet tunnel stays open -- that is `--tcp_idle_timeout_seconds`. |
 | `--tcp_idle_timeout_seconds` | `86400` | Per-tunnel idle timeout, in seconds: one tunnel with no real data in either direction for this long is closed, leaving the QUIC connection carrying it -- and every other tunnel on it -- untouched. Independent of `--idle_timeout_seconds`, which reclaims connections whose peer has vanished; this is policy for a tunnel that is merely quiet, so the default matches shadowsocks-libev's own `MIN_TCP_IDLE_TIMEOUT` (24h) and never cuts a live but idle connection. Set it the same on both ends. |
-| `--initial_stream_flow_control_window_kb` | `512` | Initial per-stream flow-control window advertised to the peer, in KiB. Independent of `--initial_session_flow_control_window_kb` -- since each connection carries exactly one stream, the smaller of the two is what actually caps throughput in practice, so raise both together for high-bandwidth-delay-product paths. |
+| `--initial_stream_flow_control_window_kb` | `512` | Initial per-stream flow-control window advertised to the peer, in KiB. Independent of `--initial_session_flow_control_window_kb` -- with the client's `--quic_conn=0` (default, one stream per connection) the smaller of the two is what actually caps throughput in practice; with the client pooling multiple streams onto one connection, the session window also caps their combined total. Raise both together for high-bandwidth-delay-product paths. |
 | `--initial_session_flow_control_window_kb` | `512` | Initial per-session flow-control window advertised to the peer, in KiB. See `--initial_stream_flow_control_window_kb` above. |
 | `--udp_socket_buffer_kb` | `1024` | `SO_RCVBUF`/`SO_SNDBUF` size set on every UDP socket quictun creates (one per QUIC connection), in KiB; applies to both the receive and send buffer. Too small a value under load can cause the kernel to drop packets before quictun ever sees them, which looks like network loss to the congestion controller rather than a local buffering problem -- if `/proc/net/snmp`'s `Udp: RcvbufErrors` column (or `nstat -az UdpRcvbufErrors`) climbs during a transfer, raise this. |
 | `--startup_bandwidth_kbps` | `0` | If > 0, bootstrap every new connection's congestion controller with this assumed starting bandwidth (Kbps, i.e. kilobits/sec -- *not* KB/s or bytes) instead of ramping up from scratch. Only affects the controller while still in its startup/slow-start phase; has no effect once a connection reaches steady state. `0` disables this (normal cold-start ramp-up). Pairs with `--startup_rtt_ms`; set both sides (client and server) to the same values, since each governs only that endpoint's own send direction. |
