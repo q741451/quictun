@@ -74,10 +74,10 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "carrying it -- and every other tunnel on it -- untouched. Independent "
     "of --idle_timeout_seconds, which reclaims connections whose peer has "
     "vanished; this is application policy for a tunnel that is merely quiet, "
-    "so the default matches shadowsocks-libev's own MIN_TCP_IDLE_TIMEOUT "
-    "(24h) -- lax enough never to cut a live but idle connection. Both "
-    "quictun_client and quictun_server apply their own copy of this to the "
-    "tunnels they hold, so set it the same on both ends.");
+    "so the default (24h) is deliberately lax enough never to cut a "
+    "connection that is simply idle rather than dead. Both quictun_client "
+    "and quictun_server apply their own copy of this to the tunnels they "
+    "hold, so set it the same on both ends.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, initial_stream_flow_control_window_kb, 512,
