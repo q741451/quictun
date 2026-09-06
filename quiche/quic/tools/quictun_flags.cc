@@ -58,7 +58,26 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, idle_timeout_seconds, 60,
-    "QUIC connection idle timeout, in seconds.");
+    "QUIC connection idle timeout, in seconds: how long a connection may go "
+    "without receiving anything from the peer before it is torn down. While "
+    "the peer is alive the client's own 15s keepalive PINGs keep resetting "
+    "this, so in practice it only fires once the peer really is gone -- it "
+    "is what bounds how long a vanished peer's connection (its UDP socket, "
+    "its session state, and every tunnel's target-side TCP socket) is held "
+    "before being reclaimed, so keep it short. Does NOT govern how long a "
+    "quiet tunnel may stay open -- that is --tcp_idle_timeout_seconds.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, tcp_idle_timeout_seconds, 86400,
+    "Per-tunnel idle timeout, in seconds: one tunnel with no real data in "
+    "either direction for this long is closed, leaving the QUIC connection "
+    "carrying it -- and every other tunnel on it -- untouched. Independent "
+    "of --idle_timeout_seconds, which reclaims connections whose peer has "
+    "vanished; this is application policy for a tunnel that is merely quiet, "
+    "so the default matches shadowsocks-libev's own MIN_TCP_IDLE_TIMEOUT "
+    "(24h) -- lax enough never to cut a live but idle connection. Both "
+    "quictun_client and quictun_server apply their own copy of this to the "
+    "tunnels they hold, so set it the same on both ends.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, initial_stream_flow_control_window_kb, 512,
@@ -133,6 +152,8 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
   options.transparent = quiche::GetQuicheCommandLineFlag(FLAGS_transparent);
   options.idle_timeout = QuicTime::Delta::FromSeconds(
       quiche::GetQuicheCommandLineFlag(FLAGS_idle_timeout_seconds));
+  options.tcp_idle_timeout = QuicTime::Delta::FromSeconds(
+      quiche::GetQuicheCommandLineFlag(FLAGS_tcp_idle_timeout_seconds));
   options.initial_stream_flow_control_window_bytes =
       static_cast<QuicByteCount>(quiche::GetQuicheCommandLineFlag(
           FLAGS_initial_stream_flow_control_window_kb)) *
@@ -204,6 +225,8 @@ void PrintQuictunStartupBanner(
   lines.push_back({"transparent", options.transparent ? "true" : "false"});
   lines.push_back({"idle_timeout_seconds",
                     absl::StrCat(options.idle_timeout.ToSeconds())});
+  lines.push_back({"tcp_idle_timeout_seconds",
+                    absl::StrCat(options.tcp_idle_timeout.ToSeconds())});
   lines.push_back(
       {"initial_stream_flow_control_window_kb",
        absl::StrCat(options.initial_stream_flow_control_window_bytes /

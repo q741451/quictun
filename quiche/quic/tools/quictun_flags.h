@@ -65,7 +65,24 @@ struct QuictunTuningOptions {
   // path. Falls back silently if the kernel doesn't support it.
   bool so_txtime = false;
 
+  // QUIC's own max_idle_timeout: how long a connection may go without
+  // RECEIVING anything from the peer before it is torn down. This is the
+  // dead-peer reaper -- while the peer is alive the client's 15s keepalive
+  // PINGs keep resetting it, so in practice it only fires once the peer
+  // really is gone, taking the connection and every tunnel riding on it
+  // (each one's target-side TCP socket included) down with it. Deliberately
+  // short for that reason. Not to be confused with tcp_idle_timeout below,
+  // which is a different question about a different object.
   QuicTime::Delta idle_timeout = QuicTime::Delta::FromSeconds(60);
+
+  // How long a single tunnel may go with no real data in EITHER direction
+  // before that one tunnel -- not the connection carrying it -- is closed.
+  // See QuictunTunnel::idle_alarm_. Application policy rather than a
+  // resource reaper: a peer that has genuinely vanished is caught by
+  // idle_timeout above long before this can matter, so this one is free to
+  // be as lax as shadowsocks-libev's own MIN_TCP_IDLE_TIMEOUT (24h), i.e.
+  // lax enough never to cut a connection that is merely quiet.
+  QuicTime::Delta tcp_idle_timeout = QuicTime::Delta::FromSeconds(24 * 60 * 60);
 
   // Initial per-stream flow-control window. With --quic_conn=0 (default,
   // one stream per connection) the smaller of this and

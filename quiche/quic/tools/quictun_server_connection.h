@@ -95,7 +95,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
       std::optional<QuicSocketAddress> target_address, bool transparent,
       QuicConnectionId server_connection_id, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
-      QuicByteCount udp_socket_buffer_bytes,
+      QuicByteCount udp_socket_buffer_bytes, QuicTime::Delta tcp_idle_timeout,
       const QuicReceivedPacket& first_packet,
       std::function<void(QuictunServerConnection*)> on_closed);
 
@@ -186,7 +186,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
       std::optional<QuicSocketAddress> target_address, bool transparent,
       QuicConnectionId server_connection_id, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
-      const QuicReceivedPacket& first_packet,
+      QuicTime::Delta tcp_idle_timeout, const QuicReceivedPacket& first_packet,
       std::function<void(QuictunServerConnection*)> on_closed);
 
   // SetStreamCreatedCallback() target: starts the new stream's
@@ -274,10 +274,11 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   // exactly, including the same "already set, don't re-arm" check.
   std::unique_ptr<QuicAlarm> stream_garbage_alarm_;
 
-  // Passed to each stream's QuictunTunnel (see its own idle_alarm_ comment)
-  // -- read from `config` at construction time since it isn't otherwise
-  // available where StartTunnelForStream() constructs each tunnel.
-  const QuicTime::Delta idle_timeout_;
+  // --tcp_idle_timeout_seconds, passed to each stream's QuictunTunnel (see
+  // its own idle_alarm_ comment). Latched here at construction since it
+  // isn't otherwise available where StartTunnelForStream() constructs each
+  // tunnel. Nothing to do with QUIC's own idle timeout, which is in `config`.
+  const QuicTime::Delta tcp_idle_timeout_;
 
   std::function<void(QuictunServerConnection*)> on_closed_;
   bool closed_ = false;

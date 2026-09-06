@@ -287,7 +287,7 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
           target_address_, options_.transparent,
           QuicConnectionId(destination_connection_id),
           options_.psk, congestion_control_, options_.so_txtime,
-          options_.udp_socket_buffer_bytes, packet,
+          options_.udp_socket_buffer_bytes, options_.tcp_idle_timeout, packet,
           [this](QuictunServerConnection* c) { RemoveConnection(c); });
   if (connection == nullptr) {
     return;

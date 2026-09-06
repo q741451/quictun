@@ -419,9 +419,27 @@ void QuictunTunnel::ResetIdleAlarm() {
     idle_alarm_.reset(stream_->connection()->alarm_factory()->CreateAlarm(
         new IdleAlarmDelegate(this)));
   }
+  // Deliberately NOT a zero granularity, which would re-arm on every single
+  // call -- i.e. once per kReadSize chunk in each direction. That matters
+  // because this alarm comes straight from the event loop's alarm factory
+  // rather than through QuicConnection's QuicAlarmMultiplexer, and the
+  // factory backing QuicPollEventLoop (QuicQueueAlarmFactory) cancels
+  // lazily: CancelImpl() only expires a weak_ptr, leaving the queue entry
+  // itself in place until its own -- now abandoned -- deadline comes due.
+  // So each re-arm leaves one entry behind for a full idle_timeout_, and
+  // each such entry also drags the event loop awake at that deadline just
+  // to discard it (QuicPollEventLoop::ComputePollTimeout() reads the queue
+  // head without checking whether it is still live). At a 60s timeout that
+  // self-limits; at shadowsocks-libev's 24h it would not. Scaling the
+  // granularity to the timeout caps both costs at a fixed ~64 per tunnel
+  // regardless of throughput or of how large idle_timeout_ is, at the cost
+  // of firing up to that granularity early -- 22 minutes out of 24 hours,
+  // which for a silence timeout is noise. This is the same trade
+  // QuicAlarmMultiplexer makes for the alarms it owns (see its
+  // underlying_alarm_granularity_, quic_multiplexer_alarm_granularity_us).
   idle_alarm_->Update(
       stream_->connection()->clock()->ApproximateNow() + idle_timeout_,
-      QuicTime::Delta::Zero());
+      QuicTime::Delta::FromMicroseconds(idle_timeout_.ToMicroseconds() / 64));
 }
 
 void QuictunTunnel::OnIdleAlarm() {

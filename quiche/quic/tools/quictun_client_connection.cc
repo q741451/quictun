@@ -55,6 +55,7 @@ std::unique_ptr<QuictunClientConnection> QuictunClientConnection::Create(
     QuicCryptoClientConfig* crypto_config, const std::string& psk,
     CongestionControlType congestion_control, bool so_txtime_enabled,
     QuicByteCount udp_socket_buffer_bytes, bool poolable, bool transparent,
+    QuicTime::Delta tcp_idle_timeout,
     std::function<void(QuictunClientConnection*)> on_closed) {
   absl::StatusOr<OwnedSocketFd> fd =
       CreateQuicUdpSocket(remote_address, udp_socket_buffer_bytes);
@@ -85,7 +86,7 @@ std::unique_ptr<QuictunClientConnection> QuictunClientConnection::Create(
       event_loop, std::move(udp_fd), *self_address, remote_address, helper,
       alarm_factory, connection_id_generator, buffer_allocator, config,
       server_id, crypto_config, psk, congestion_control, so_txtime_enabled,
-      poolable, transparent, std::move(on_closed)));
+      poolable, transparent, tcp_idle_timeout, std::move(on_closed)));
 }
 
 QuictunClientConnection::QuictunClientConnection(
@@ -98,6 +99,7 @@ QuictunClientConnection::QuictunClientConnection(
     const QuicServerId& server_id, QuicCryptoClientConfig* crypto_config,
     const std::string& psk, CongestionControlType congestion_control,
     bool so_txtime_enabled, bool poolable, bool transparent,
+    QuicTime::Delta tcp_idle_timeout,
     std::function<void(QuictunClientConnection*)> on_closed)
     : event_loop_(event_loop),
       udp_fd_(std::move(udp_fd)),
@@ -105,7 +107,7 @@ QuictunClientConnection::QuictunClientConnection(
       psk_(psk),
       transparent_(transparent),
       buffer_allocator_(buffer_allocator),
-      idle_timeout_(config.IdleNetworkTimeout()),
+      tcp_idle_timeout_(tcp_idle_timeout),
       on_closed_(std::move(on_closed)) {
   std::unique_ptr<QuicPacketWriter> writer =
       MakeQuictunPacketWriter(*udp_fd_, so_txtime_enabled, event_loop);
@@ -263,7 +265,7 @@ void QuictunClientConnection::StartTunnel(QuictunStream* stream,
       pending.fd, pending.peer_address, event_loop_, buffer_allocator_,
       /*async_visitor=*/nullptr);
   entry.tunnel = std::make_unique<QuictunTunnel>(
-      stream, entry.tcp_socket.get(), idle_timeout_, [this, id] {
+      stream, entry.tcp_socket.get(), tcp_idle_timeout_, [this, id] {
         // This stream's tunnel closed itself -- scoped to just this one
         // TCP, same reasoning as the server-side mirror of this callback
         // (QuictunServerConnection::StartTunnelForStream()): other streams
