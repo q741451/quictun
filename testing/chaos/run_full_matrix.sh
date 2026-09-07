@@ -168,6 +168,14 @@ echo "=== writeblock_close_test.py ===" | tee -a "$RESULTS"
 python3 -u writeblock_close_test.py >> "$RESULTS" 2>&1
 echo "exit=$? for writeblock_close_test.py" | tee -a "$RESULTS"
 
+# A TCP socket sitting registered with nothing armed when its peer RSTs:
+# poll(2) reports POLLHUP regardless of the requested events, and the event
+# loop can neither map nor clear it. Asserts on server CPU, since the loop
+# keeps servicing events perfectly well while spinning.
+echo "=== pollhup_spin_test.py ===" | tee -a "$RESULTS"
+python3 -u pollhup_spin_test.py >> "$RESULTS" 2>&1
+echo "exit=$? for pollhup_spin_test.py" | tee -a "$RESULTS"
+
 # --target refusing the TCP connect (ECONNREFUSED) -- another coverage gap
 # (QuictunServerConnection::ConnectComplete()'s failure branch), matching
 # the ordinary operational case of the backend service being down.

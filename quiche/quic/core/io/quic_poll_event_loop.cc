@@ -184,6 +184,19 @@ void QuicPollEventLoop::ProcessIoEvents(QuicTime start_time,
   auto pollfds = std::make_unique<pollfd[]>(registration_count);
   size_t i = 0;
   for (auto& [fd, registration] : registrations_) {
+    // Nothing armed means nothing can be delivered: poll(2) reports
+    // POLLERR, POLLHUP and POLLNVAL whether or not they were requested,
+    // but DispatchIoEvent() masks away whatever the registration did not
+    // ask for and returns having called nothing -- yet poll() has already
+    // returned non-zero, so the loop does not sleep. POLLHUP makes that
+    // permanent: GetEventMask() has no mapping for it at all, and only
+    // closing the socket clears it, so one hung-up socket pins a core for
+    // as long as it stays open. Idle-but-registered is the ordinary state
+    // of a socket here (see EventLoopConnectingClientSocket::Open()).
+    if (registration->events == 0 &&
+        registration->artificially_notify_at_next_iteration == 0) {
+      continue;
+    }
     QUICHE_CHECK_LT(
         i, registration_count);  // Crash instead of out-of-bounds access.
     pollfds[i].fd = fd;
@@ -191,10 +204,11 @@ void QuicPollEventLoop::ProcessIoEvents(QuicTime start_time,
     pollfds[i].revents = 0;
     ++i;
   }
+  const size_t polled_count = i;
 
   // Actually run poll(2).
   int poll_result =
-      PollWithRetries(absl::Span<pollfd>(pollfds.get(), registration_count),
+      PollWithRetries(absl::Span<pollfd>(pollfds.get(), polled_count),
                       start_time, timeout);
   if (poll_result == 0 && !has_artificial_events_pending_) {
     return;
@@ -203,8 +217,8 @@ void QuicPollEventLoop::ProcessIoEvents(QuicTime start_time,
   // Prepare the list of all callbacks to be called, while resetting all events,
   // since we're operating in the level-triggered mode.
   std::vector<ReadyListEntry> ready_list;
-  ready_list.reserve(registration_count);
-  for (i = 0; i < registration_count; i++) {
+  ready_list.reserve(polled_count);
+  for (i = 0; i < polled_count; i++) {
     DispatchIoEvent(ready_list, pollfds[i].fd, pollfds[i].revents);
   }
   has_artificial_events_pending_ = false;
