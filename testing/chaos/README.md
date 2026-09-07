@@ -20,6 +20,7 @@ bazel build -c opt //quiche:quictun_client //quiche:quictun_server
 | `pool_soak_test.py` | Sustained-duration fd/RSS leak trend check. |
 | `max_streams_test.py` | Pooling vs. QUIC's own real max_streams-per-connection ceiling. |
 | `writeblock_fault_test.py` | Fault injection for the write-blocked-forever bug. Needs `-DQUICTUN_TEST_BUILD`. |
+| `writeblock_close_test.py` | A connection closing while still write blocked. Needs `-DQUICTUN_TEST_BUILD`. |
 | `target_unreachable_test.py` | `--target` refusing the TCP connect. |
 | `dualstack_ipv6_test.py` | IPv6 dual-stack `--listen=[::]` reached by an IPv4 peer. |
 

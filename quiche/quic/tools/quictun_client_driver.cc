@@ -238,7 +238,9 @@ QuictunClientDriver::CreateNewConnection(size_t socket_index) {
           [this, socket_index](QuicBlockedWriterInterface* w) {
             OnWriteBlocked(w, socket_index);
           },
-          [this](QuictunClientConnection* c) { RemoveConnection(c); });
+          [this, socket_index](QuictunClientConnection* c) {
+            RemoveConnection(c, socket_index);
+          });
   if (connection == nullptr) {
     return nullptr;
   }
@@ -303,7 +305,15 @@ void QuictunClientDriver::AcceptLoop() {
   }
 }
 
-void QuictunClientDriver::RemoveConnection(QuictunClientConnection* connection) {
+void QuictunClientDriver::RemoveConnection(QuictunClientConnection* connection,
+                                          size_t socket_index) {
+  // Mirrors QuicDispatcher::OnConnectionClosed(): the blocked-writer list
+  // holds a raw QuicBlockedWriterInterface*, and QuicConnection's own
+  // destructor does not unregister itself, so a connection still listed
+  // when CollectGarbage() destroys it would leave a dangling entry for the
+  // next writable event to call OnBlockedWriterCanWrite() on.
+  udp_sockets_[socket_index]->write_blocked_list.Remove(
+      *connection->connection());
   // Drop the routing entry immediately: from here on any straggler packet
   // for it (a late retransmission, the peer still writing) must be dropped
   // rather than delivered to a connection queued for destruction.

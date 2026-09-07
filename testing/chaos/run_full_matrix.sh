@@ -161,6 +161,13 @@ echo "=== writeblock_fault_test.py --side=both --so-txtime ===" | tee -a "$RESUL
 python3 -u writeblock_fault_test.py --side=both --so-txtime >> "$RESULTS" 2>&1
 echo "exit=$? for writeblock_fault_test.py --side=both --so-txtime" | tee -a "$RESULTS"
 
+# A connection closing while it is still write blocked -- the blocked-writer
+# list holds a raw pointer the connection does not unregister itself. See
+# writeblock_close_test.py's own top comment for what it can and cannot show.
+echo "=== writeblock_close_test.py ===" | tee -a "$RESULTS"
+python3 -u writeblock_close_test.py >> "$RESULTS" 2>&1
+echo "exit=$? for writeblock_close_test.py" | tee -a "$RESULTS"
+
 # --target refusing the TCP connect (ECONNREFUSED) -- another coverage gap
 # (QuictunServerConnection::ConnectComplete()'s failure branch), matching
 # the ordinary operational case of the backend service being down.

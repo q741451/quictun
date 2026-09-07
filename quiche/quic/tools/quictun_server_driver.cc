@@ -295,6 +295,8 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
 }
 
 void QuictunServerDriver::RemoveConnection(QuictunServerConnection* connection) {
+  // See QuictunClientDriver::RemoveConnection() -- same reason, same fix.
+  write_blocked_list_.Remove(*connection->connection());
   pending_removal_.push_back(connection->connection_id());
 }
 

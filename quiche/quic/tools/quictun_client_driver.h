@@ -91,7 +91,8 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener,
 
  private:
   void AcceptLoop();
-  void RemoveConnection(QuictunClientConnection* connection);
+  void RemoveConnection(QuictunClientConnection* connection,
+                        size_t socket_index);
 
   // Creates a brand-new QuictunClientConnection over udp_sockets_[socket],
   // taking (shared) ownership via connections_ and returning a second

@@ -165,9 +165,18 @@ class RearmOnBlockPacketWriter : public QuicPacketWriter {
 // consistency DCHECKs instead of exercising the rearm path cleanly.
 class FaultInjectingPacketWriter : public QuicPacketWriter {
  public:
+  // `repeats` is how many times the block may fire again after the first
+  // (QUICTUN_INJECT_WRITE_BLOCK_REPEAT, default 0 = fire once, unchanged).
+  // A block otherwise lasts a single event-loop iteration, since the real
+  // socket underneath is never actually full; repeating it keeps a
+  // connection sitting in its driver's blocked-writer list across many
+  // iterations, which is what a genuinely congested uplink would do and
+  // what loopback cannot produce on its own.
   FaultInjectingPacketWriter(std::unique_ptr<QuicPacketWriter> wrapped,
-                             int trigger_after_n_writes)
-      : wrapped_(std::move(wrapped)), remaining_(trigger_after_n_writes) {}
+                             int trigger_after_n_writes, int repeats)
+      : wrapped_(std::move(wrapped)),
+        remaining_(trigger_after_n_writes),
+        repeats_remaining_(repeats) {}
 
   WriteResult WritePacket(const char* buffer, size_t buf_len,
                           const QuicIpAddress& self_address,
@@ -228,7 +237,8 @@ class FaultInjectingPacketWriter : public QuicPacketWriter {
   // i.e. leaving it alone once already consumed) every other time.
   bool MaybeInjectBlock() {
     if (remaining_ == 0) {
-      remaining_ = -1;  // Already fired -- stay armed-off, fire only once.
+      // Re-arm while a repeat budget is left, otherwise stay armed-off.
+      remaining_ = repeats_remaining_ > 0 ? (--repeats_remaining_, 0) : -1;
       blocked_ = true;
       return true;
     }
@@ -240,6 +250,7 @@ class FaultInjectingPacketWriter : public QuicPacketWriter {
 
   const std::unique_ptr<QuicPacketWriter> wrapped_;
   int remaining_;
+  int repeats_remaining_;
   bool blocked_ = false;
 };
 #endif  // QUICTUN_TEST_BUILD
@@ -262,8 +273,10 @@ std::unique_ptr<QuicPacketWriter> MakeQuictunPacketWriter(
   // Test-only, see FaultInjectingPacketWriter's own comment -- normal
   // (non-QUICTUN_TEST_BUILD) builds don't even contain this getenv() call.
   if (const char* trigger_after = std::getenv("QUICTUN_INJECT_WRITE_BLOCK_AFTER")) {
+    const char* repeats = std::getenv("QUICTUN_INJECT_WRITE_BLOCK_REPEAT");
     writer = std::make_unique<FaultInjectingPacketWriter>(
-        std::move(writer), std::atoi(trigger_after));
+        std::move(writer), std::atoi(trigger_after),
+        repeats != nullptr ? std::atoi(repeats) : 0);
   }
 #endif  // QUICTUN_TEST_BUILD
   return std::make_unique<RearmOnBlockPacketWriter>(std::move(writer), fd,
