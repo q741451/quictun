@@ -81,6 +81,33 @@ QuictunClientDriver::QuictunClientDriver(QuicEventLoop* event_loop,
 }
 
 absl::Status QuictunClientDriver::Start() {
+  {
+    absl::StatusOr<OwnedSocketFd> ufd =
+        CreateQuicUdpSocket(remote_address_, options_.udp_socket_buffer_bytes);
+    if (!ufd.ok()) {
+      return ufd.status();
+    }
+    udp_fd_ = *std::move(ufd);
+    absl::Status cs = socket_api::Connect(*udp_fd_, remote_address_);
+    if (!cs.ok()) {
+      return cs;
+    }
+    absl::StatusOr<QuicSocketAddress> self =
+        socket_api::GetSocketAddress(*udp_fd_);
+    if (!self.ok()) {
+      return self.status();
+    }
+    udp_self_address_ = *self;
+    shared_writer_ =
+        MakeQuictunPacketWriter(*udp_fd_, options_.so_txtime, event_loop_);
+    if (!event_loop_->RegisterSocket(
+            *udp_fd_,
+            kSocketEventReadable | kSocketEventWritable | kSocketEventError,
+            this)) {
+      return absl::InternalError("failed to register the shared UDP socket");
+    }
+  }
+
   absl::StatusOr<SocketFd> fd = socket_api::CreateSocket(
       local_address_.host().address_family(), socket_api::SocketProtocol::kTcp,
       /*blocking=*/false);
@@ -131,8 +158,45 @@ absl::Status QuictunClientDriver::Start() {
 }
 
 void QuictunClientDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
-                                        SocketFd /*fd*/,
+                                        SocketFd fd,
                                         QuicSocketEventMask events) {
+  if (fd == *udp_fd_) {
+    if (events & kSocketEventError) {
+      // Consume it so a level-triggered loop does not spin on an unread
+      // POLLERR; deliberately not acted on (trivially spoofable, and on a
+      // shared socket not attributable to any one connection).
+      absl::Status error = socket_api::GetSocketError(*udp_fd_);
+      if (!error.ok()) {
+        QUIC_LOG_EVERY_N_SEC(INFO, 10)
+            << "quictun shared UDP socket reported an error (consumed): "
+            << error;
+      }
+      if (!event_loop_->SupportsEdgeTriggered()) {
+        event_loop_->RearmSocket(*udp_fd_, kSocketEventError);
+      }
+    }
+    if (events & kSocketEventWritable) {
+      // Mirrors QuicDispatcher::OnCanWrite().
+      shared_writer_->SetWritable();
+      write_blocked_list_.OnWriterUnblocked();
+      if (!write_blocked_list_.Empty() &&
+          !event_loop_->SupportsEdgeTriggered()) {
+        event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
+      }
+    }
+    if (events & kSocketEventReadable) {
+      bool more = true;
+      while (more) {
+        more = udp_reader_.ReadAndDispatchPackets(
+            *udp_fd_, udp_self_address_.port(), *event_loop_->GetClock(), this,
+            nullptr);
+      }
+      if (!event_loop_->SupportsEdgeTriggered()) {
+        event_loop_->RearmSocket(*udp_fd_, kSocketEventReadable);
+      }
+    }
+    return;
+  }
   if (events & kSocketEventReadable) {
     AcceptLoop();
     if (!event_loop_->SupportsEdgeTriggered()) {
@@ -143,18 +207,26 @@ void QuictunClientDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
 
 std::shared_ptr<QuictunClientConnection>
 QuictunClientDriver::CreateNewConnection() {
+  // Unique per connection and never reused: it is the routing key for every
+  // packet the server sends back over the shared socket (see ProcessPacket()).
+  const uint64_t raw_cid = next_client_cid_++;
+  QuicConnectionId cid(reinterpret_cast<const char*>(&raw_cid),
+                       sizeof(raw_cid));
   std::unique_ptr<QuictunClientConnection> connection =
       QuictunClientConnection::Create(
           event_loop_, &helper_, alarm_factory_.get(),
           connection_id_generator_, buffer_allocator_, config_template_,
           server_id_, remote_address_, crypto_config_.get(), options_.psk,
           congestion_control_, options_.so_txtime,
-          options_.udp_socket_buffer_bytes, /*poolable=*/options_.quic_conn > 0,
-          options_.transparent, &idle_tracker_,
+          /*poolable=*/options_.quic_conn > 0,
+          options_.transparent, udp_self_address_, shared_writer_.get(), cid,
+          &idle_tracker_,
+          [this](QuicBlockedWriterInterface* w) { OnWriteBlocked(w); },
           [this](QuictunClientConnection* c) { RemoveConnection(c); });
   if (connection == nullptr) {
     return nullptr;
   }
+  by_cid_.emplace(cid, connection.get());
   SetQuictunStartupBandwidthHint(connection->connection(),
                                  options_.startup_bandwidth_kbps,
                                  options_.startup_rtt_ms);
@@ -233,7 +305,52 @@ void QuictunClientDriver::AcceptLoop() {
 }
 
 void QuictunClientDriver::RemoveConnection(QuictunClientConnection* connection) {
+  // Drop the routing entry immediately: from here on any straggler packet
+  // for it (a late retransmission, the peer still writing) must be dropped
+  // rather than delivered to a connection queued for destruction.
+  absl::erase_if(by_cid_, [connection](const auto& e) {
+    return e.second == connection;
+  });
   pending_removal_.push_back(connection);
+}
+
+void QuictunClientDriver::OnWriteBlocked(
+    QuicBlockedWriterInterface* blocked_writer) {
+  write_blocked_list_.Add(*blocked_writer);
+  if (!event_loop_->SupportsEdgeTriggered()) {
+    event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
+  }
+}
+
+void QuictunClientDriver::ProcessPacket(
+    const QuicSocketAddress& /*self_address*/,
+    const QuicSocketAddress& peer_address, const QuicReceivedPacket& packet) {
+  PacketHeaderFormat format;
+  QuicLongHeaderType long_packet_type;
+  bool version_present;
+  bool has_length_prefix;
+  QuicVersionLabel version_label;
+  ParsedQuicVersion parsed_version = ParsedQuicVersion::Unsupported();
+  absl::string_view destination_connection_id;
+  absl::string_view source_connection_id;
+  std::optional<absl::string_view> retry_token;
+  std::string detailed_error;
+  if (QuicFramer::ParsePublicHeaderDispatcherShortHeaderLengthUnknown(
+          packet, &format, &long_packet_type, &version_present,
+          &has_length_prefix, &version_label, &parsed_version,
+          &destination_connection_id, &source_connection_id, &retry_token,
+          &detailed_error, connection_id_generator_) != QUIC_NO_ERROR) {
+    QUIC_DVLOG(1) << "Dropping unparseable packet from " << peer_address << ": "
+                  << detailed_error;
+    return;
+  }
+  auto it = by_cid_.find(QuicConnectionId(destination_connection_id));
+  if (it == by_cid_.end()) {
+    QUIC_DVLOG(1) << "Dropping packet for unknown connection ID "
+                  << QuicConnectionId(destination_connection_id);
+    return;
+  }
+  it->second->ProcessPacket(udp_self_address_, peer_address, packet);
 }
 
 void QuictunClientDriver::CollectGarbage() {

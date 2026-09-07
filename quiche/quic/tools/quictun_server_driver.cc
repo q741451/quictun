@@ -32,26 +32,6 @@ namespace quic {
 
 namespace {
 
-// QuicPacketReader normalizes v4-mapped IPv6 peer addresses (e.g.
-// "::ffff:127.0.0.1") down to plain IPv4 form for its own dispatch
-// bookkeeping (see quic_packet_reader.cc's Normalized() call) -- but
-// quictun's per-connection sockets are always the same address family as
-// the (dual-stack, IPv6) --listen socket, since they must bind to the
-// exact same local address for the SO_REUSEADDR/SO_REUSEPORT migration
-// trick to work. Handing a plain-IPv4 sockaddr to sendmsg() on an
-// AF_INET6-domain socket is a family mismatch the kernel rejects with
-// EINVAL, fatally breaking the connection's very first write. Undo the
-// normalization by re-mapping back to v4-in-v6 form whenever the listen
-// socket is IPv6, matching the socket domain the peer address will
-// actually be used with.
-QuicSocketAddress AdaptPeerAddressForListenSocket(
-    const QuicSocketAddress& listen_address, const QuicSocketAddress& peer_address) {
-  if (listen_address.host().address_family() == IpAddressFamily::IP_V6) {
-    return QuicSocketAddress(peer_address.host().DualStacked(), peer_address.port());
-  }
-  return peer_address;
-}
-
 // quictun's own authentication is the pre-shared key, which is checked as
 // an application-layer preamble on the stream -- this legacy QUIC
 // source-address-token secret only guards an older, unrelated
@@ -124,22 +104,30 @@ QuictunServerDriver::QuictunServerDriver(QuicEventLoop* event_loop,
 }
 
 absl::Status QuictunServerDriver::Start() {
-  absl::StatusOr<OwnedSocketFd> fd = CreateReusableUdpSocket(
+  absl::StatusOr<OwnedSocketFd> fd = CreateListenUdpSocket(
       listen_address_, options_.udp_socket_buffer_bytes);
   if (!fd.ok()) {
     return fd.status();
   }
-  rendezvous_fd_ = *std::move(fd);
+  listen_fd_ = *std::move(fd);
 
-  absl::Status status = socket_api::Bind(*rendezvous_fd_, listen_address_);
+  absl::Status status = socket_api::Bind(*listen_fd_, listen_address_);
   if (!status.ok()) {
     return status;
   }
 
+  // One writer over the one listen socket, shared by every connection --
+  // see QuictunServerConnection's ctor. Created here rather than per
+  // connection so its GSO batch buffer (64 KiB) and the socket's own
+  // kernel buffers exist once per process instead of once per peer.
+  shared_writer_ = MakeQuictunPacketWriter(*listen_fd_, options_.so_txtime,
+                                           event_loop_);
+
   bool registered = event_loop_->RegisterSocket(
-      *rendezvous_fd_, kSocketEventReadable, this);
+      *listen_fd_,
+      kSocketEventReadable | kSocketEventWritable | kSocketEventError, this);
   if (!registered) {
-    return absl::InternalError("Failed to register rendezvous UDP socket");
+    return absl::InternalError("Failed to register listen UDP socket");
   }
 
   // std::cerr, not QUIC_LOG(INFO): see the comment on
@@ -158,25 +146,54 @@ absl::Status QuictunServerDriver::Start() {
 void QuictunServerDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
                                         SocketFd /*fd*/,
                                         QuicSocketEventMask events) {
+  if (events & kSocketEventError) {
+    // Consume it (an ICMP unreachable, typically) so the level-triggered
+    // loop does not spin on an unread POLLERR, but do not act on it: it is
+    // trivially spoofable and, on a socket shared by every connection, not
+    // attributable to any one of them anyway.
+    absl::Status error = socket_api::GetSocketError(*listen_fd_);
+    if (!error.ok()) {
+      QUIC_LOG_EVERY_N_SEC(INFO, 10)
+          << "quictun listen socket reported an error (consumed): " << error;
+    }
+    if (!event_loop_->SupportsEdgeTriggered()) {
+      event_loop_->RearmSocket(*listen_fd_, kSocketEventError);
+    }
+  }
+  if (events & kSocketEventWritable) {
+    // Mirrors QuicDispatcher::OnCanWrite(): the one shared writer is
+    // writable again, so clear its blocked flag and let every connection
+    // that was waiting on it retry.
+    shared_writer_->SetWritable();
+    write_blocked_list_.OnWriterUnblocked();
+    if (!write_blocked_list_.Empty() && !event_loop_->SupportsEdgeTriggered()) {
+      event_loop_->RearmSocket(*listen_fd_, kSocketEventWritable);
+    }
+  }
   if (events & kSocketEventReadable) {
     bool more_to_read = true;
     while (more_to_read) {
       more_to_read = reader_.ReadAndDispatchPackets(
-          *rendezvous_fd_, listen_address_.port(), *event_loop_->GetClock(),
+          *listen_fd_, listen_address_.port(), *event_loop_->GetClock(),
           this, /*packets_dropped=*/nullptr);
     }
     if (!event_loop_->SupportsEdgeTriggered()) {
-      event_loop_->RearmSocket(*rendezvous_fd_, kSocketEventReadable);
+      event_loop_->RearmSocket(*listen_fd_, kSocketEventReadable);
     }
   }
 }
 
-void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
-                                        const QuicSocketAddress& raw_peer_address,
-                                        const QuicReceivedPacket& packet) {
-  const QuicSocketAddress peer_address =
-      AdaptPeerAddressForListenSocket(listen_address_, raw_peer_address);
+void QuictunServerDriver::OnWriteBlocked(
+    QuicBlockedWriterInterface* blocked_writer) {
+  write_blocked_list_.Add(*blocked_writer);
+  if (!event_loop_->SupportsEdgeTriggered()) {
+    event_loop_->RearmSocket(*listen_fd_, kSocketEventWritable);
+  }
+}
 
+void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
+                                        const QuicSocketAddress& peer_address,
+                                        const QuicReceivedPacket& packet) {
   PacketHeaderFormat format;
   QuicLongHeaderType long_packet_type;
   bool version_present;
@@ -194,40 +211,17 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
           &destination_connection_id, &source_connection_id, &retry_token,
           &detailed_error, connection_id_generator_);
 
-  auto existing = connections_.find(peer_address);
+  if (header_error != QUIC_NO_ERROR) {
+    QUIC_DVLOG(1) << "Dropping unparseable packet from " << peer_address << ": "
+                  << detailed_error;
+    return;
+  }
+  const QuicConnectionId dcid(destination_connection_id);
+
+  auto existing = connections_.find(dcid);
   if (existing != connections_.end()) {
-    // Normally this is just a packet from a peer already migrated to its
-    // own socket, still queued on the rendezvous socket from before the
-    // kernel finished routing them there -- see the header comment on
-    // connections_. But it can also be an Initial packet for a genuinely
-    // NEW connection that happens to reuse the exact same (peer IP,
-    // ephemeral port) as an old one we haven't garbage-collected yet: UDP
-    // source ports have no TIME_WAIT-style reuse delay the way TCP ports
-    // do, so a client can reuse a port within milliseconds of its previous
-    // connection closing. Blindly forwarding that new Initial into the
-    // stale QuicConnection hits a fatal QUICHE_DCHECK in
-    // quic_connection.cc's connection-ID validation, which assumes a
-    // server never sees a mismatched connection ID directly -- an
-    // assumption that only holds with a real QuicDispatcher doing
-    // connection-ID-based demuxing up front, which quictun deliberately
-    // doesn't have (see the architecture comment in this file). Detect
-    // that case and replace the stale entry instead of forwarding to it.
-    bool looks_like_new_connection =
-        header_error == QUIC_NO_ERROR && version_present &&
-        long_packet_type == INITIAL &&
-        QuicConnectionId(destination_connection_id) !=
-            existing->second->connection_id();
-    if (!looks_like_new_connection) {
-      existing->second->ProcessPacket(self_address, peer_address, packet);
-      return;
-    }
-    QUIC_LOG(INFO) << "Peer " << peer_address
-                   << " reused its address for a new connection (old "
-                      "connection ID "
-                   << existing->second->connection_id() << ", new "
-                   << QuicConnectionId(destination_connection_id)
-                   << ") -- replacing the stale entry";
-    connections_.erase(existing);
+    existing->second->ProcessPacket(self_address, peer_address, packet);
+    return;
   }
 
   if (header_error != QUIC_NO_ERROR) {
@@ -287,7 +281,8 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
           target_address_, options_.transparent,
           QuicConnectionId(destination_connection_id),
           options_.psk, congestion_control_, options_.so_txtime,
-          options_.udp_socket_buffer_bytes, &idle_tracker_, packet,
+          shared_writer_.get(), &idle_tracker_,
+          [this](QuicBlockedWriterInterface* w) { OnWriteBlocked(w); }, packet,
           [this](QuictunServerConnection* c) { RemoveConnection(c); });
   if (connection == nullptr) {
     return;
@@ -295,12 +290,12 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
   SetQuictunStartupBandwidthHint(connection->connection(),
                                  options_.startup_bandwidth_kbps,
                                  options_.startup_rtt_ms);
-  connections_.emplace(peer_address, std::move(connection));
+  connections_.emplace(dcid, std::move(connection));
   --new_connections_allowed_this_event_loop_;
 }
 
 void QuictunServerDriver::RemoveConnection(QuictunServerConnection* connection) {
-  pending_removal_.push_back(connection->peer_address());
+  pending_removal_.push_back(connection->connection_id());
 }
 
 void QuictunServerDriver::CollectGarbage() {
@@ -309,8 +304,8 @@ void QuictunServerDriver::CollectGarbage() {
   // its class comment), mirroring how real QUICHE's QuicSession cleans up
   // closed_streams_ via its own alarm rather than something external
   // polling it. This method only ever handled whole-connection removal.
-  for (const QuicSocketAddress& peer_address : pending_removal_) {
-    connections_.erase(peer_address);
+  for (const QuicConnectionId& id : pending_removal_) {
+    connections_.erase(id);
   }
   pending_removal_.clear();
 

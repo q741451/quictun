@@ -34,9 +34,9 @@
 
 namespace quic {
 
-// Server-side mirror of QuictunClientConnection: owns the per-peer UDP
-// socket migrated off the rendezvous socket (see quictun_server_driver.h),
-// the QuicConnection, and the QuictunServerSession. Each stream the client
+// Server-side mirror of QuictunClientConnection: owns the QuicConnection
+// and the QuictunServerSession, reading and writing through the driver's
+// one shared socket (see quictun_server_driver.h). Each stream the client
 // opens on that session (--quic_conn on the client side controls whether
 // that's ever more than one -- see quictun_client_driver.h) gets its own
 // independent authentication (the --key preamble check, plus an address
@@ -53,14 +53,11 @@ namespace quic {
 // that policy question belongs entirely to the client's connection-pooling
 // decision, not this class).
 class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
-                                              public QuicSocketEventListener,
                                               public ProcessPacketInterface,
                                               public QuictunStreamDelegate {
  public:
-  // `listen_address` is the address the new per-connection socket binds to
-  // (the wildcard --listen address, shared with the rendezvous socket via
-  // SO_REUSEADDR/SO_REUSEPORT -- see quictun_socket_util.h). `self_address`
-  // is the real, specific local IP the first packet actually arrived on, as
+  // `self_address` is the real, specific local IP the first packet
+  // actually arrived on, as
   // resolved per-packet by QuicPacketReader from IP_PKTINFO/IPV6_PKTINFO
   // ancillary data -- this, not the wildcard bind address, is what gets
   // handed to QuicConnection: passing the wildcard there causes outgoing
@@ -71,9 +68,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   // against each stream's own key preamble once that stream is created --
   // see OnStreamDataAvailable(). `socket_factory` is used to dial the
   // stream's destination once (and each time) a stream authenticates --
-  // see StartTunnelForStream(); must outlive this object. Returns nullptr
-  // if the dedicated UDP socket couldn't be created/bound/connected -- the
-  // caller should just drop the packet in that case.
+  // see StartTunnelForStream(); must outlive this object.
   //
   // `target_address` is nullopt iff `transparent` -- in that mode there is
   // no single fixed target; OnStreamDataAvailable() instead parses a
@@ -95,7 +90,8 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
       std::optional<QuicSocketAddress> target_address, bool transparent,
       QuicConnectionId server_connection_id, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
-      QuicByteCount udp_socket_buffer_bytes, QuictunIdleTracker* idle_tracker,
+      QuicPacketWriter* shared_writer, QuictunIdleTracker* idle_tracker,
+      std::function<void(QuicBlockedWriterInterface*)> on_write_blocked,
       const QuicReceivedPacket& first_packet,
       std::function<void(QuictunServerConnection*)> on_closed);
 
@@ -113,7 +109,11 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   void OnConnectionClosed(QuicConnectionId server_connection_id,
                           QuicErrorCode error, const std::string& error_details,
                           ConnectionCloseSource source) override;
-  void OnWriteBlocked(QuicBlockedWriterInterface* blocked_writer) override {}
+  void OnWriteBlocked(QuicBlockedWriterInterface* blocked_writer) override {
+    if (on_write_blocked_) {
+      on_write_blocked_(blocked_writer);
+    }
+  }
   void OnRstStreamReceived(const QuicRstStreamFrame& frame) override {}
   void OnStopSendingReceived(const QuicStopSendingFrame& frame) override {}
   bool TryAddNewConnectionId(
@@ -127,10 +127,6 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
       const QuicSocketAddress& server_preferred_address) override {}
   void OnPathDegrading() override {}
   void OnConfigNegotiated(const QuicConfig& config) override {}
-
-  // QuicSocketEventListener (for the dedicated UDP socket):
-  void OnSocketEvent(QuicEventLoop* event_loop, SocketFd fd,
-                     QuicSocketEventMask events) override;
 
   // ProcessPacketInterface:
   void ProcessPacket(const QuicSocketAddress& self_address,
@@ -176,7 +172,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   };
 
   QuictunServerConnection(
-      QuicEventLoop* event_loop, OwnedSocketFd udp_fd,
+      QuicEventLoop* event_loop,
       const QuicSocketAddress& self_address, const QuicSocketAddress& peer_address,
       QuicConnectionHelperInterface* helper, QuicAlarmFactory* alarm_factory,
       SocketFactory* socket_factory,
@@ -186,7 +182,9 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
       std::optional<QuicSocketAddress> target_address, bool transparent,
       QuicConnectionId server_connection_id, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
-      QuictunIdleTracker* idle_tracker, const QuicReceivedPacket& first_packet,
+      QuicPacketWriter* shared_writer, QuictunIdleTracker* idle_tracker,
+      std::function<void(QuicBlockedWriterInterface*)> on_write_blocked,
+      const QuicReceivedPacket& first_packet,
       std::function<void(QuictunServerConnection*)> on_closed);
 
   // SetStreamCreatedCallback() target: starts the new stream's
@@ -221,24 +219,15 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   // stream's own on_closed callback (see StartTunnelForStream()).
   void DisconnectStreamTarget(StreamTarget& target);
 
-  // Reads (and thereby clears) this socket's pending SO_ERROR, then
-  // re-arms kSocketEventError. Called from OnSocketEvent() -- see its own
-  // definition for why the error is deliberately not acted on beyond
-  // being consumed and logged, and this socket's RegisterSocket() call
-  // for why leaving it unconsumed busy-spins the event loop.
-  void ConsumePendingSocketError();
-
   void Close();
 
   QuicEventLoop* const event_loop_;
-  OwnedSocketFd udp_fd_;
   const QuicSocketAddress self_address_;
   const QuicSocketAddress peer_address_;
   const std::optional<QuicSocketAddress> target_address_;
   const bool transparent_;
   SocketFactory* const socket_factory_;
   ConnectionIdGeneratorInterface& connection_id_generator_;
-  QuicPacketReader reader_;
   std::unique_ptr<QuicConnection> connection_;
   std::unique_ptr<QuictunServerSession> session_;
 
@@ -279,6 +268,7 @@ class QUICHE_EXPORT QuictunServerConnection : public QuicSession::Visitor,
   // here only because StartTunnelForStream() needs it when constructing
   // each tunnel. Nothing to do with QUIC's own idle timeout, in `config`.
   QuictunIdleTracker* const idle_tracker_;
+  const std::function<void(QuicBlockedWriterInterface*)> on_write_blocked_;
 
   std::function<void(QuictunServerConnection*)> on_closed_;
   bool closed_ = false;

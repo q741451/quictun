@@ -22,6 +22,8 @@
 #include "quiche/quic/core/quic_alarm_factory.h"
 #include "quiche/quic/core/quic_config.h"
 #include "quiche/quic/core/quic_default_connection_helper.h"
+#include "quiche/quic/core/quic_blocked_writer_list.h"
+#include "quiche/quic/core/quic_connection_id.h"
 #include "quiche/quic/core/quic_packet_reader.h"
 #include "quiche/quic/core/quic_process_packet_interface.h"
 #include "quiche/quic/core/quic_types.h"
@@ -31,47 +33,12 @@
 
 namespace quic {
 
-// DoS-resistant replacement for QuicheSocketAddressHash (quiche_socket_
-// address.cc) as connections_'s hasher below. QuicheSocketAddressHash is a
-// fixed, publicly-known formula (HashIP(host_) ^ (port_ | port_<<16)) with
-// no per-process secret -- an attacker who can predict it could craft
-// (IP,port) pairs that all land in the same bucket, degrading connections_
-// lookups from O(1) toward O(n) per packet on quictun's single event-loop
-// thread. Mirrors real QUICHE's own QuicConnectionIdHash (quic_connection_
-// id.h/.cc) exactly: SipHash-2-4 keyed with a key generated once per
-// process (function-local static -- same Meyer's-singleton pattern as
-// QuicConnectionId::Hash(), guaranteed to run its initializer exactly once
-// even if operator() is first called concurrently... though nothing here
-// actually is concurrent, quictun being single-threaded).
-class QuictunPeerAddressHash {
- public:
-  size_t operator()(const QuicSocketAddress& address) const noexcept {
-    static const SipHashKey key = GenerateKey();
-    std::string packed = address.host().ToPackedString();
-    uint16_t port = address.port();
-    packed.push_back(static_cast<char>((port >> 8) & 0xff));
-    packed.push_back(static_cast<char>(port & 0xff));
-    return static_cast<size_t>(SIPHASH_24(
-        key.data, reinterpret_cast<const uint8_t*>(packed.data()),
-        packed.size()));
-  }
-
- private:
-  struct SipHashKey {
-    uint64_t data[2];
-  };
-  static SipHashKey GenerateKey() {
-    SipHashKey key;
-    QuicRandom::GetInstance()->RandBytes(&key.data, sizeof(key.data));
-    return key;
-  }
-};
-
-// Owns the rendezvous UDP socket on --listen. On the first datagram from a
-// never-seen peer, migrates it to its own dedicated, connected UDP socket
-// (see quictun_server_connection.cc / quictun_socket_util.h) and constructs
-// a QuictunServerConnection for it -- no QuicDispatcher, no shared socket,
-// no per-connection demuxing by connection ID. Also owns the state shared
+// Owns the one UDP socket on --listen, its reader and its writer, and
+// routes each packet to a QuictunServerConnection by destination connection
+// ID -- QuicDispatcher's shape (see quic_server_io_harness.cc for the
+// upstream equivalent of the socket handling), without QuicDispatcher
+// itself, whose QuicSession-shaped connection model quictun does not use.
+// Also owns the state shared
 // by every connection: the crypto config (with the auto-generated
 // self-signed cert and PSK), the compressed-certs cache, the connection
 // helper/alarm factory/connection-ID generator, the TCP socket factory used
@@ -90,15 +57,15 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
                       int32_t max_new_connections_per_event_loop,
                       int32_t max_concurrent_connections);
 
-  // Creates, binds, and registers the rendezvous UDP socket. Returns
+  // Creates, binds, and registers the listen UDP socket. Returns
   // non-ok on failure.
   absl::Status Start();
 
-  // QuicSocketEventListener (for the rendezvous UDP socket):
+  // QuicSocketEventListener (for the listen UDP socket):
   void OnSocketEvent(QuicEventLoop* event_loop, SocketFd fd,
                      QuicSocketEventMask events) override;
 
-  // ProcessPacketInterface (for the rendezvous UDP socket):
+  // ProcessPacketInterface (for the listen UDP socket):
   void ProcessPacket(const QuicSocketAddress& self_address,
                      const QuicSocketAddress& peer_address,
                      const QuicReceivedPacket& packet) override;
@@ -108,6 +75,10 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
   // synchronously from within its own callback stack. Also resets
   // new_connections_allowed_this_event_loop_ for the next iteration --
   // see that member's comment.
+  // Called by a connection whose write hit the shared socket's full send
+  // buffer; drained in OnSocketEvent() when it reports writable again.
+  void OnWriteBlocked(QuicBlockedWriterInterface* blocked_writer);
+
   void CollectGarbage();
 
   // Closes every tunnel that has gone quiet for --tcp_idle_timeout_seconds.
@@ -129,7 +100,15 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
   const int32_t max_new_connections_per_event_loop_;
   const int32_t max_concurrent_connections_;
 
-  OwnedSocketFd rendezvous_fd_;
+  OwnedSocketFd listen_fd_;
+  // Shared by every QuictunServerConnection; must outlive connections_.
+  std::unique_ptr<QuicPacketWriter> shared_writer_;
+  // Every connection that hit a blocked write on the shared socket, drained
+  // when the event loop reports it writable again -- exactly
+  // QuicDispatcher::write_blocked_list_'s role. With one socket for all
+  // connections there is no per-connection writability event any more, so
+  // without this a full send buffer would wedge the whole process.
+  QuicBlockedWriterList write_blocked_list_;
   QuicPacketReader reader_;
 
   QuicDefaultConnectionHelper helper_;
@@ -145,15 +124,15 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
   // outlive connections_, since each tunnel unlinks from it in Close().
   QuictunIdleTracker idle_tracker_;
 
-  // Keyed by peer address so a peer's retransmitted/coalesced first packets
-  // that are still in flight (already queued on the rendezvous socket
-  // before the kernel finishes routing that peer to its new dedicated
-  // socket -- see quictun_server_connection.cc) get delivered to the
-  // connection already created for them instead of spawning a duplicate.
-  absl::flat_hash_map<QuicSocketAddress, std::unique_ptr<QuictunServerConnection>,
-                      QuictunPeerAddressHash>
+  // Keyed by connection ID, the way QuicDispatcher's own session_map_ is,
+  // and necessarily so: every connection now shares the one listen socket,
+  // and a client that pools several QUIC connections behind a single UDP
+  // socket of its own presents all of them from the same peer address.
+  absl::flat_hash_map<QuicConnectionId,
+                      std::unique_ptr<QuictunServerConnection>,
+                      QuicConnectionIdHash>
       connections_;
-  std::vector<QuicSocketAddress> pending_removal_;
+  std::vector<QuicConnectionId> pending_removal_;
 
   // Per-event-loop-iteration budget for how many brand-new connections
   // ProcessPacket() may create -- see max_new_connections_per_event_loop_

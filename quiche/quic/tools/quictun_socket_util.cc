@@ -66,7 +66,7 @@ absl::StatusOr<OwnedSocketFd> CreateQuicUdpSocket(
   return OwnedSocketFd(fd);
 }
 
-absl::StatusOr<OwnedSocketFd> CreateReusableUdpSocket(
+absl::StatusOr<OwnedSocketFd> CreateListenUdpSocket(
     const QuicSocketAddress& address, QuicByteCount buffer_bytes) {
   absl::StatusOr<OwnedSocketFd> owned_fd =
       CreateQuicUdpSocket(address, buffer_bytes);
@@ -74,13 +74,8 @@ absl::StatusOr<OwnedSocketFd> CreateReusableUdpSocket(
     return owned_fd.status();
   }
 
-  absl::Status status = SetReuseAddrAndPort(**owned_fd);
-  if (!status.ok()) {
-    return status;
-  }
-
   if (address.host().address_family() == IpAddressFamily::IP_V6) {
-    status = SetIpv6OnlyDisabled(**owned_fd);
+    absl::Status status = SetIpv6OnlyDisabled(**owned_fd);
     if (!status.ok()) {
       return status;
     }

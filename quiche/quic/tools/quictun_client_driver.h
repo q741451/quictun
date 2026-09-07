@@ -21,6 +21,11 @@
 #include "quiche/quic/core/quic_server_id.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/quic/core/quic_blocked_writer_list.h"
+#include "quiche/quic/core/quic_connection_id.h"
+#include "quiche/quic/core/quic_packet_reader.h"
+#include "quiche/quic/core/quic_packet_writer.h"
+#include "quiche/quic/core/quic_process_packet_interface.h"
 #include "quiche/quic/tools/quictun_client_connection.h"
 #include "quiche/quic/tools/quictun_flags.h"
 #include "quiche/common/quiche_buffer_allocator.h"
@@ -35,7 +40,8 @@ namespace quic {
 // enabled, a session cache shared across all connections made to the same
 // --remote within this process's lifetime), the connection helper/alarm
 // factory/connection-ID generator, and the QuicConfig template.
-class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener {
+class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener,
+                                          public ProcessPacketInterface {
  public:
   QuictunClientDriver(QuicEventLoop* event_loop,
                       const QuicSocketAddress& local_address,
@@ -47,6 +53,13 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener {
   absl::Status Start();
 
   // QuicSocketEventListener (for the --local TCP listen socket):
+  // ProcessPacketInterface (for the one shared UDP socket): routes by the
+  // destination connection ID, the only demultiplexing key a 1-RTT short
+  // header carries.
+  void ProcessPacket(const QuicSocketAddress& self_address,
+                     const QuicSocketAddress& peer_address,
+                     const QuicReceivedPacket& packet) override;
+
   void OnSocketEvent(QuicEventLoop* event_loop, SocketFd fd,
                      QuicSocketEventMask events) override;
 
@@ -55,6 +68,10 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener {
   // any QuictunClientConnection callback (see quictun_client_bin.cc) -- see
   // the comment on pending_removal_ for why this can't happen synchronously
   // from within a connection's own close path.
+  // Called by a connection whose write hit the shared socket's full send
+  // buffer; drained in OnSocketEvent() when it reports writable again.
+  void OnWriteBlocked(QuicBlockedWriterInterface* blocked_writer);
+
   void CollectGarbage();
 
   // Closes every tunnel that has gone quiet for --tcp_idle_timeout_seconds.
@@ -85,6 +102,24 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener {
   const QuictunTuningOptions options_;
 
   OwnedSocketFd listen_fd_;
+
+  // One UDP socket, one reader and one writer for every QUIC connection
+  // this driver owns -- see QuictunClientConnection's ctor. Connected to
+  // remote_address_, so reads need no per-packet address handling.
+  OwnedSocketFd udp_fd_;
+  QuicSocketAddress udp_self_address_;
+  QuicPacketReader udp_reader_;
+  std::unique_ptr<QuicPacketWriter> shared_writer_;
+  // Same role as QuicDispatcher::write_blocked_list_: with one socket
+  // for every connection there is no per-connection writability event
+  // any more, so a full send buffer would otherwise wedge the process.
+  QuicBlockedWriterList write_blocked_list_;
+  // Keyed by the client connection ID each connection was given at
+  // construction; ProcessPacket() looks packets up here.
+  absl::flat_hash_map<QuicConnectionId, QuictunClientConnection*,
+                      QuicConnectionIdHash>
+      by_cid_;
+  uint64_t next_client_cid_ = 1;
 
   QuicDefaultConnectionHelper helper_;
   std::unique_ptr<QuicAlarmFactory> alarm_factory_;

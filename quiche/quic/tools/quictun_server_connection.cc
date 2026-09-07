@@ -109,42 +109,24 @@ std::unique_ptr<QuictunServerConnection> QuictunServerConnection::Create(
     std::optional<QuicSocketAddress> target_address, bool transparent,
     QuicConnectionId server_connection_id,
     const std::string& psk, CongestionControlType congestion_control,
-    bool so_txtime_enabled, QuicByteCount udp_socket_buffer_bytes,
-    QuictunIdleTracker* idle_tracker, const QuicReceivedPacket& first_packet,
+    bool so_txtime_enabled, QuicPacketWriter* shared_writer,
+    QuictunIdleTracker* idle_tracker,
+    std::function<void(QuicBlockedWriterInterface*)> on_write_blocked,
+    const QuicReceivedPacket& first_packet,
     std::function<void(QuictunServerConnection*)> on_closed) {
-  absl::StatusOr<OwnedSocketFd> fd =
-      CreateReusableUdpSocket(listen_address, udp_socket_buffer_bytes);
-  if (!fd.ok()) {
-    QUIC_LOG(ERROR) << "Failed to create per-connection UDP socket for "
-                    << peer_address << ": " << fd.status();
-    return nullptr;
-  }
-  OwnedSocketFd udp_fd = *std::move(fd);
 
-  absl::Status bind_status = socket_api::Bind(*udp_fd, listen_address);
-  if (!bind_status.ok()) {
-    QUIC_LOG(ERROR) << "Failed to bind per-connection UDP socket to "
-                    << listen_address << ": " << bind_status;
-    return nullptr;
-  }
-
-  absl::Status connect_status = socket_api::Connect(*udp_fd, peer_address);
-  if (!connect_status.ok()) {
-    QUIC_LOG(ERROR) << "Failed to connect per-connection UDP socket to "
-                    << peer_address << ": " << connect_status;
-    return nullptr;
-  }
 
   return absl::WrapUnique(new QuictunServerConnection(
-      event_loop, std::move(udp_fd), self_address, peer_address, helper,
+      event_loop, self_address, peer_address, helper,
       alarm_factory, socket_factory, connection_id_generator, config,
       crypto_config, compressed_certs_cache, target_address, transparent,
       server_connection_id, psk, congestion_control, so_txtime_enabled,
-      idle_tracker, first_packet, std::move(on_closed)));
+      shared_writer, idle_tracker, std::move(on_write_blocked), first_packet,
+      std::move(on_closed)));
 }
 
 QuictunServerConnection::QuictunServerConnection(
-    QuicEventLoop* event_loop, OwnedSocketFd udp_fd,
+    QuicEventLoop* event_loop,
     const QuicSocketAddress& self_address, const QuicSocketAddress& peer_address,
     QuicConnectionHelperInterface* helper, QuicAlarmFactory* alarm_factory,
     SocketFactory* socket_factory,
@@ -154,11 +136,12 @@ QuictunServerConnection::QuictunServerConnection(
     std::optional<QuicSocketAddress> target_address, bool transparent,
     QuicConnectionId server_connection_id,
     const std::string& psk, CongestionControlType congestion_control,
-    bool so_txtime_enabled, QuictunIdleTracker* idle_tracker,
+    bool so_txtime_enabled, QuicPacketWriter* shared_writer,
+    QuictunIdleTracker* idle_tracker,
+    std::function<void(QuicBlockedWriterInterface*)> on_write_blocked,
     const QuicReceivedPacket& first_packet,
     std::function<void(QuictunServerConnection*)> on_closed)
     : event_loop_(event_loop),
-      udp_fd_(std::move(udp_fd)),
       self_address_(self_address),
       peer_address_(peer_address),
       target_address_(target_address),
@@ -167,13 +150,14 @@ QuictunServerConnection::QuictunServerConnection(
       connection_id_generator_(connection_id_generator),
       expected_psk_(psk),
       idle_tracker_(idle_tracker),
+      on_write_blocked_(std::move(on_write_blocked)),
       on_closed_(std::move(on_closed)) {
-  std::unique_ptr<QuicPacketWriter> writer =
-      MakeQuictunPacketWriter(*udp_fd_, so_txtime_enabled, event_loop);
-
+  // Borrowed: the driver owns one writer over the shared listen socket and
+  // every connection writes through it. Packets carry their own peer
+  // address, so an unconnected socket is all this needs.
   connection_ = std::make_unique<QuicConnection>(
       server_connection_id, self_address_, peer_address_, helper, alarm_factory,
-      writer.release(), /*owns_writer=*/true, Perspective::IS_SERVER,
+      shared_writer, /*owns_writer=*/false, Perspective::IS_SERVER,
       GetQuictunVersions(), connection_id_generator);
   SetQuictunCongestionControl(connection_.get(), congestion_control);
 
@@ -194,26 +178,6 @@ QuictunServerConnection::QuictunServerConnection(
   stream_garbage_alarm_.reset(
       alarm_factory->CreateAlarm(new StreamGarbageAlarmDelegate(this)));
 
-  // kSocketEventError, unlike real QUICHE's own server (which registers
-  // only readable|writable -- quic_server_io_harness.cc): that server owns
-  // one shared, bind()-only UDP socket, and an *unconnected* UDP socket
-  // never has ICMP errors delivered to it, so POLLERR simply cannot occur
-  // there. quictun gives every connection its own socket and connect()s it
-  // to the peer (see Create() above), and a *connected* UDP socket does
-  // latch ICMP (e.g. the port unreachable that comes back once the peer
-  // process is gone) into SO_ERROR -- which poll() then reports as POLLERR
-  // whether or not it was asked for, since POLLERR/POLLHUP are not
-  // maskable. Without subscribing it here, QuicPollEventLoop masks that
-  // POLLERR back out (DispatchIoEvent(): `mask &= GetPollMask(
-  // registration.events)`), dispatches no callback at all, and
-  // RunEventLoopOnce() returns instantly -- so the main loop spins at 100%
-  // CPU until some QUIC timer happens to attempt a write and consume the
-  // error. Confirmed with a real repro: SIGKILL a client mid-transfer and
-  // this socket sits on `revents=POLLERR` with nothing subscribed to it.
-  bool registered = event_loop_->RegisterSocket(
-      *udp_fd_,
-      kSocketEventReadable | kSocketEventWritable | kSocketEventError, this);
-  QUICHE_DCHECK(registered);
 
   connection_->ProcessUdpPacket(self_address_, peer_address_, first_packet);
   // Deliberately no --target dial here (unlike the pre-multiplexing
@@ -226,9 +190,7 @@ QuictunServerConnection::QuictunServerConnection(
   // its own dial-out in flight by the time this constructor returns.
 }
 
-QuictunServerConnection::~QuictunServerConnection() {
-  event_loop_->UnregisterSocket(*udp_fd_);
-}
+QuictunServerConnection::~QuictunServerConnection() = default;
 
 void QuictunServerConnection::DisconnectStreamTarget(StreamTarget& target) {
   if (target.target_socket && !target.target_socket_disconnected) {
@@ -311,7 +273,6 @@ void QuictunServerConnection::Close() {
   // already safely deferred the same way (see wherever this connection's
   // own on_closed_ callback leads) -- always outside any callback's stack.
   stream_garbage_alarm_->Cancel();
-  event_loop_->UnregisterSocket(*udp_fd_);
   std::function<void(QuictunServerConnection*)> on_closed = std::move(on_closed_);
   if (on_closed) {
     on_closed(this);
@@ -337,156 +298,9 @@ void QuictunServerConnection::OnConnectionClosed(
   Close();
 }
 
-void QuictunServerConnection::OnSocketEvent(QuicEventLoop* /*event_loop*/,
-                                            SocketFd fd,
-                                            QuicSocketEventMask events) {
-  QUICHE_DCHECK_EQ(fd, *udp_fd_);
-  // Handled before the readable/writable branches below so the pending
-  // error is cleared before anything tries to read: a recvmsg() on a
-  // socket with SO_ERROR set returns that error instead of any data
-  // actually queued behind it. See ConsumePendingSocketError().
-  if (events & kSocketEventError) {
-    ConsumePendingSocketError();
-  }
-  if (events & kSocketEventReadable) {
-    bool more_to_read = true;
-    while (more_to_read) {
-      more_to_read = reader_.ReadAndDispatchPackets(
-          *udp_fd_, self_address_.port(), *event_loop_->GetClock(), this,
-          /*packets_dropped=*/nullptr);
-    }
-    if (!event_loop_->SupportsEdgeTriggered()) {
-      event_loop_->RearmSocket(*udp_fd_, kSocketEventReadable);
-    }
-  }
-  if (events & kSocketEventWritable) {
-    // OnBlockedWriterCanWrite(), not plain OnCanWrite(): this event means
-    // "the OS says the socket is writable again", which is specifically
-    // what clears the writer's own write_blocked_ bookkeeping first (see
-    // QuicConnection::OnBlockedWriterCanWrite() and, for the reference
-    // pattern this mirrors, QuicDispatcher::OnCanWrite() in
-    // quic_dispatcher.cc). Calling plain OnCanWrite() here instead -- as
-    // this used to -- leaves that flag stuck set the first time a real
-    // write actually blocks (e.g. the kernel send buffer momentarily
-    // full under GSO batching with --so_txtime), so every subsequent
-    // firing of this same event hits OnCanWrite()'s own internal
-    // QUIC_BUG(quic_bug_10511_22) check and fatally closes the
-    // connection instead of recovering -- turning one transient block
-    // into a permanently dead connection.
-    connection_->OnBlockedWriterCanWrite();
-    // `&& connection_->IsWriterBlocked()`, not just `!SupportsEdgeTriggered()`
-    // alone: a UDP socket is essentially always writable at the OS level, so
-    // on this codebase's only event loop implementation (QuicPollEventLoop,
-    // poll()-based, SupportsEdgeTriggered() always false -- there's no epoll
-    // variant here), unconditionally re-arming for kSocketEventWritable makes
-    // RunEventLoopOnce() return immediately on every single call instead of
-    // actually sleeping up to its timeout, pinning one CPU core at 100% for
-    // as long as this UDP socket exists -- i.e. for the whole lifetime of any
-    // connection. Only re-arm when the writer actually still has something
-    // it couldn't send, matching the reference pattern in
-    // quic_server_io_harness.cc (`dispatcher_.OnCanWrite(); if (... &&
-    // dispatcher_.HasPendingWrites()) { RearmSocket(...); }`).
-    if (!event_loop_->SupportsEdgeTriggered() &&
-        connection_->IsWriterBlocked()) {
-      event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
-    }
-  }
-}
-
-void QuictunServerConnection::ConsumePendingSocketError() {
-  // Reading SO_ERROR is what actually clears the kernel's latched
-  // sk_err -- that is the whole point of this call. Until something
-  // performs a syscall that consumes it, poll() keeps reporting POLLERR
-  // on every single iteration, and (see this socket's RegisterSocket()
-  // comment) an unconsumed POLLERR is exactly the busy spin this branch
-  // exists to prevent.
-  absl::Status error = socket_api::GetSocketError(*udp_fd_);
-
-  // Deliberately does NOT close the connection. The overwhelmingly common
-  // source of this is an ICMP unreachable, which is trivially spoofable by
-  // any off-path attacker who can guess the 4-tuple -- acting on it
-  // directly would hand them a way to tear down arbitrary tunnels with a
-  // single forged packet. Transient unreachables (route flap, a NAT
-  // entry briefly expiring) are also entirely normal and recover on their
-  // own. So the error is consumed and reported, and whether the peer is
-  // really gone is left to QUIC's own timers, which do not depend on it:
-  // a genuinely vanished peer stops acking, and the connection dies via
-  // the idle network timeout (--idle_timeout_seconds). Note that this
-  // deadline cannot be pushed out indefinitely by our own keepalive
-  // PINGs: QuicIdleNetworkDetector::OnPacketSent() only advances its
-  // clock for the *first* packet sent after the last one received (see
-  // last_network_activity_time()), so repeated PINGs to a dead peer do
-  // not keep the connection alive.
-  if (!error.ok()) {
-    QUIC_LOG_EVERY_N_SEC(INFO, 10)
-        << "quictun connection to " << peer_address_
-        << " got a socket error (peer may be gone): " << error
-        << " -- consumed; leaving the connection's fate to QUIC's own "
-           "idle timeout";
-  }
-
-  // Re-arm: QuicPollEventLoop is level-triggered and consumes the
-  // subscription when it fires, so without this the *next* error would
-  // again be an unsubscribed POLLERR, i.e. the same spin.
-  if (!event_loop_->SupportsEdgeTriggered()) {
-    event_loop_->RearmSocket(*udp_fd_, kSocketEventError);
-  }
-}
-
 void QuictunServerConnection::ProcessPacket(
     const QuicSocketAddress& self_address,
     const QuicSocketAddress& /*peer_address*/, const QuicReceivedPacket& packet) {
-  // This dedicated, connect()ed UDP socket can only ever receive packets
-  // from peer_address_ -- but that doesn't mean every packet that lands
-  // here truly belongs to *this* QUIC connection. Once this connection is
-  // torn down server-side (deferred via pending_removal_/CollectGarbage(),
-  // see quictun_server_driver.cc), its socket/connect() 4-tuple claim isn't
-  // released until the next garbage-collection pass, and UDP source ports
-  // have no TCP-style TIME_WAIT delay -- so the client's OS can reuse the
-  // exact same ephemeral port for a brand-new connection within
-  // milliseconds, and the kernel will keep routing that peer's packets
-  // straight to this now-stale socket, bypassing the rendezvous socket (and
-  // QuictunServerDriver::ProcessPacket's own same-check) entirely. Forwarding
-  // such a packet into a QuicConnection that doesn't recognize its
-  // connection ID hits a fatal QUICHE_DCHECK in quic_connection.cc that
-  // assumes a server can never see this (an assumption that only holds with
-  // a real QuicDispatcher demuxing by connection ID up front, which quictun
-  // deliberately doesn't have). Detect and silently drop that case here --
-  // the new client's retransmissions will succeed once this connection's
-  // socket is actually closed and the 4-tuple frees up, letting them reach
-  // the rendezvous socket and be recognized there as a genuinely new
-  // connection. Not just Initial packets: once a misrouted new connection's
-  // Initial slips through, ITS follow-up Handshake/1-RTT packets would
-  // arrive at this same stale socket too (same misrouted 4-tuple) before
-  // the client ever hears back -- so every packet's connection ID is
-  // checked here, not only long-header Initial ones.
-  PacketHeaderFormat format;
-  QuicLongHeaderType long_packet_type;
-  bool version_present;
-  bool has_length_prefix;
-  QuicVersionLabel version_label;
-  ParsedQuicVersion parsed_version = ParsedQuicVersion::Unsupported();
-  absl::string_view destination_connection_id;
-  absl::string_view source_connection_id;
-  std::optional<absl::string_view> retry_token;
-  std::string detailed_error;
-  QuicErrorCode header_error =
-      QuicFramer::ParsePublicHeaderDispatcherShortHeaderLengthUnknown(
-          packet, &format, &long_packet_type, &version_present,
-          &has_length_prefix, &version_label, &parsed_version,
-          &destination_connection_id, &source_connection_id, &retry_token,
-          &detailed_error, connection_id_generator_);
-  if (header_error == QUIC_NO_ERROR && !destination_connection_id.empty() &&
-      QuicConnectionId(destination_connection_id) != connection_->connection_id()) {
-    QUIC_LOG(INFO) << "Dropping packet for unrecognized connection ID "
-                   << QuicConnectionId(destination_connection_id) << " from "
-                   << peer_address_ << " on stale connection "
-                   << connection_->connection_id()
-                   << "'s socket -- peer reused its address, retry will "
-                      "reach the rendezvous socket once this connection is "
-                      "garbage-collected";
-    return;
-  }
   connection_->ProcessUdpPacket(self_address, peer_address_, packet);
 }
 

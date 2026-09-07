@@ -202,12 +202,9 @@ class QUICHE_EXPORT QuictunSessionBase : public QuicSession,
   // CreateStream() actually creates it -- whether that's an incoming
   // stream (the server side, via CreateIncomingStream() below, itself
   // called synchronously by the QuicSession framework from inside
-  // ProcessUdpPacket() no matter which socket delivered the packet -- see
-  // QuictunServerConnection::MaybeStartTunnelForStream(), which used to
-  // instead be re-polled ("has stream() gone non-null yet?") from several
-  // different packet-delivery call sites and had one --
-  // QuictunServerDriver's rendezvous-socket forwarding path -- that forgot
-  // to poll it at all) or an outgoing one (the client side, via
+  // ProcessUdpPacket() -- see
+  // QuictunServerConnection::MaybeStartTunnelForStream()) or an outgoing
+  // one (the client side, via
   // OpenOutgoingStream(), called directly by its caller, which already
   // knows the stream now exists without needing this). Registering this is
   // the same idea as QuicSimpleServerSession wiring its own request-

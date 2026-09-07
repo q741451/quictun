@@ -2,11 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
-// Low-level Linux socket helpers not exposed by quiche/quic/core/io/socket.h:
-// IPv6 dual-stack, and the SO_REUSEADDR/SO_REUSEPORT + connect() combination
-// quictun's server uses to migrate a new peer off the shared rendezvous
-// socket onto its own dedicated, per-connection UDP socket (see
-// quictun_server_driver.h for how this is used).
+// Low-level Linux socket helpers not exposed by quiche/quic/core/io/socket.h.
 
 #ifndef QUICHE_QUIC_TOOLS_QUICTUN_SOCKET_UTIL_H_
 #define QUICHE_QUIC_TOOLS_QUICTUN_SOCKET_UTIL_H_
@@ -26,11 +22,9 @@ namespace quic {
 // being bound is IPv6.
 absl::Status SetIpv6OnlyDisabled(SocketFd fd);
 
-// Sets SO_REUSEADDR and SO_REUSEPORT on `fd`, allowing a later socket to bind
-// to the same local address:port as an already-bound socket (used so a new
-// per-connection socket can share the rendezvous socket's listen address;
-// once it's also connect()ed to a specific peer, the kernel routes that
-// peer's packets to the more-specific socket instead).
+// Sets SO_REUSEADDR and SO_REUSEPORT on `fd`. Used on the client's --local
+// TCP listener so a restart can rebind while its previous connections are
+// still in TIME_WAIT.
 absl::Status SetReuseAddrAndPort(SocketFd fd);
 
 // Creates a non-blocking UDP socket for `address_for_family`'s address
@@ -47,10 +41,9 @@ absl::StatusOr<OwnedSocketFd> CreateQuicUdpSocket(
     const QuicSocketAddress& address_for_family, QuicByteCount buffer_bytes);
 
 // Creates a non-blocking UDP socket for `address`'s family (see
-// CreateQuicUdpSocket() above), with SO_REUSEADDR/SO_REUSEPORT set and, for
-// IPv6, IPV6_V6ONLY disabled so the socket is dual-stack. Does not bind or
-// connect it.
-absl::StatusOr<OwnedSocketFd> CreateReusableUdpSocket(
+// CreateQuicUdpSocket() above) with, for IPv6, IPV6_V6ONLY disabled so an
+// IPv6 wildcard also accepts IPv4. Does not bind it.
+absl::StatusOr<OwnedSocketFd> CreateListenUdpSocket(
     const QuicSocketAddress& address, QuicByteCount buffer_bytes);
 
 }  // namespace quic
