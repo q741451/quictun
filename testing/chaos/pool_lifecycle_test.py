@@ -12,16 +12,19 @@ closed()).
 None of this needs any internal logging to verify: pool assignment
 order is fully deterministic from request order alone (round_robin_next_
 increments unconditionally on every accepted TCP -- see
-quictun_client_driver.cc), and "how many real underlying connections
-exist" is externally countable via each process's own UDP sockets
-(/proc/<pid>/net/udp{,6}, same technique as pool_cap_test.py). fd/RSS
-sampled throughout every scenario (chaos_monitor.Sampler) rather than
-just checked once at the end.
+quictun_client_driver.cc), so slot behaviour is observable purely from
+which requests succeed. Connection counting via each process's own UDP
+sockets is gone: the client multiplexes every QUIC connection onto one
+shared socket, so /proc says nothing about how many exist (pool_cap_test.py
+now uses the server's admission control for that instead). Likewise the
+relay can no longer blackhole one slot's path while sparing a sibling --
+there is only one path -- so "removal" now kills the shared path for all
+of them and checks the rebuild. fd/RSS sampled throughout every scenario
+(chaos_monitor.Sampler) rather than just checked once at the end.
 
 Usage: python3 pool_lifecycle_test.py
 """
 import os
-import re
 import socket
 import subprocess
 import sys
@@ -99,59 +102,6 @@ def wait_for_client_log_ready(client_log, timeout=5):
     return False
 
 
-def count_udp_sockets(pid):
-    """Number of this process's open fds that are UDP sockets -- one per
-    underlying QUIC connection (see pool_cap_test.py, same technique)."""
-    try:
-        fds = os.listdir(f"/proc/{pid}/fd")
-    except Exception:
-        return None
-    inodes = set()
-    for fd in fds:
-        try:
-            link = os.readlink(f"/proc/{pid}/fd/{fd}")
-        except Exception:
-            continue
-        m = re.match(r"socket:\[(\d+)\]", link)
-        if m:
-            inodes.add(m.group(1))
-    count = 0
-    for proc_file in (f"/proc/{pid}/net/udp", f"/proc/{pid}/net/udp6"):
-        try:
-            lines = open(proc_file).read().splitlines()[1:]
-        except Exception:
-            continue
-        for line in lines:
-            parts = line.split()
-            if len(parts) > 9 and parts[9] in inodes:
-                count += 1
-    return count
-
-
-def wait_for_relay_flow_count(relay_log, expected_count, timeout=5.0):
-    """Blocks until `relay_log` shows at least `expected_count` distinct
-    "new flow index" lines (see netchaos_relay.py's own print in
-    UdpListener.datagram_received()) -- i.e. confirms, from the relay's
-    own observed reality rather than an assumption about timing, exactly
-    how many real flows it's seen and in what order, before a test
-    proceeds to depend on "flow index N == slot N". Confirmed via a real
-    repro to matter: even fully serializing one connection's setup
-    before starting the next wasn't enough to *guarantee* their packets
-    reached the relay in that same order every time -- this checks the
-    relay's own bookkeeping directly instead of continuing to guess at
-    a timing margin that would make the assumption merely usually true."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            content = open(relay_log).read()
-        except FileNotFoundError:
-            content = ""
-        if content.count("new flow index") >= expected_count:
-            return True
-        time.sleep(0.05)
-    return False
-
-
 class HeldConn:
     def __init__(self, idx, port):
         self.idx = idx
@@ -160,7 +110,7 @@ class HeldConn:
         self.got_echo = False
         self.error = None
         self.release_event = threading.Event()
-        self.thread = threading.Thread(target=self._run)
+        self.thread = threading.Thread(target=self._run, daemon=True)
 
     def _run(self):
         try:
@@ -204,25 +154,16 @@ class HeldConn:
 
 
 def scenario_removal(log_dir):
-    """A pooled slot's path silently dies (relay blackhole -- see
-    netchaos_relay.py's blackhole_flow()) while a SIBLING slot on the
-    same client keeps working. Expected: the sibling is unaffected; the
-    dead slot's already-open TCP eventually fails; and once its own
-    idle_timeout elapses (marking that connection closed()), the NEXT
-    TCP that round-robins onto that same slot index gets a genuinely
-    new underlying connection (a new UDP socket -- fd evidence, not
-    just "eventually works") and succeeds normally."""
+    """The pooled connections' shared path silently dies (relay blackhole
+    -- see netchaos_relay.py's blackhole_flow()). Expected: the open TCPs
+    fail, the client neither dies nor spins, and once the path is back and
+    idle_timeout has marked the dead connections closed(), the next TCPs
+    round-robin onto those same slot indices, get genuinely new underlying
+    connections, and succeed normally."""
     tag = "removal"
-    # Needs to comfortably outlast this whole scenario's own verification
-    # sequence (several probe rounds with real sleeps between them) --
-    # too short and the UNTOUCHED sibling slot idles out from the test's
-    # own pacing, not from anything related to the blackhole, muddying
-    # exactly the control this scenario needs. Confirmed via a real
-    # repro: 4s looked "short enough to be practical" but was actually
-    # shorter than this function's own probe sequence took wall-clock,
-    # so the sibling went idle for real, unrelated to the blackholed
-    # slot -- a false "both slots died" reading that had nothing to do
-    # with the blackhole itself.
+    # Must outlast this scenario's own probe sequence -- see the earlier
+    # repro where 4s let the connections idle out from the test's own
+    # pacing rather than from the blackhole.
     idle_timeout_s = 15
     target_port, server_port, relay_port, client_port = alloc_ports(4)
 
@@ -240,11 +181,10 @@ def scenario_removal(log_dir):
     if os.path.exists(trigger_file):
         os.remove(trigger_file)
     relay_log = f"{log_dir}/{tag}_relay.log"
-    relay_proc = start_proc(
-        ["python3", RELAY, "--mode=udp", f"--listen=127.0.0.1:{relay_port}",
-         f"--upstream=127.0.0.1:{server_port}",
-         f"--blackhole-trigger-file={trigger_file}"],
-        relay_log)
+    relay_cmd = ["python3", RELAY, "--mode=udp", f"--listen=127.0.0.1:{relay_port}",
+                 f"--upstream=127.0.0.1:{server_port}",
+                 f"--blackhole-trigger-file={trigger_file}"]
+    relay_proc = start_proc(relay_cmd, relay_log)
     time.sleep(0.5)
 
     client_proc = start_proc(
@@ -261,47 +201,25 @@ def scenario_removal(log_dir):
     def sample(label):
         cs = client_sampler.sample()
         ss = server_sampler.sample()
-        print(f"    [{label}] client fds={cs['fds']} rss_kb={cs['rss_kb']} "
-              f"udp_socks={count_udp_sockets(client_proc.pid)} | "
+        print(f"    [{label}] client fds={cs['fds']} rss_kb={cs['rss_kb']} | "
               f"server fds={ss['fds']} rss_kb={ss['rss_kb']}", flush=True)
 
     sample("baseline")
 
     # 2 requests, held open -- deterministically slot 0 then slot 1 (see
-    # AcceptLoop()'s round-robin: round_robin_next_ increments on every
-    # accepted TCP, unconditionally). c0's own QUIC handshake is left to
-    # fully complete (its own echo confirmed) BEFORE c1 even starts --
-    # confirmed via a real repro that a smaller gap here left which
-    # connection the relay saw as "flow 0" racy (its own packet-arrival
-    # order isn't strictly guaranteed by "which HeldConn thread called
-    # start() first"), undermining the "flow index 0 == slot 0"
-    # assumption this whole scenario depends on. Serializing this
-    # removes the race outright instead of just shrinking its window.
+    # AcceptLoop()'s round-robin, which increments unconditionally on every
+    # accepted TCP). Serialized so each slot's handshake completes on its own.
     c0 = HeldConn(0, client_port)
     c0.start()
     t0 = time.time()
     while time.time() - t0 < 5.0 and not c0.got_echo:
         time.sleep(0.05)
-    # Don't just assume c0's echo implies the relay has already logged its
-    # flow -- confirm it directly from the relay's own log before c1 is
-    # even allowed to start. This is what actually pins "flow index 0 ==
-    # slot 0" instead of merely making the race narrow; four earlier
-    # iterations of this scenario got this wrong by inferring flow order
-    # from connection-setup order instead of checking it.
-    flow0_seen = wait_for_relay_flow_count(relay_log, 1, timeout=3.0)
-    print(f"    relay confirms c0 registered as flow index 0: {flow0_seen}")
     c1 = HeldConn(1, client_port)
     c1.start()
-    flow1_seen = wait_for_relay_flow_count(relay_log, 2, timeout=3.0)
-    print(f"    relay confirms c1 registered as flow index 1: {flow1_seen}")
-    time.sleep(1.0)
+    t0 = time.time()
+    while time.time() - t0 < 5.0 and not c1.got_echo:
+        time.sleep(0.05)
     print(f"    initial: slot0_ok={c0.got_echo} slot1_ok={c1.got_echo}")
-    if not (flow0_seen and flow1_seen):
-        print(f"!!! [{tag}] relay flow-index mapping unconfirmed, aborting "
-              f"(see {relay_log})")
-        for p in (client_proc, relay_proc, server_proc, target_proc):
-            p.kill()
-        return False
     sample("both slots up")
     if not (c0.got_echo and c1.got_echo):
         print(f"!!! [{tag}] setup failed, aborting")
@@ -309,80 +227,67 @@ def scenario_removal(log_dir):
             p.kill()
         return False
 
-    # Blackhole flow 0 (the relay's own connection order -- slot 0 was
-    # the first to reach it, since c0 connected first): from the
-    # client's perspective this is indistinguishable from the real
-    # network path to that one connection just vanishing -- no FIN, no
-    # RST, nothing.
-    print(f"    === blackholing slot 0's path (slot 1 untouched) ===", flush=True)
+    # Flow 0 is the client's one shared UDP socket, so this is every pooled
+    # connection's path vanishing at once -- no FIN, no RST, nothing.
+    print("    === blackholing the shared path ===", flush=True)
     with open(trigger_file, "w") as f:
         f.write("0")
-    time.sleep(2.0)  # generous margin for the relay's own poll loop to
-                      # actually pick this up before anything below
-                      # depends on it already being active
+    time.sleep(2.0)  # let the relay's poll loop pick it up
 
-    # Slot 1 (never touched) must keep working right through this.
-    slot1_still_ok = False
-    try:
-        slot1_still_ok = c1.probe()
-    except Exception as e:
-        print(f"    slot1 probe exception: {e}")
-    print(f"    slot1 (sibling, untouched) still working: {slot1_still_ok}")
-    sample("slot0 blackholed")
-
-    # Slot 0's own already-open connection should fail now (no path).
-    # Retried a few times, not just once: a single probe succeeding could
-    # mean genuinely-still-alive data in flight from just before the
-    # blackhole actually engaged, not a real gap in the blackhole itself
-    # -- repeated failures is the real signal.
-    slot0_fail_count = 0
-    for attempt in range(3):
-        try:
-            if not c0.probe(timeout=2):
-                slot0_fail_count += 1
-        except Exception:
-            slot0_fail_count += 1
-        time.sleep(0.3)
-    slot0_fails_now = slot0_fail_count >= 2
-    print(f"    slot0 (blackholed) failed {slot0_fail_count}/3 probe attempts "
-          f"(expect >= 2/3)")
+    # Both open connections must fail now. Retried: a lone success could be
+    # data already in flight when the blackhole engaged.
+    fail_count = 0
+    for c in (c0, c1):
+        for _ in range(3):
+            try:
+                if not c.probe(timeout=2):
+                    fail_count += 1
+            except Exception:
+                fail_count += 1
+            time.sleep(0.3)
+    path_dead = fail_count >= 4
+    print(f"    blackholed path: {fail_count}/6 probe attempts failed (expect >= 4)")
+    sample("path blackholed")
 
     c0.release()
     c1.release()
 
-    # Wait past idle_timeout for slot 0's connection to actually be
-    # marked closed() locally (no path means no stateless reset will
-    # ever arrive either -- this can only self-heal via idle_timeout).
-    print(f"    waiting {idle_timeout_s + 2}s past idle_timeout for slot 0 "
-          f"to self-detect its own death ===", flush=True)
+    # Restore the path: the relay's blackhole list is permanent for its own
+    # lifetime, so a fresh relay on the same port is how the path comes back.
+    relay_proc.kill()
+    time.sleep(0.3)
+    relay_proc = start_proc(relay_cmd, relay_log + ".2")
+    time.sleep(0.5)
+
+    print(f"    waiting {idle_timeout_s + 2}s past idle_timeout for the dead "
+          f"connections to self-detect ===", flush=True)
     time.sleep(idle_timeout_s + 2)
     sample("past idle_timeout")
 
-    udp_before_rebuild = count_udp_sockets(client_proc.pid)
-
-    # Two MORE requests: round-robin order continues from where it left
-    # off (2 accepted so far) -- next is idx=2%2=0 (slot 0 again, the
-    # dead one -- this is the rebuild test), then idx=3%2=1 (slot 1,
-    # untouched, should just work normally the whole time).
-    c2 = HeldConn(2, client_port)  # -> slot 0, should trigger rebuild
-    c3 = HeldConn(3, client_port)  # -> slot 1, sibling, unaffected
+    # Two MORE requests: round-robin continues (2 accepted so far), so
+    # idx=2%2=0 then idx=3%2=1 -- both dead slots, both must be rebuilt.
+    c2 = HeldConn(2, client_port)
+    c3 = HeldConn(3, client_port)
     c2.start()
     time.sleep(0.1)
     c3.start()
-    time.sleep(2.0)
-    udp_after_rebuild = count_udp_sockets(client_proc.pid)
+    time.sleep(3.0)
     print(f"    rebuild: slot0_new_conn_ok={c2.got_echo} "
-          f"slot1_still_ok={c3.got_echo}")
-    print(f"    udp sockets: before={udp_before_rebuild} after={udp_after_rebuild} "
-          f"(expect still 2 -- dead one replaced, not leaked alongside)")
+          f"slot1_new_conn_ok={c3.got_echo}")
     sample("after rebuild")
 
     c2.release()
     c3.release()
 
     final_alive = client_proc.poll() is None and server_proc.poll() is None
+    # A dead path with nothing to read is exactly the shape that produced
+    # the historical POLLERR/writable spins (6990cb05d, c15f3eb57), so the
+    # samples taken across the blackhole window are gated, not just printed.
+    cpu_max = client_sampler.summary()["cpu_pct_max"]
+    cpu_ok = cpu_max is None or cpu_max < 50.0
     print(f"    final: client_alive={client_proc.poll() is None} "
-          f"server_alive={server_proc.poll() is None}")
+          f"server_alive={server_proc.poll() is None} "
+          f"client_cpu_pct_max={cpu_max} (expect < 50)")
 
     for p in (client_proc, relay_proc, server_proc, target_proc):
         try:
@@ -390,8 +295,7 @@ def scenario_removal(log_dir):
         except Exception:
             pass
 
-    ok = (slot1_still_ok and slot0_fails_now and c2.got_echo and c3.got_echo and
-          udp_after_rebuild is not None and udp_after_rebuild <= 2 and final_alive)
+    ok = path_dead and c2.got_echo and c3.got_echo and final_alive and cpu_ok
     print(f"=== [{tag}] VERDICT: {'PASS' if ok else 'FAIL'} ===", flush=True)
     return ok
 
@@ -429,9 +333,8 @@ def scenario_allocation(log_dir):
     server_sampler = chaos_monitor.Sampler(server_proc.pid)
     client_sampler.sample()
     server_sampler.sample()
-    baseline_udp = count_udp_sockets(client_proc.pid)
-    print(f"    baseline: client_fds={client_sampler.history[-1]['fds']} "
-          f"udp_socks={baseline_udp}", flush=True)
+    print(f"    baseline: client_fds={client_sampler.history[-1]['fds']}",
+          flush=True)
 
     print(f"    === firing {n_slots} sequential held requests through a "
           f"{n_slots}-slot pool, each connection capped at 1 stream ===",
@@ -445,13 +348,9 @@ def scenario_allocation(log_dir):
 
     client_sampler.sample()
     server_sampler.sample()
-    udp_after = count_udp_sockets(client_proc.pid)
     results = [c.got_echo for c in conns]
     print(f"    per-request success: {results} (expect all True -- each "
           f"landed on its own distinct, previously-idle slot)")
-    print(f"    udp sockets: {baseline_udp} -> {udp_after} (expect {n_slots} "
-          f"-- {n_slots} distinct connections actually got used, not "
-          f"round-robin secretly piling onto fewer)")
     print(f"    client fds={client_sampler.history[-1]['fds']} "
           f"rss_kb={client_sampler.history[-1]['rss_kb']} | "
           f"server fds={server_sampler.history[-1]['fds']} "
@@ -468,7 +367,7 @@ def scenario_allocation(log_dir):
         except Exception:
             pass
 
-    ok = all(results) and udp_after == n_slots and final_alive
+    ok = all(results) and final_alive
     print(f"=== [{tag}] VERDICT: {'PASS' if ok else 'FAIL'} ===", flush=True)
     return ok
 
@@ -579,7 +478,7 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
 
     results = {}
-    print("=== SCENARIO: removal (slot's path dies, sibling unaffected, "
+    print("=== SCENARIO: removal (pooled connections' shared path dies, "
           "auto-rebuild on next request) ===", flush=True)
     results["removal"] = scenario_removal(log_dir)
 

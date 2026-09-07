@@ -6,24 +6,20 @@ still *work* under pooling (echo correctness, no crash, fd/rss stay
 bounded) -- none of them ever asserted the feature's own core promise:
 that N concurrent TCP tunnels through a --quic_conn=N client really do
 share at most N underlying QUIC connections, not N connections each.
-Confirmed by hand once (see the session that added this file) via
-/proc/<pid>/net/udp inode-matching before writing this -- this
-formalizes that check as an automated regression instead of a one-off
-manual measurement.
 
-Counts the client's own UDP sockets (one per underlying QUIC connection
--- quictun_client_driver.cc creates a dedicated UDP socket per
-QuictunClientConnection) via /proc/<pid>/fd + /proc/<pid>/net/udp{,6}
-inode matching while a burst of concurrent TCP flows is in flight, and
-asserts the count never exceeds --quic_conn. Also runs a --quic_conn=0
-control, where the count is expected to reach the full flow count
-instead (proving pooling is genuinely off by default, not just "also
-happens to look capped").
+Counted via the server's own admission control rather than the client's
+UDP socket count: since the client multiplexes every QUIC connection
+onto one shared UDP socket, /proc/<pid>/fd no longer says anything
+about how many connections exist. Instead the server runs with
+--max_concurrent_connections set to exactly --quic_conn, so "the client
+stayed within its cap" is directly observable as "every flow succeeded
+and the server dropped nothing". The --quic_conn=0 control uses the
+same cap below its flow count and must get dropped, proving the capped
+results are pooling and not flows simply failing to overlap.
 
 Usage: python3 pool_cap_test.py
 """
 import os
-import re
 import socket
 import subprocess
 import sys
@@ -66,36 +62,6 @@ def wait_tcp_ready(host, port, timeout=5):
     return False
 
 
-def count_udp_sockets(pid):
-    """Number of this process's open fds that are UDP sockets -- one per
-    underlying QUIC connection for quictun_client specifically (it has no
-    other UDP socket use)."""
-    try:
-        fds = os.listdir(f"/proc/{pid}/fd")
-    except Exception:
-        return None
-    inodes = set()
-    for fd in fds:
-        try:
-            link = os.readlink(f"/proc/{pid}/fd/{fd}")
-        except Exception:
-            continue
-        m = re.match(r"socket:\[(\d+)\]", link)
-        if m:
-            inodes.add(m.group(1))
-    count = 0
-    for proc_file in (f"/proc/{pid}/net/udp", f"/proc/{pid}/net/udp6"):
-        try:
-            lines = open(proc_file).read().splitlines()[1:]
-        except Exception:
-            continue
-        for line in lines:
-            parts = line.split()
-            if len(parts) > 9 and parts[9] in inodes:
-                count += 1
-    return count
-
-
 def held_echo(port, hold_s, results, idx):
     """Connects, echoes, then holds the TCP connection open for hold_s
     before closing -- so a burst of these genuinely overlaps in time
@@ -118,7 +84,7 @@ def held_echo(port, hold_s, results, idx):
         results[idx] = False
 
 
-def run_case(quic_conn, n_flows, log_dir):
+def run_case(quic_conn, n_flows, server_cap, log_dir):
     tag = f"qc{quic_conn}"
     target_port, server_port, client_port = alloc_ports(3)
 
@@ -127,7 +93,10 @@ def run_case(quic_conn, n_flows, log_dir):
     time.sleep(0.5)
     server_proc = start_proc(
         [SERVER_BIN, f"--listen=127.0.0.1:{server_port}",
-         f"--target=127.0.0.1:{target_port}", f"--key={KEY}"],
+         f"--target=127.0.0.1:{target_port}", f"--key={KEY}",
+         f"--max_concurrent_connections={server_cap}",
+         # The drop line is QUIC_LOG(INFO); without this it never prints.
+         "--stderrthreshold=0"],
         f"{log_dir}/{tag}_server.log")
     time.sleep(1.0)
     client_proc = start_proc(
@@ -161,19 +130,11 @@ def run_case(quic_conn, n_flows, log_dir):
     for t in threads:
         t.start()
 
-    # Sample UDP socket count a few times while the burst is definitely
-    # still overlapping (each flow holds for 1.5s after its own echo).
-    time.sleep(0.6)
-    samples = []
-    for _ in range(4):
-        c = count_udp_sockets(client_proc.pid)
-        if c is not None:
-            samples.append(c)
-        time.sleep(0.2)
-
     for t in threads:
-        t.join(timeout=5)
+        t.join(timeout=10)
     echo_ok = sum(1 for r in results if r)
+    drops = open(f"{log_dir}/{tag}_server.log").read().count(
+        "Dropping new connection attempt")
 
     client_sampler.sample()
     client_summary = client_sampler.summary()
@@ -190,14 +151,13 @@ def run_case(quic_conn, n_flows, log_dir):
         except Exception:
             pass
 
-    max_observed = max(samples) if samples else None
-    print(f"=== [{tag}] n_flows={n_flows} udp_socket_samples={samples} "
-          f"max_observed={max_observed} echo_ok={echo_ok}/{n_flows} "
+    print(f"=== [{tag}] n_flows={n_flows} server_cap={server_cap} "
+          f"drops={drops} echo_ok={echo_ok}/{n_flows} "
           f"client_rss_kb={client_baseline['rss_kb_last']}->{client_summary['rss_kb_last']} "
           f"server_rss_kb={server_baseline['rss_kb_last']}->{server_summary['rss_kb_last']} ===",
           flush=True)
     return {"quic_conn": quic_conn, "n_flows": n_flows,
-            "max_observed": max_observed, "echo_ok": echo_ok,
+            "server_cap": server_cap, "drops": drops, "echo_ok": echo_ok,
             "client_rss_ok": client_rss_ok, "server_rss_ok": server_rss_ok}
 
 
@@ -207,17 +167,15 @@ def main():
 
     n_flows = 9
     cases = []
-    # Pooled: cap must hold -- max concurrently-observed UDP sockets must
-    # never exceed quic_conn, even with n_flows well above it.
+    # Pooled: the server admits exactly quic_conn connections, so n_flows
+    # well above it can only all succeed if the client really pooled.
     for qc in (1, 2, 4):
-        cases.append(run_case(qc, n_flows, log_dir))
-    # Control: unpooled (quictun's original, unchanged default) -- with
-    # nothing capping it, n_flows genuinely-concurrent flows should reach
-    # (close to) n_flows distinct connections, proving the capped results
-    # above are pooling actually happening, not just "the count happens to
-    # be low for some unrelated reason" (e.g. flows finishing too fast to
-    # overlap at all).
-    cases.append(run_case(0, n_flows, log_dir))
+        cases.append(run_case(qc, n_flows, qc, log_dir))
+    # Control: unpooled (quictun's original, unchanged default) -- one
+    # connection per flow, so the same cap must turn some of them away.
+    # Proves the capped results above are pooling actually happening, not
+    # flows finishing too fast to ever overlap.
+    cases.append(run_case(0, n_flows, 4, log_dir))
 
     print("=== SUMMARY ===")
     ok = True
@@ -225,31 +183,23 @@ def main():
         if c is None:
             ok = False
             continue
-        qc, max_observed, echo_ok = c["quic_conn"], c["max_observed"], c["echo_ok"]
-        if echo_ok < c["n_flows"]:
-            print(f"  quic_conn={qc}: FAIL -- only {echo_ok}/{c['n_flows']} echoes ok")
-            ok = False
-            continue
+        qc, drops, echo_ok = c["quic_conn"], c["drops"], c["echo_ok"]
         if not (c["client_rss_ok"] and c["server_rss_ok"]):
             print(f"  quic_conn={qc}: FAIL -- rss growth over threshold "
                   f"(client_rss_ok={c['client_rss_ok']} server_rss_ok={c['server_rss_ok']})")
             ok = False
             continue
         if qc == 0:
-            # Not capped: expect most/all flows to have genuinely
-            # overlapped as distinct connections. Some slack (>= n_flows/2)
-            # for scheduling jitter -- the point is "clearly not capped at
-            # a small N", not an exact count.
-            good = max_observed is not None and max_observed >= c["n_flows"] / 2
-            print(f"  quic_conn=0 (control): max_observed={max_observed}, "
-                  f"expected >= {c['n_flows']/2:.0f} (uncapped) -- "
+            good = drops > 0 and echo_ok < c["n_flows"]
+            print(f"  quic_conn=0 (control): drops={drops} echo_ok={echo_ok}/{c['n_flows']}, "
+                  f"expected drops>0 and echo_ok<{c['n_flows']} (uncapped) -- "
                   f"{'PASS' if good else 'FAIL'}")
-            ok = ok and good
         else:
-            good = max_observed is not None and max_observed <= qc
-            print(f"  quic_conn={qc}: max_observed={max_observed}, "
-                  f"expected <= {qc} -- {'PASS' if good else 'FAIL'}")
-            ok = ok and good
+            good = drops == 0 and echo_ok == c["n_flows"]
+            print(f"  quic_conn={qc}: drops={drops} echo_ok={echo_ok}/{c['n_flows']}, "
+                  f"expected drops=0 and all echoes ok under server cap {c['server_cap']} -- "
+                  f"{'PASS' if good else 'FAIL'}")
+        ok = ok and good
 
     print(f"=== pool_cap_test VERDICT: {'PASS' if ok else 'FAIL'} ===", flush=True)
     sys.exit(0 if ok else 1)
