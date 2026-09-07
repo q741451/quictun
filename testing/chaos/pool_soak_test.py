@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage-gap test: a slow, sustained leak in the --quic_conn pooling
+"""Coverage-gap test: a slow, sustained leak in the connection-pooling
 machinery (a StreamTcp/StreamTarget entry, a stream_delegates_ entry, an
 alarm never cancelled -- anything that leaks a small, fixed amount per
 stream open/close cycle rather than per test run) wouldn't show up in any
@@ -11,7 +11,7 @@ a connection-pooling feature specifically designed to keep connections
 open and reused for a long time.
 
 Runs several worker threads continuously opening/closing short TCP flows
-through a --quic_conn-pooled client for a sustained duration, sampling
+through a pooled client for a sustained duration, sampling
 both processes' fd count and RSS at regular intervals throughout (not
 just first/last), then compares the average of the second half of samples
 against the first half: a real leak trends upward across the whole run;
@@ -19,7 +19,7 @@ one-time startup growth (allocator warm-up, initial buffers) shows up
 early and then plateaus, which this specifically tolerates by looking at
 the trend rather than the absolute final value.
 
-Usage: python3 pool_soak_test.py [--duration=180] [--quic-conn=2]
+Usage: python3 pool_soak_test.py [--duration=180] [--conn-per-udp=2]
 """
 import argparse
 import os
@@ -103,13 +103,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--duration", type=float, default=180.0)
     ap.add_argument("--sample-interval", type=float, default=10.0)
-    ap.add_argument("--quic-conn", type=int, default=2)
+    ap.add_argument("--conn-per-udp", type=int, default=2)
+    ap.add_argument("--udp-socket", type=int, default=1)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--log-dir", default="/tmp/quictun_pool_soak_logs")
     args = ap.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
-    tag = f"soak_qc{args.quic_conn}"
+    tag = f"soak_c{args.conn_per_udp}u{args.udp_socket}"
 
     target_port, server_port, client_port = 29700, 29701, 29702
 
@@ -124,7 +125,8 @@ def main():
     client_proc = start_proc(
         [CLIENT_BIN, f"--local=127.0.0.1:{client_port}",
          f"--remote=127.0.0.1:{server_port}", f"--key={KEY}",
-         f"--quic_conn={args.quic_conn}"],
+         f"--conn_per_udp={args.conn_per_udp}",
+         f"--udp_socket={args.udp_socket}"],
         f"{args.log_dir}/{tag}_client.log")
     time.sleep(1.0)
     if client_proc.poll() is not None:
@@ -134,7 +136,8 @@ def main():
     wait_tcp_ready("127.0.0.1", client_port)
 
     print(f"=== [{tag}] running {args.workers} workers continuously opening/"
-          f"closing tunnels through --quic_conn={args.quic_conn} for "
+          f"closing tunnels through --conn_per_udp={args.conn_per_udp} "
+          f"--udp_socket={args.udp_socket} for "
           f"{args.duration:.0f}s, sampling every {args.sample_interval:.0f}s ===",
           flush=True)
 

@@ -52,13 +52,25 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "Disable with --zero_rtt=false.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
-    int32_t, quic_conn, 0,
-    "Caps how many QUIC connections to keep open to --remote at once. Once "
-    "that many are open, each further accepted TCP connection becomes an "
-    "additional stream on one of them (picked round-robin) instead of "
-    "opening another QUIC connection. 0 (default) means unlimited: every "
-    "accepted TCP connection gets its own QUIC connection, its own UDP "
-    "socket, and its own congestion-control state.");
+    int32_t, udp_socket, 1,
+    "How many local UDP sockets to open to --remote. Each binds its own "
+    "ephemeral source port, so on a path that polices per 5-tuple this is "
+    "how many separate buckets quictun spreads itself over -- one process "
+    "with --udp_socket=2 is equivalent to running two clients behind "
+    "SO_REUSEPORT. Costs one fd and one send batch buffer each, and "
+    "nothing that scales with the number of tunnels. 1 (default) is a "
+    "single source port.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, conn_per_udp, 1,
+    "How many QUIC connections to run over each --udp_socket. Total "
+    "connections is --udp_socket x this; every accepted TCP connection "
+    "becomes a stream on one of them, picked round-robin socket-first so "
+    "consecutive connections spread across sockets before filling a second "
+    "one on any of them. 1 (default) carries all tunnels for a socket on "
+    "one connection, sharing its congestion control and its "
+    "--max_streams_per_connection budget; raise it to separate bulk and "
+    "interactive traffic onto different congestion-control state.");
 
 #ifdef QUICTUN_COVERAGE_BUILD
 // See quictun_server_bin.cc's identical block for why this exists --
@@ -123,15 +135,16 @@ int main(int argc, char* argv[]) {
     return 1;
   }
   options.zero_rtt = quiche::GetQuicheCommandLineFlag(FLAGS_zero_rtt);
-  options.quic_conn = quiche::GetQuicheCommandLineFlag(FLAGS_quic_conn);
+  options.udp_socket = quiche::GetQuicheCommandLineFlag(FLAGS_udp_socket);
+  options.conn_per_udp = quiche::GetQuicheCommandLineFlag(FLAGS_conn_per_udp);
 
   quic::PrintQuictunStartupBanner(
       "quictun_client",
       {{"local", local_flag},
        {"remote", remote_flag},
        {"zero_rtt", options.zero_rtt ? "true" : "false"},
-       {"quic_conn", options.quic_conn > 0 ? absl::StrCat(options.quic_conn)
-                                           : "0 (unlimited)"}},
+       {"udp_socket", absl::StrCat(options.udp_socket)},
+       {"conn_per_udp", absl::StrCat(options.conn_per_udp)}},
       options);
 
   std::unique_ptr<quic::QuicEventLoop> event_loop =

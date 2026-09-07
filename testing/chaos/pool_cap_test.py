@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Coverage-gap test: does --quic_conn pooling actually pool?
+"""Coverage-gap test: does connection pooling actually pool?
 
-Every other chaos test that exercises --quic_conn checks that things
+Every other chaos test that exercises pooling checks that things
 still *work* under pooling (echo correctness, no crash, fd/rss stay
 bounded) -- none of them ever asserted the feature's own core promise:
-that N concurrent TCP tunnels through a --quic_conn=N client really do
-share at most N underlying QUIC connections, not N connections each.
+that many concurrent TCP tunnels through a client really do share at most
+--udp_socket x --conn_per_udp underlying QUIC connections, not one each.
 
 Counted via the server's own admission control rather than the client's
 UDP socket count: since the client multiplexes every QUIC connection
 onto one shared UDP socket, /proc/<pid>/fd no longer says anything
 about how many connections exist. Instead the server runs with
---max_concurrent_connections set to exactly --quic_conn, so "the client
+--max_concurrent_connections set to exactly that product, so "the client
 stayed within its cap" is directly observable as "every flow succeeded
-and the server dropped nothing". The --quic_conn=0 control uses the
-same cap below its flow count and must get dropped, proving the capped
-results are pooling and not flows simply failing to overlap.
+and the server dropped nothing". A control run one connection below that
+product must get dropped, proving the capped results are pooling and not
+flows simply failing to overlap.
 
 Usage: python3 pool_cap_test.py
 """
@@ -84,8 +84,8 @@ def held_echo(port, hold_s, results, idx):
         results[idx] = False
 
 
-def run_case(quic_conn, n_flows, server_cap, log_dir):
-    tag = f"qc{quic_conn}"
+def run_case(udp_socket, conn_per_udp, n_flows, server_cap, log_dir):
+    tag = f"u{udp_socket}c{conn_per_udp}"
     target_port, server_port, client_port = alloc_ports(3)
 
     target_proc = start_proc(["python3", TARGET, str(target_port)],
@@ -102,7 +102,7 @@ def run_case(quic_conn, n_flows, server_cap, log_dir):
     client_proc = start_proc(
         [CLIENT_BIN, f"--local=127.0.0.1:{client_port}",
          f"--remote=127.0.0.1:{server_port}", f"--key={KEY}",
-         f"--quic_conn={quic_conn}"],
+         f"--udp_socket={udp_socket}", f"--conn_per_udp={conn_per_udp}"],
         f"{log_dir}/{tag}_client.log")
     time.sleep(1.0)
     if client_proc.poll() is not None:
@@ -156,7 +156,8 @@ def run_case(quic_conn, n_flows, server_cap, log_dir):
           f"client_rss_kb={client_baseline['rss_kb_last']}->{client_summary['rss_kb_last']} "
           f"server_rss_kb={server_baseline['rss_kb_last']}->{server_summary['rss_kb_last']} ===",
           flush=True)
-    return {"quic_conn": quic_conn, "n_flows": n_flows,
+    return {"udp_socket": udp_socket, "conn_per_udp": conn_per_udp,
+            "n_flows": n_flows,
             "server_cap": server_cap, "drops": drops, "echo_ok": echo_ok,
             "client_rss_ok": client_rss_ok, "server_rss_ok": server_rss_ok}
 
@@ -167,15 +168,18 @@ def main():
 
     n_flows = 9
     cases = []
-    # Pooled: the server admits exactly quic_conn connections, so n_flows
-    # well above it can only all succeed if the client really pooled.
-    for qc in (1, 2, 4):
-        cases.append(run_case(qc, n_flows, qc, log_dir))
-    # Control: unpooled (quictun's original, unchanged default) -- one
-    # connection per flow, so the same cap must turn some of them away.
-    # Proves the capped results above are pooling actually happening, not
-    # flows finishing too fast to ever overlap.
-    cases.append(run_case(0, n_flows, 4, log_dir))
+    # The server admits exactly --udp_socket x --conn_per_udp connections,
+    # so n_flows well above that can only all succeed if the client really
+    # pooled. Both dimensions varied: a client that ignored --udp_socket,
+    # or that opened a socket's worth of connections per socket, would
+    # exceed the cap in one of these.
+    for udp_socket, conn_per_udp in ((1, 1), (1, 2), (2, 1), (2, 2)):
+        cases.append(run_case(udp_socket, conn_per_udp, n_flows,
+                              udp_socket * conn_per_udp, log_dir))
+    # Control: the same shape one connection short. Some flows must be
+    # turned away, proving the capped results above are pooling actually
+    # happening and not flows finishing too fast to ever overlap.
+    cases.append(run_case(2, 2, n_flows, 3, log_dir))
 
     print("=== SUMMARY ===")
     ok = True
@@ -183,20 +187,22 @@ def main():
         if c is None:
             ok = False
             continue
-        qc, drops, echo_ok = c["quic_conn"], c["drops"], c["echo_ok"]
+        shape = f"udp_socket={c['udp_socket']} conn_per_udp={c['conn_per_udp']}"
+        drops, echo_ok = c["drops"], c["echo_ok"]
+        capped = c["server_cap"] < c["udp_socket"] * c["conn_per_udp"]
         if not (c["client_rss_ok"] and c["server_rss_ok"]):
-            print(f"  quic_conn={qc}: FAIL -- rss growth over threshold "
+            print(f"  {shape}: FAIL -- rss growth over threshold "
                   f"(client_rss_ok={c['client_rss_ok']} server_rss_ok={c['server_rss_ok']})")
             ok = False
             continue
-        if qc == 0:
+        if capped:
             good = drops > 0 and echo_ok < c["n_flows"]
-            print(f"  quic_conn=0 (control): drops={drops} echo_ok={echo_ok}/{c['n_flows']}, "
-                  f"expected drops>0 and echo_ok<{c['n_flows']} (uncapped) -- "
-                  f"{'PASS' if good else 'FAIL'}")
+            print(f"  {shape} (control, server cap {c['server_cap']}): drops={drops} "
+                  f"echo_ok={echo_ok}/{c['n_flows']}, expected drops>0 and "
+                  f"echo_ok<{c['n_flows']} -- {'PASS' if good else 'FAIL'}")
         else:
             good = drops == 0 and echo_ok == c["n_flows"]
-            print(f"  quic_conn={qc}: drops={drops} echo_ok={echo_ok}/{c['n_flows']}, "
+            print(f"  {shape}: drops={drops} echo_ok={echo_ok}/{c['n_flows']}, "
                   f"expected drops=0 and all echoes ok under server cap {c['server_cap']} -- "
                   f"{'PASS' if good else 'FAIL'}")
         ok = ok and good

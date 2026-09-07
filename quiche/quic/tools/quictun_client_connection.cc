@@ -54,46 +54,46 @@ std::unique_ptr<QuictunClientConnection> QuictunClientConnection::Create(
     const QuicServerId& server_id, const QuicSocketAddress& remote_address,
     QuicCryptoClientConfig* crypto_config, const std::string& psk,
     CongestionControlType congestion_control, bool so_txtime_enabled,
-    bool poolable, bool transparent,
-    const QuicSocketAddress& self_address, QuicPacketWriter* shared_writer,
+    bool transparent,
+    QuicPacketWriter* writer,
     QuicConnectionId client_connection_id, QuictunIdleTracker* idle_tracker,
     std::function<void(QuicBlockedWriterInterface*)> on_write_blocked,
     std::function<void(QuictunClientConnection*)> on_closed) {
   // Not using std::make_unique: constructor is private.
   return absl::WrapUnique(new QuictunClientConnection(
-      event_loop, self_address, remote_address, helper,
+      event_loop, remote_address, helper,
       alarm_factory, connection_id_generator, buffer_allocator, config,
       server_id, crypto_config, psk, congestion_control, so_txtime_enabled,
-      poolable, transparent, shared_writer, client_connection_id,
+      transparent, writer, client_connection_id,
       idle_tracker, std::move(on_write_blocked), std::move(on_closed)));
 }
 
 QuictunClientConnection::QuictunClientConnection(
     QuicEventLoop* event_loop,
-    const QuicSocketAddress& self_address,
     const QuicSocketAddress& remote_address, QuicConnectionHelperInterface* helper,
     QuicAlarmFactory* alarm_factory,
     ConnectionIdGeneratorInterface& connection_id_generator,
     quiche::QuicheBufferAllocator* buffer_allocator, const QuicConfig& config,
     const QuicServerId& server_id, QuicCryptoClientConfig* crypto_config,
     const std::string& psk, CongestionControlType congestion_control,
-    bool so_txtime_enabled, bool poolable, bool transparent,
-    QuicPacketWriter* shared_writer, QuicConnectionId client_connection_id,
+    bool so_txtime_enabled, bool transparent,
+    QuicPacketWriter* writer, QuicConnectionId client_connection_id,
     QuictunIdleTracker* idle_tracker,
     std::function<void(QuicBlockedWriterInterface*)> on_write_blocked,
     std::function<void(QuictunClientConnection*)> on_closed)
     : event_loop_(event_loop),
-      self_address_(self_address),
       psk_(psk),
       transparent_(transparent),
       buffer_allocator_(buffer_allocator),
       idle_tracker_(idle_tracker),
       on_write_blocked_(std::move(on_write_blocked)),
       on_closed_(std::move(on_closed)) {
-  // Borrowed: the driver owns one writer over the one shared UDP socket.
+  // Borrowed: the driver owns one writer per UDP socket. The empty self
+  // address is deliberate -- the path's own is filled in from the first
+  // packet actually received (QuicConnection::ProcessUdpPacket()).
   connection_ = std::make_unique<QuicConnection>(
       QuicUtils::CreateRandomConnectionId(), QuicSocketAddress(),
-      remote_address, helper, alarm_factory, shared_writer,
+      remote_address, helper, alarm_factory, writer,
       /*owns_writer=*/false, Perspective::IS_CLIENT, GetQuictunVersions(),
       connection_id_generator);
   // What the server will address its packets to, and therefore the only
@@ -106,7 +106,7 @@ QuictunClientConnection::QuictunClientConnection(
 
   session_ = std::make_unique<QuictunClientSession>(
       connection_.get(), /*owner=*/this, config, "quictun/1", server_id,
-      crypto_config, poolable);
+      crypto_config);
   session_->SetCanOpenStreamCallback([this] { MaybeOpenStreams(); });
   session_->Initialize();
 
@@ -241,7 +241,7 @@ void QuictunClientConnection::StartTunnel(QuictunStream* stream,
         // This stream's tunnel closed itself -- scoped to just this one
         // TCP, same reasoning as the server-side mirror of this callback
         // (QuictunServerConnection::StartTunnelForStream()): other streams
-        // sharing this connection (--quic_conn pooling) may still be
+        // sharing this connection may still be
         // actively tunneling and shouldn't be torn down just because one
         // of them finished. QuictunTunnel::Close() always disconnects
         // tcp_socket_ itself when it has one (unlike the server's
@@ -307,11 +307,9 @@ void QuictunClientConnection::Close() {
   // crash it was found from) in QuictunServerConnection::Close()'s
   // matching comment; mirrors real QUICHE's own QuicSession::
   // PerformActionOnActiveStreams() (quic_session.cc). Matters most under
-  // --quic_conn pooling (more than one tunnel sharing this connection --
-  // --quic_conn=0 only ever has the one, so there's no *sibling* tunnel
-  // for this loop's own reentrancy to reach) but applied here
-  // unconditionally to match the server side exactly rather than special-
-  // casing quic_conn==0.
+  // more than one tunnel sharing this connection, which is the normal
+  // case -- a sibling tunnel is exactly what this loop's own reentrancy
+  // can reach.
   std::vector<QuictunTunnel*> tunnels;
   tunnels.reserve(stream_tcps_.size());
   for (auto& [id, entry] : stream_tcps_) {

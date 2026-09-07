@@ -15,16 +15,16 @@ bazel build -c opt //quiche:quictun_client //quiche:quictun_server
 | --- | --- |
 | `server_chaos_test.py` | Long-running server vs. many chaotic clients, 5 network conditions. |
 | `client_chaos_test.py` | Long-running client while the server gets killed/restarted underneath it. |
-| `pool_reentrancy_test.py` | `--quic_conn` pooling reentrancy-crash regression. |
-| `pool_cap_test.py` | `--quic_conn` actually caps connection count. |
+| `pool_reentrancy_test.py` | Connection-pooling reentrancy-crash regression. |
+| `pool_cap_test.py` | `--udp_socket` x `--conn_per_udp` actually caps socket and connection count. |
 | `pool_soak_test.py` | Sustained-duration fd/RSS leak trend check. |
-| `max_streams_test.py` | `--quic_conn` pooling vs. QUIC's own real max_streams-per-connection ceiling. |
+| `max_streams_test.py` | Pooling vs. QUIC's own real max_streams-per-connection ceiling. |
 | `writeblock_fault_test.py` | Fault injection for the write-blocked-forever bug. Needs `-DQUICTUN_TEST_BUILD`. |
 | `target_unreachable_test.py` | `--target` refusing the TCP connect. |
 | `dualstack_ipv6_test.py` | IPv6 dual-stack `--listen=[::]` reached by an IPv4 peer. |
 
 Each runs standalone -- see its own `--help`/top comment (most also take
-`--quic-conn=N` to exercise `--quic_conn` pooling). Shared helpers
+`--conn-per-udp=N`/`--udp-socket=K` to vary the pool shape). Shared helpers
 (imported/spawned, not run directly): `chaos_actor.py`, `chaos_monitor.py`,
 `chaos_target.py`, `netchaos_relay.py`.
 

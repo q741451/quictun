@@ -83,13 +83,10 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, initial_stream_flow_control_window_kb, 512,
     "Initial per-stream flow-control window advertised to the peer, in "
     "KiB. Independent of --initial_session_flow_control_window_kb -- with "
-    "the client's --quic_conn=0 (default, one stream per connection) the "
-    "smaller of "
-    "the two is what actually caps throughput in practice; with "
-    "the client pooling multiple streams onto one connection, the session "
-    "window also caps "
-    "their combined total. Raise both together for high-bandwidth-delay-"
-    "product paths.");
+    "this being per stream, it is what caps a single tunnel's throughput; "
+    "since several tunnels share a connection, the session window also "
+    "caps their combined total. Raise both together for high-bandwidth-"
+    "delay-product paths.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, initial_session_flow_control_window_kb, 512,
@@ -98,9 +95,10 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, udp_socket_buffer_kb, 1024,
-    "SO_RCVBUF/SO_SNDBUF size set on every UDP socket quictun creates (one "
-    "per QUIC connection), in KiB. Applies to both the receive and send "
-    "buffer. Too small a value under load can cause the kernel to drop "
+    "SO_RCVBUF/SO_SNDBUF size set on every UDP socket quictun creates "
+    "(--udp_socket of them on the client, one on the server), in KiB. "
+    "Applies to both the receive and send buffer. Too small a value under "
+    "load can cause the kernel to drop "
     "packets before quictun ever sees them, which looks like network loss "
     "to the congestion controller; raise it if system-wide UDP receive "
     "buffer drops (visible via /proc/net/snmp's Udp: RcvbufErrors column, "
@@ -123,19 +121,21 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "guess (100ms).");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
-    int32_t, max_streams_per_connection, 100,
+    int32_t, max_streams_per_connection, 10000,
     "Max concurrent bidirectional streams this endpoint will accept as "
     "incoming from its peer at once -- in practice only the server's "
     "value does anything, since quictun's streams are always client-"
-    "initiated. Matters when the client pools with --quic_conn: with N slots "
-    "round-robining accepted TCPs, a single pooled connection's "
-    "concurrently-open stream count is the pool's live TCP count divided "
-    "across those N slots, not N itself -- a small pool "
-    "concentrates more load onto fewer connections, making this cap more "
-    "likely to matter than a large one does. Default (100) matches "
-    "QUICHE's own real default -- quictun applies no override unless you "
-    "change this. Not a hard lifetime cap: it's a sliding window that "
-    "grows back by one every time an existing stream closes, so it only "
+    "initiated. This is quictun's concurrency ceiling: every accepted TCP "
+    "connection is a stream on one of the client's --udp_socket x "
+    "--conn_per_udp connections, so at most their product times this many "
+    "can be open at once. Hitting it does not fail cleanly -- a TCP that "
+    "lands on an already-full connection queues there -- so the default "
+    "(10000) sits well above any plausible real load rather than at "
+    "QUICHE's own default of 100. Raising it costs nothing by itself: it "
+    "is a number sent in a transport parameter, and a stream only occupies "
+    "memory once actually opened. Not a hard lifetime cap: it's a sliding "
+    "window that grows back by one every time an existing stream closes, "
+    "so it only "
     "blocks new streams while this many are open at once. A peer that "
     "opens a stream beyond what's currently granted anyway is a protocol "
     "violation -- not a per-stream rejection but the whole connection "

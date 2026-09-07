@@ -70,20 +70,19 @@ def main():
     ap.add_argument("--noise-clients", type=int, default=6)
     ap.add_argument("--server-restarts", type=int, default=3)
     ap.add_argument("--log-dir", default="/tmp/quictun_chaos_logs_client")
-    # 0 (default): unpooled, quictun's original one-QUIC-connection-per-TCP
-    # behavior. >0: every quictun_client process started below (observed
-    # AND noise) runs with --quic_conn=N, exercising the connection-pooling
-    # path -- ShouldKeepConnectionAlive()'s poolable_ branch, StartTunnel()/
-    # Close()'s reentrancy fixes, and QuictunTunnel's started_ guard all get
-    # hit hardest here specifically because pooling means several tunnels
-    # genuinely share one connection, unlike quic_conn=0 where a crashing
-    # connection only ever had the one.
-    ap.add_argument("--quic-conn", type=int, default=0)
+    # Every quictun_client process started below (observed AND noise) runs
+    # with these. Several tunnels share a connection, so StartTunnel()/
+    # Close()'s reentrancy fixes and QuictunTunnel's started_ guard are
+    # exercised even at the defaults; raising --conn-per-udp spreads
+    # tunnels over more connections, --udp-socket over more writers.
+    ap.add_argument("--conn-per-udp", type=int, default=1)
+    ap.add_argument("--udp-socket", type=int, default=1)
     args = ap.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
     tag = args.condition
-    quic_conn_flag = f"--quic_conn={args.quic_conn}"
+    pool_flags = [f"--conn_per_udp={args.conn_per_udp}",
+                  f"--udp_socket={args.udp_socket}"]
 
     target_port, server_listen_port = alloc_ports(2)
     print(f"=== [{tag}] starting chaos_target on {target_port} ===", flush=True)
@@ -122,7 +121,7 @@ def main():
     observed_client = start_proc(
         [CLIENT_BIN, f"--local=127.0.0.1:{observed_local_port}",
          f"--remote={client_remote_addr}", f"--key={KEY}", "--idle_timeout_seconds=6",
-         quic_conn_flag],
+         *pool_flags],
         f"{args.log_dir}/{tag}_observed_client.log")
     time.sleep(1.0)
     if observed_client.poll() is not None:
@@ -143,7 +142,7 @@ def main():
     sampler = chaos_monitor.Sampler(observed_client.pid)
     sampler.sample()
     baseline = sampler.summary()
-    print(f"=== [{tag}] quic_conn={args.quic_conn} observed client baseline: "
+    print(f"=== [{tag}] conn_per_udp={args.conn_per_udp} udp_socket={args.udp_socket} observed client baseline: "
           f"fds={baseline['fds_last']} rss_kb={baseline['rss_kb_last']} ===", flush=True)
 
     # Continuous real traffic against the observed client for the whole test.
@@ -170,7 +169,7 @@ def main():
         p = start_proc(
             [CLIENT_BIN, f"--local=127.0.0.1:{local_port}",
              f"--remote={client_remote_addr}", f"--key={key}",
-             "--idle_timeout_seconds=6", quic_conn_flag],
+             "--idle_timeout_seconds=6", *pool_flags],
             f"{args.log_dir}/{tag}_noise{i}.log")
         noise_procs.append((local_port, p, bad))
 
@@ -244,9 +243,9 @@ def main():
     # already stressed against, deliberately configured with a real
     # --reset-prob (0.1) independent of anything quictun does. A single
     # shot through it is not a fair pass/fail signal on its own: a
-    # dedicated A/B/C measurement (quic_conn=0 vs 1 vs 3, n=90 each)
+    # dedicated A/B/C measurement (n=90 each across three pool shapes)
     # confirmed combo_all_bad's one-shot failure rate here (~10-20%) is
-    # statistically identical regardless of --quic_conn, and that
+    # statistically identical regardless of pool shape, and that
     # confirmed failures always resolve in <3s (a clean reset/incomplete
     # read, never a hang) -- i.e. this is the relay's own coin flip, not a
     # sign of anything actually wrong with the tunnel. Retry a few times
@@ -272,7 +271,7 @@ def main():
             time.sleep(0.5)
 
     summary = sampler.summary()
-    print(f"=== [{tag}] SUMMARY (quic_conn={args.quic_conn}) ===")
+    print(f"=== [{tag}] SUMMARY (conn_per_udp={args.conn_per_udp} udp_socket={args.udp_socket}) ===")
     print(f"  observed_client_alive={observed_client.poll() is None}")
     print(f"  final_server_alive={server_procs[-1].poll() is None}")
     print(f"  sanity_echo_with_fresh_server_ok={sanity_ok}")

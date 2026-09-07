@@ -12,19 +12,14 @@ packet closing the whole connection, while other tunnels on the same
 connection are still mid-callback) that a real gdb backtrace confirmed
 each crash from.
 
-Runs under a configurable --quic-conn. At --quic-conn=0 every TCP gets
-its own one-tunnel-per-connection QUIC connection -- the reentrancy
-StartTunnel()'s bug needed can still happen there (it's been present
-since the very first commit), but a tunnel's own Close() can never race
-a *sibling* tunnel's in-flight callback, since there is no sibling.
---quic-conn>0 is what makes multiple tunnels genuinely share one
-connection, maximizing exactly the cross-tunnel reentrancy window
+Runs under a configurable pool shape. Tunnels share a connection, which
+is exactly the cross-tunnel reentrancy window
 QuictunClientConnection::Close()/QuictunServerConnection::Close()'s
-snapshot fix and QuictunTunnel's started_ guard exist for -- run at a
-few different pool sizes (1 and a larger one) for that reason, not just
-the unpooled control.
+snapshot fix and QuictunTunnel's started_ guard exist for. --conn-per-udp=1
+is the widest such window (every tunnel on one connection); larger values
+spread them out, so run a few shapes rather than just one.
 
-Usage: python3 pool_reentrancy_test.py --quic-conn=0|1|3
+Usage: python3 pool_reentrancy_test.py --conn-per-udp=1|3
 """
 import argparse
 import os
@@ -99,14 +94,15 @@ def short_echo(port, results, idx):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--quic-conn", type=int, default=1)
+    ap.add_argument("--conn-per-udp", type=int, default=1)
+    ap.add_argument("--udp-socket", type=int, default=1)
     ap.add_argument("--rounds", type=int, default=8)
     ap.add_argument("--bursts-per-round", type=int, default=25)
     ap.add_argument("--log-dir", default="/tmp/quictun_pool_reentrancy_logs")
     args = ap.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
-    tag = f"qc{args.quic_conn}"
+    tag = f"c{args.conn_per_udp}u{args.udp_socket}"
 
     target_port, server_port, client_local_port = alloc_ports(3)
 
@@ -127,11 +123,14 @@ def main():
     client_proc = start_proc(
         [CLIENT_BIN, f"--local=127.0.0.1:{client_local_port}",
          f"--remote=127.0.0.1:{server_port}", f"--key={KEY}",
-         "--idle_timeout_seconds=6", f"--quic_conn={args.quic_conn}"],
+         "--idle_timeout_seconds=6",
+         f"--conn_per_udp={args.conn_per_udp}",
+         f"--udp_socket={args.udp_socket}"],
         f"{args.log_dir}/{tag}_client.log")
     time.sleep(1.0)
     if client_proc.poll() is not None:
-        print(f"!!! client exited immediately (quic_conn={args.quic_conn})")
+        print(f"!!! client exited immediately "
+              f"(conn_per_udp={args.conn_per_udp} udp_socket={args.udp_socket})")
         sys.exit(1)
 
     wait_tcp_ready("127.0.0.1", client_local_port)
@@ -158,9 +157,8 @@ def main():
     print(f"=== [{tag}] initial echoes ok: {initial_ok}/10 ===", flush=True)
 
     # The actual reentrancy trigger: fire a burst of concurrent short-lived
-    # TCP connections (each opening its own tunnel -- sharing the one
-    # pooled QUIC connection under --quic-conn>0), then kill the server
-    # WHILE they're still in flight. The UDP-write-failure / stream-reset
+    # TCP connections (each opening its own tunnel, sharing a pooled QUIC
+    # connection), then kill the server WHILE they're still in flight. The UDP-write-failure / stream-reset
     # storm this produces is exactly what made one tunnel's Close()
     # reenter while a sibling tunnel on the same connection was still
     # mid-callback in the real crashes this formalizes.

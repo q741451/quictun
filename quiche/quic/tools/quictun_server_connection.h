@@ -37,8 +37,8 @@ namespace quic {
 // Server-side mirror of QuictunClientConnection: owns the QuicConnection
 // and the QuictunServerSession, reading and writing through the driver's
 // one shared socket (see quictun_server_driver.h). Each stream the client
-// opens on that session (--quic_conn on the client side controls whether
-// that's ever more than one -- see quictun_client_driver.h) gets its own
+// opens on that session (the client decides how many -- see
+// quictun_client_driver.h) gets its own
 // independent authentication (the --key preamble check, plus an address
 // header right after it when --transparent), its own dial-out (to
 // --target, or to that per-stream captured destination when

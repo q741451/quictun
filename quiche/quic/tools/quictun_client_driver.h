@@ -32,10 +32,11 @@
 
 namespace quic {
 
-// Owns the --local TCP listener; for each accepted connection, either builds
-// a new QuictunClientConnection (its own dedicated UDP socket + QUIC
-// connection) or, under --quic_conn pooling, assigns it as one more stream
-// on an existing one -- see AcceptLoop()/pool_slots_. Owns the state shared
+// Owns the --local TCP listener and the --udp_socket local UDP sockets;
+// for each accepted TCP connection, assigns it as one more stream on one of
+// the --udp_socket x --conn_per_udp QUIC connections, building that
+// connection first if its slot is empty or dead -- see
+// AcceptLoop()/pool_slots_. Owns the state shared
 // by every connection: the crypto config (with PSK and, if 0-RTT is
 // enabled, a session cache shared across all connections made to the same
 // --remote within this process's lifetime), the connection helper/alarm
@@ -53,9 +54,10 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener,
   absl::Status Start();
 
   // QuicSocketEventListener (for the --local TCP listen socket):
-  // ProcessPacketInterface (for the one shared UDP socket): routes by the
+  // ProcessPacketInterface (for the UDP sockets): routes by the
   // destination connection ID, the only demultiplexing key a 1-RTT short
-  // header carries.
+  // header carries -- which socket a packet arrived on is not consulted,
+  // since the ID alone identifies the connection.
   void ProcessPacket(const QuicSocketAddress& self_address,
                      const QuicSocketAddress& peer_address,
                      const QuicReceivedPacket& packet) override;
@@ -68,9 +70,13 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener,
   // any QuictunClientConnection callback (see quictun_client_bin.cc) -- see
   // the comment on pending_removal_ for why this can't happen synchronously
   // from within a connection's own close path.
-  // Called by a connection whose write hit the shared socket's full send
-  // buffer; drained in OnSocketEvent() when it reports writable again.
-  void OnWriteBlocked(QuicBlockedWriterInterface* blocked_writer);
+  // Called by a connection whose write hit its socket's full send buffer;
+  // drained in OnSocketEvent() when that socket reports writable again.
+  // Which socket that is comes from the connection's own creation site
+  // (CreateNewConnection() binds it into the callback), since a connection
+  // is pinned to one socket for its whole life.
+  void OnWriteBlocked(QuicBlockedWriterInterface* blocked_writer,
+                      size_t socket_index);
 
   void CollectGarbage();
 
@@ -87,14 +93,31 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener,
   void AcceptLoop();
   void RemoveConnection(QuictunClientConnection* connection);
 
-  // Creates a brand-new QuictunClientConnection, taking (shared) ownership
-  // via connections_ and returning a second reference to it -- for
-  // AcceptLoop() to either use directly (--quic_conn=0) or drop a weak_ptr
-  // to into a freshly-(re)claimed pool_slots_ entry (--quic_conn>0). See
-  // pool_slots_'s own comment for why shared_ptr, not a raw pointer.
-  // Returns nullptr if the new connection's UDP socket couldn't be created
-  // -- see QuictunClientConnection::Create().
-  std::shared_ptr<QuictunClientConnection> CreateNewConnection();
+  // Creates a brand-new QuictunClientConnection over udp_sockets_[socket],
+  // taking (shared) ownership via connections_ and returning a second
+  // reference to it for AcceptLoop() to drop a weak_ptr to into the
+  // freshly-(re)claimed pool_slots_ entry. See pool_slots_'s own comment
+  // for why shared_ptr, not a raw pointer.
+  std::shared_ptr<QuictunClientConnection> CreateNewConnection(
+      size_t socket_index);
+
+  // One local UDP socket: its own source port -- which is the whole point
+  // of there being more than one, see --udp_socket -- plus the writer every
+  // connection pinned to it borrows, and the list of those connections
+  // currently blocked on its send buffer.
+  struct UdpSocket {
+    OwnedSocketFd fd;
+    QuicSocketAddress self_address;
+    std::unique_ptr<QuicPacketWriter> writer;
+    // Same role as QuicDispatcher::write_blocked_list_: several connections
+    // share this socket, so there is no per-connection writability event
+    // any more and a full send buffer would otherwise wedge the process.
+    QuicBlockedWriterList write_blocked_list;
+  };
+
+  // Which socket an event is for. A linear scan over --udp_socket
+  // entries, which is a handful at most.
+  UdpSocket* FindUdpSocketByFd(SocketFd fd);
 
   QuicEventLoop* const event_loop_;
   const QuicSocketAddress local_address_;
@@ -103,17 +126,19 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener,
 
   OwnedSocketFd listen_fd_;
 
-  // One UDP socket, one reader and one writer for every QUIC connection
-  // this driver owns -- see QuictunClientConnection's ctor. Connected to
-  // remote_address_, so reads need no per-packet address handling.
-  OwnedSocketFd udp_fd_;
-  QuicSocketAddress udp_self_address_;
+  // --udp_socket entries, all connected to remote_address_ so reads need
+  // no per-packet address handling. unique_ptr so an entry's address is
+  // fixed for its whole life: connections and blocked-writer lists are
+  // reached through it long after Start() built the vector.
+  std::vector<std::unique_ptr<UdpSocket>> udp_sockets_;
+  // --udp_socket, clamped to at least 1 in the constructor. Equal to
+  // udp_sockets_.size() once Start() has succeeded, but needed before
+  // that to size pool_slots_.
+  size_t udp_socket_count_ = 1;
+  // Shared across every socket: ReadAndDispatchPackets() takes the fd as
+  // an argument and the read buffers are pure scratch, so one reader
+  // serves them all rather than each carrying its own ~31 KB.
   QuicPacketReader udp_reader_;
-  std::unique_ptr<QuicPacketWriter> shared_writer_;
-  // Same role as QuicDispatcher::write_blocked_list_: with one socket
-  // for every connection there is no per-connection writability event
-  // any more, so a full send buffer would otherwise wedge the process.
-  QuicBlockedWriterList write_blocked_list_;
   // Keyed by the client connection ID each connection was given at
   // construction; ProcessPacket() looks packets up here.
   absl::flat_hash_map<QuicConnectionId, QuictunClientConnection*,
@@ -147,7 +172,7 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener,
   // runs at the top level, between event-loop iterations.
   std::vector<QuictunClientConnection*> pending_removal_;
 
-  // --quic_conn>0 connection pool: a fixed-size (== options_.quic_conn)
+  // The connection pool: a fixed-size (== --udp_socket x --conn_per_udp)
   // array of slots, each either empty/expired or referencing one of this
   // driver's own connections_ entries. weak_ptr, not a raw pointer --
   // modeled on real QUICHE's own QuicDispatcher, which faces the identical
@@ -177,11 +202,12 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener,
   // single-threaded event loop, so there's no locking here, matching
   // kcptun's own single-goroutine accept loop for the same reason.
   //
-  // Deliberately never constructed/touched at all when options_.quic_conn
-  // == 0 (see AcceptLoop()) -- unlimited pooling isn't "a pool of size 0",
-  // it's a structurally different mode (a fixed-size array of size 0 would
-  // make the round-robin's modulo undefined behavior, quite apart from not
-  // making semantic sense).
+  // Slot i lives on udp_sockets_[i % --udp_socket], so round-robining
+  // straight through this array visits every socket before returning to
+  // any of them -- with --conn_per_udp=1 consecutive TCP connections
+  // strictly alternate sockets, which is what makes --udp_socket=K
+  // actually present K source ports to a per-5-tuple policer rather than
+  // filling the first socket first.
   std::vector<std::weak_ptr<QuictunClientConnection>> pool_slots_;
   size_t pool_round_robin_next_ = 0;
 };

@@ -4,6 +4,7 @@
 
 #include "quiche/quic/tools/quictun_client_driver.h"
 
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -71,41 +72,44 @@ QuictunClientDriver::QuictunClientDriver(QuicEventLoop* event_loop,
     EnableQuictunSoTxTime();
   }
 
-  // See pool_slots_'s comment: only exists in pooling mode. A negative
-  // --quic_conn (nothing stops one being passed on the command line) just
-  // takes this same branch as 0 -- harmless, not worth a separate
-  // validation error for what's obviously a typo anyway.
-  if (options.quic_conn > 0) {
-    pool_slots_.resize(options.quic_conn);
-  }
+  // Nothing stops a zero or negative --udp_socket/--conn_per_udp being
+  // passed on the command line; both are obviously typos, and one of each
+  // is the smallest thing that still works.
+  udp_socket_count_ = static_cast<size_t>(std::max(options.udp_socket, 1));
+  pool_slots_.resize(udp_socket_count_ *
+                     static_cast<size_t>(std::max(options.conn_per_udp, 1)));
 }
 
 absl::Status QuictunClientDriver::Start() {
-  {
+  // One socket per --udp_socket, each on its own ephemeral source port
+  // (bind is implicit in connect()) -- see --udp_socket's own comment.
+  for (size_t i = 0; i < udp_socket_count_; ++i) {
+    auto entry = std::make_unique<UdpSocket>();
     absl::StatusOr<OwnedSocketFd> ufd =
         CreateQuicUdpSocket(remote_address_, options_.udp_socket_buffer_bytes);
     if (!ufd.ok()) {
       return ufd.status();
     }
-    udp_fd_ = *std::move(ufd);
-    absl::Status cs = socket_api::Connect(*udp_fd_, remote_address_);
+    entry->fd = *std::move(ufd);
+    absl::Status cs = socket_api::Connect(*entry->fd, remote_address_);
     if (!cs.ok()) {
       return cs;
     }
     absl::StatusOr<QuicSocketAddress> self =
-        socket_api::GetSocketAddress(*udp_fd_);
+        socket_api::GetSocketAddress(*entry->fd);
     if (!self.ok()) {
       return self.status();
     }
-    udp_self_address_ = *self;
-    shared_writer_ =
-        MakeQuictunPacketWriter(*udp_fd_, options_.so_txtime, event_loop_);
+    entry->self_address = *self;
+    entry->writer =
+        MakeQuictunPacketWriter(*entry->fd, options_.so_txtime, event_loop_);
     if (!event_loop_->RegisterSocket(
-            *udp_fd_,
+            *entry->fd,
             kSocketEventReadable | kSocketEventWritable | kSocketEventError,
             this)) {
-      return absl::InternalError("failed to register the shared UDP socket");
+      return absl::InternalError("failed to register a UDP socket");
     }
+    udp_sockets_.push_back(std::move(entry));
   }
 
   absl::StatusOr<SocketFd> fd = socket_api::CreateSocket(
@@ -157,42 +161,52 @@ absl::Status QuictunClientDriver::Start() {
   return absl::OkStatus();
 }
 
+QuictunClientDriver::UdpSocket* QuictunClientDriver::FindUdpSocketByFd(
+    SocketFd fd) {
+  for (const std::unique_ptr<UdpSocket>& entry : udp_sockets_) {
+    if (*entry->fd == fd) {
+      return entry.get();
+    }
+  }
+  return nullptr;
+}
+
 void QuictunClientDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
                                         SocketFd fd,
                                         QuicSocketEventMask events) {
-  if (fd == *udp_fd_) {
+  if (UdpSocket* udp = FindUdpSocketByFd(fd); udp != nullptr) {
     if (events & kSocketEventError) {
       // Consume it so a level-triggered loop does not spin on an unread
       // POLLERR; deliberately not acted on (trivially spoofable, and on a
-      // shared socket not attributable to any one connection).
-      absl::Status error = socket_api::GetSocketError(*udp_fd_);
+      // socket shared by several connections not attributable to any one
+      // of them).
+      absl::Status error = socket_api::GetSocketError(*udp->fd);
       if (!error.ok()) {
         QUIC_LOG_EVERY_N_SEC(INFO, 10)
-            << "quictun shared UDP socket reported an error (consumed): "
-            << error;
+            << "quictun UDP socket reported an error (consumed): " << error;
       }
       if (!event_loop_->SupportsEdgeTriggered()) {
-        event_loop_->RearmSocket(*udp_fd_, kSocketEventError);
+        event_loop_->RearmSocket(*udp->fd, kSocketEventError);
       }
     }
     if (events & kSocketEventWritable) {
       // Mirrors QuicDispatcher::OnCanWrite().
-      shared_writer_->SetWritable();
-      write_blocked_list_.OnWriterUnblocked();
-      if (!write_blocked_list_.Empty() &&
+      udp->writer->SetWritable();
+      udp->write_blocked_list.OnWriterUnblocked();
+      if (!udp->write_blocked_list.Empty() &&
           !event_loop_->SupportsEdgeTriggered()) {
-        event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
+        event_loop_->RearmSocket(*udp->fd, kSocketEventWritable);
       }
     }
     if (events & kSocketEventReadable) {
       bool more = true;
       while (more) {
         more = udp_reader_.ReadAndDispatchPackets(
-            *udp_fd_, udp_self_address_.port(), *event_loop_->GetClock(), this,
+            *udp->fd, udp->self_address.port(), *event_loop_->GetClock(), this,
             nullptr);
       }
       if (!event_loop_->SupportsEdgeTriggered()) {
-        event_loop_->RearmSocket(*udp_fd_, kSocketEventReadable);
+        event_loop_->RearmSocket(*udp->fd, kSocketEventReadable);
       }
     }
     return;
@@ -206,9 +220,10 @@ void QuictunClientDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
 }
 
 std::shared_ptr<QuictunClientConnection>
-QuictunClientDriver::CreateNewConnection() {
+QuictunClientDriver::CreateNewConnection(size_t socket_index) {
+  UdpSocket& udp = *udp_sockets_[socket_index];
   // Unique per connection and never reused: it is the routing key for every
-  // packet the server sends back over the shared socket (see ProcessPacket()).
+  // packet the server sends back, on whichever socket (see ProcessPacket()).
   const uint64_t raw_cid = next_client_cid_++;
   QuicConnectionId cid(reinterpret_cast<const char*>(&raw_cid),
                        sizeof(raw_cid));
@@ -218,10 +233,11 @@ QuictunClientDriver::CreateNewConnection() {
           connection_id_generator_, buffer_allocator_, config_template_,
           server_id_, remote_address_, crypto_config_.get(), options_.psk,
           congestion_control_, options_.so_txtime,
-          /*poolable=*/options_.quic_conn > 0,
-          options_.transparent, udp_self_address_, shared_writer_.get(), cid,
+          options_.transparent, udp.writer.get(), cid,
           &idle_tracker_,
-          [this](QuicBlockedWriterInterface* w) { OnWriteBlocked(w); },
+          [this, socket_index](QuicBlockedWriterInterface* w) {
+            OnWriteBlocked(w, socket_index);
+          },
           [this](QuictunClientConnection* c) { RemoveConnection(c); });
   if (connection == nullptr) {
     return nullptr;
@@ -265,35 +281,18 @@ void QuictunClientDriver::AcceptLoop() {
       }
     }
 
-    if (options_.quic_conn == 0) {
-      // Unlimited: quictun's original behavior, completely unchanged --
-      // every accepted TCP connection gets its own brand-new QUIC
-      // connection. See pool_slots_'s comment for why this can't just be
-      // "the pooling path below with a size-0 pool_slots_".
-      std::shared_ptr<QuictunClientConnection> connection =
-          CreateNewConnection();
-      if (connection == nullptr) {
-        socket_api::Close(accepted->fd);
-        continue;
-      }
-      connection->AssignNewTcp(accepted->fd, accepted->peer_address,
-                               captured_dest);
-      continue;
-    }
-
-    // Pooling: kcptun's own --conn algorithm (see pool_slots_'s comment) --
-    // round-robin over a fixed number of slots, lazily creating/replacing
-    // whichever slot round-robin selects only when it's actually that
-    // slot's turn to be used, rather than eagerly tracking liveness
-    // separately. A connection that's still mid-handshake is neither
-    // nullptr nor closed(), so it's treated as available here exactly like
-    // a fully-established one -- AssignNewTcp() below queues the new TCP
-    // if OpenOutgoingStream() isn't possible yet, same as it always does.
-    size_t idx = pool_round_robin_next_ % pool_slots_.size();
+    // Round-robin over the flat pool, lazily creating or replacing the
+    // slot it lands on -- see pool_slots_'s comment for the algorithm and
+    // for how slots map onto sockets. A connection that's still
+    // mid-handshake is neither nullptr nor closed(), so it's treated as
+    // available here exactly like a fully-established one: AssignNewTcp()
+    // queues the new TCP if OpenOutgoingStream() isn't possible yet, same
+    // as it always does.
+    const size_t idx = pool_round_robin_next_ % pool_slots_.size();
     pool_round_robin_next_++;
     std::shared_ptr<QuictunClientConnection> conn = pool_slots_[idx].lock();
     if (conn == nullptr || conn->closed()) {
-      conn = CreateNewConnection();
+      conn = CreateNewConnection(idx % udp_socket_count_);
       if (conn == nullptr) {
         socket_api::Close(accepted->fd);
         continue;
@@ -315,16 +314,17 @@ void QuictunClientDriver::RemoveConnection(QuictunClientConnection* connection) 
 }
 
 void QuictunClientDriver::OnWriteBlocked(
-    QuicBlockedWriterInterface* blocked_writer) {
-  write_blocked_list_.Add(*blocked_writer);
+    QuicBlockedWriterInterface* blocked_writer, size_t socket_index) {
+  UdpSocket& udp = *udp_sockets_[socket_index];
+  udp.write_blocked_list.Add(*blocked_writer);
   if (!event_loop_->SupportsEdgeTriggered()) {
-    event_loop_->RearmSocket(*udp_fd_, kSocketEventWritable);
+    event_loop_->RearmSocket(*udp.fd, kSocketEventWritable);
   }
 }
 
-void QuictunClientDriver::ProcessPacket(
-    const QuicSocketAddress& /*self_address*/,
-    const QuicSocketAddress& peer_address, const QuicReceivedPacket& packet) {
+void QuictunClientDriver::ProcessPacket(const QuicSocketAddress& self_address,
+                                        const QuicSocketAddress& peer_address,
+                                        const QuicReceivedPacket& packet) {
   PacketHeaderFormat format;
   QuicLongHeaderType long_packet_type;
   bool version_present;
@@ -350,7 +350,7 @@ void QuictunClientDriver::ProcessPacket(
                   << QuicConnectionId(destination_connection_id);
     return;
   }
-  it->second->ProcessPacket(udp_self_address_, peer_address, packet);
+  it->second->ProcessPacket(self_address, peer_address, packet);
 }
 
 void QuictunClientDriver::CollectGarbage() {

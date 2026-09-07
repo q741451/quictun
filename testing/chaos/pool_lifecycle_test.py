@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage-gap test: --quic_conn pool slot lifecycle -- removal
+"""Coverage-gap test: connection pool slot lifecycle -- removal
 (auto-rebuild after a pooled connection's path silently dies),
 allocation (round-robin is genuinely deterministic-fair across slots),
 and the "dry queue" consequence of that same determinism (a new TCP can
@@ -14,13 +14,14 @@ order is fully deterministic from request order alone (round_robin_next_
 increments unconditionally on every accepted TCP -- see
 quictun_client_driver.cc), so slot behaviour is observable purely from
 which requests succeed. Connection counting via each process's own UDP
-sockets is gone: the client multiplexes every QUIC connection onto one
-shared socket, so /proc says nothing about how many exist (pool_cap_test.py
-now uses the server's admission control for that instead). Likewise the
-relay can no longer blackhole one slot's path while sparing a sibling --
-there is only one path -- so "removal" now kills the shared path for all
-of them and checks the rebuild. fd/RSS sampled throughout every scenario
-(chaos_monitor.Sampler) rather than just checked once at the end.
+sockets is gone: several QUIC connections share each of the client's
+--udp_socket sockets, so /proc says nothing about how many exist
+(pool_cap_test.py uses the server's admission control for that instead).
+These scenarios all run at --udp_socket=1, where the relay sees one path
+and so cannot blackhole one slot while sparing a sibling -- "removal"
+kills that shared path for all of them and checks the rebuild. fd/RSS
+sampled throughout every scenario (chaos_monitor.Sampler) rather than
+just checked once at the end.
 
 Usage: python3 pool_lifecycle_test.py
 """
@@ -190,7 +191,7 @@ def scenario_removal(log_dir):
     client_proc = start_proc(
         [CLIENT_BIN, f"--local=127.0.0.1:{client_port}",
          f"--remote=127.0.0.1:{relay_port}", f"--key={KEY}",
-         f"--idle_timeout_seconds={idle_timeout_s}", "--quic_conn=2"],
+         f"--idle_timeout_seconds={idle_timeout_s}", "--conn_per_udp=2"],
         f"{log_dir}/{tag}_client.log")
     time.sleep(1.0)
     wait_for_client_log_ready(f"{log_dir}/{tag}_client.log")
@@ -324,7 +325,7 @@ def scenario_allocation(log_dir):
     client_proc = start_proc(
         [CLIENT_BIN, f"--local=127.0.0.1:{client_port}",
          f"--remote=127.0.0.1:{server_port}", f"--key={KEY}",
-         "--idle_timeout_seconds=20", f"--quic_conn={n_slots}"],
+         "--idle_timeout_seconds=20", f"--conn_per_udp={n_slots}"],
         f"{log_dir}/{tag}_client.log")
     time.sleep(1.0)
     wait_for_client_log_ready(f"{log_dir}/{tag}_client.log")
@@ -377,7 +378,7 @@ def scenario_dry_queue(log_dir):
     to whichever slot is "next" by request COUNT, not by which slot
     currently has spare stream capacity -- so it can land on an
     already-full slot and queue there even while a DIFFERENT slot has
-    room right now. --quic_conn=2, --max_streams_per_connection=2:
+    room right now. --conn_per_udp=2, --max_streams_per_connection=2:
     fills both slots (2 streams each), frees ONE stream on slot 1 only,
     then fires a new request -- round-robin's next turn is slot 0 (still
     full), so the new request should queue despite slot 1 having a free
@@ -398,7 +399,7 @@ def scenario_dry_queue(log_dir):
     client_proc = start_proc(
         [CLIENT_BIN, f"--local=127.0.0.1:{client_port}",
          f"--remote=127.0.0.1:{server_port}", f"--key={KEY}",
-         "--idle_timeout_seconds=20", "--quic_conn=2"],
+         "--idle_timeout_seconds=20", "--conn_per_udp=2"],
         f"{log_dir}/{tag}_client.log")
     time.sleep(1.0)
     wait_for_client_log_ready(f"{log_dir}/{tag}_client.log")

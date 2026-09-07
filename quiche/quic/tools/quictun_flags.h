@@ -84,12 +84,11 @@ struct QuictunTuningOptions {
   // is simply idle rather than dead.
   QuicTime::Delta tcp_idle_timeout = QuicTime::Delta::FromSeconds(24 * 60 * 60);
 
-  // Initial per-stream flow-control window. With --quic_conn=0 (default,
-  // one stream per connection) the smaller of this and
-  // initial_session_flow_control_window_bytes is, in practice, what caps
-  // throughput on high-bandwidth-delay-product paths; with --quic_conn
-  // pooling multiple streams onto one connection, the session window also
-  // caps their combined total -- raise both together either way.
+  // Initial per-stream flow-control window. On a high-bandwidth-delay-
+  // product path this is what caps a single tunnel's throughput, and
+  // since several tunnels share a connection, the session window
+  // (initial_session_flow_control_window_bytes) caps their combined
+  // total -- raise both together.
   // Independently tunable from the session window (unlike stock
   // QuicConfig, which would default both to the same 16 KB) so an
   // operator can match them to their own path's BDP instead of guessing.
@@ -127,16 +126,19 @@ struct QuictunTuningOptions {
   // SERVER's value actually constrains anything -- the client's own
   // copy of this flag is accepted for symmetry/documentation clarity
   // but never has anything to bite, since the server never opens a
-  // stream to the client. Relevant specifically for --quic_conn pooling:
-  // with quic_conn=N pool slots round-robining accepted TCPs, a single
-  // pooled connection's concurrently-open stream count is the whole
-  // pool's live TCP count divided across those N slots, not N itself --
-  // a small N concentrates more of that load onto fewer connections,
-  // making the shared per-connection cap more likely to matter than a
-  // large N does. 100 matches QuicConfig's own real default
-  // (kDefaultMaxStreamsPerConnection, quic_constants.h) -- quictun
-  // otherwise never touches this at all, so this flag existing at its
-  // default changes nothing from before it existed. Not a hard lifetime
+  // stream to the client. This is quictun's concurrency ceiling: every
+  // accepted TCP connection is a stream on one of the client's
+  // --udp_socket x --conn_per_udp connections, so at most
+  // udp_socket * conn_per_udp * this many can be open at once. Hitting
+  // it does not fail cleanly -- round-robin picks a slot blind to how
+  // occupied it is (see AcceptLoop()), so a TCP landing on a full
+  // connection just queues there -- which is why the default is set well
+  // above any plausible real load rather than at QuicConfig's own
+  // kDefaultMaxStreamsPerConnection (100, quic_constants.h). The limit
+  // itself costs nothing to raise: it is a number sent in a transport
+  // parameter, and a stream only occupies memory once actually opened
+  // (QuicStreamSequencerBuffer allocates its 8 KB blocks lazily). Not a
+  // hard lifetime
   // cap: it's a sliding window that grows back by one every time an
   // existing stream closes (QuicStreamIdManager::OnStreamClosed()), so
   // it only actually blocks new streams while this many are open at
@@ -147,25 +149,22 @@ struct QuictunTuningOptions {
   // stream sharing it down too; confirmed via a real repro (see
   // testing/chaos/max_streams_test.py) that this fires correctly and
   // both endpoints survive it cleanly.
-  int32_t max_streams_per_connection = 100;
+  int32_t max_streams_per_connection = 10000;
 
-  // Client-only: caps how many QUIC connections quictun_client keeps open
-  // to --remote at once, multiplexing TCP tunnels onto them as streams once
-  // that cap is reached instead of opening one QUIC connection per TCP
-  // connection. 0 (default) means unlimited -- quictun's original
-  // behavior, unchanged: every accepted --local connection gets its own
-  // brand-new QUIC connection, exactly as if this option didn't exist. A
-  // positive value pools: the client keeps at most quic_conn connections
-  // open, round-robining new TCP connections across them (opening a new
-  // stream on whichever one is selected) once all quic_conn slots are
-  // already in use. See quictun_client_driver.h for the actual pooling
-  // logic. Ignored by quictun_server, which is purely reactive to however
-  // many streams a client legitimately opens on a connection -- see
-  // QuictunServerConnection's class comment.
-  // Client-only, set by quictun_client_bin.cc. Pooling is a property of how
-  // the client assigns accepted TCP connections to QUIC connections; the
-  // server sees only the streams that result and needs no matching setting.
-  int32_t quic_conn = 0;
+  // Client-only: how many local UDP sockets quictun_client opens to
+  // --remote, and how many QUIC connections it runs over each. Total
+  // connections is the product; every accepted --local TCP connection
+  // becomes a stream on one of them, picked round-robin socket-first
+  // (see AcceptLoop()) so consecutive connections spread across sockets
+  // before filling a second one on any of them.
+  //
+  // Ignored by quictun_server, which is purely reactive to however many
+  // connections and streams a client legitimately opens -- it routes by
+  // connection ID and replies to whatever address a packet came from, so
+  // a client spreading itself over several source ports needs no matching
+  // setting there. See QuictunServerConnection's class comment.
+  int32_t udp_socket = 1;
+  int32_t conn_per_udp = 1;
 };
 
 // Defines --key, --zero_rtt, --congestion_control, --so_txtime,

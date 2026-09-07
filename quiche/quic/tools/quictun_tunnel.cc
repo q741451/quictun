@@ -188,7 +188,7 @@ void QuictunTunnel::OnStreamCanWriteMore(QuicStreamId /*id*/) {
   //
   // A looser CanWriteNewData()-based check (QUICHE's own ~8KiB buffered_
   // data_threshold_, reused instead of this stricter "fully drained" rule)
-  // was tried during a --quic_conn pooling stall investigation, on the
+  // was tried during a pooling stall investigation, on the
   // theory that this strict rule's higher re-enqueue churn was starving
   // other streams sharing a connection. It wasn't -- the stall's actual
   // cause turned out to be unrelated (see QuictunStreamDelegate::
@@ -435,7 +435,7 @@ void QuictunTunnel::MaybeFinalizeClose() {
     // are never allowed to disagree about the stream's fate, in either
     // implementation.) This is a real, independent correctness fix worth
     // keeping on its own merits -- but investigation later showed it is
-    // NOT what was causing a separate, reproduced --quic_conn pooling
+    // NOT what was causing a separate, reproduced pooling
     // stall (some streams on a shared connection permanently starved of
     // write opportunities while the connection's own session-level flow
     // control and congestion window both stayed healthy). That stall's
@@ -507,7 +507,7 @@ void QuictunTunnel::Close(absl::string_view reason, bool reset_stream) {
   // A real, independent correctness fix worth keeping on its own merits
   // (see the reset_stream=true comment above for the matching send-side
   // half of the same invariant) -- but not, per later investigation, what
-  // was causing a separate, reproduced --quic_conn pooling stall; see that
+  // was causing a separate, reproduced pooling stall; see that
   // comment for where the actual cause -- and fix -- ended up being.
   // Harmless to call unconditionally here (covers the reset_stream=false
   // paths too, e.g. TCP-side errors that still leave unread QUIC-side data

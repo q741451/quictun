@@ -82,7 +82,7 @@ QuictunStream::QuictunStream(QuicStreamId id, QuicSession* session,
   // sidesteps this same "arbitrary continuous byte stream" question
   // entirely with its own non-HTTP priority scheme. A correctness/intent
   // fix on its own merits, kept even though it turned out NOT to be what
-  // actually mattered for a real, reproduced --quic_conn pooling stall
+  // actually mattered for a real, reproduced pooling stall
   // (some streams enqueued into write_blocked_streams_ exactly once and
   // never dequeued again): QuicWriteBlockedList only actually looks at
   // this field when --quic_priority_respect_incremental is enabled, which
@@ -171,7 +171,7 @@ QuicStream* QuictunSessionBase::CreateIncomingStream(QuicStreamId id) {
   // max_streams value this side advertised gets rejected at a lower layer,
   // in GetOrCreateStream() -- CreateIncomingStream() is simply never
   // invoked for an over-limit stream id). Per-connection stream count
-  // policy (--quic_conn) lives in QuictunClientConnection, on the side
+  // policy (--conn_per_udp) lives in QuictunClientConnection, on the side
   // that actually decides to open new streams; the server side is purely
   // reactive to however many streams a client legitimately opens.
   return CreateStream(id);
@@ -236,26 +236,16 @@ void QuictunSessionBase::OnStreamGone(QuicStreamId id) {
   }
 }
 
-QuictunClientSession::QuictunClientSession(QuicConnection* connection,
-                                           Visitor* owner,
-                                           const QuicConfig& config,
-                                           std::string alpn,
-                                           const QuicServerId& server_id,
-                                           QuicCryptoClientConfig* crypto_config,
-                                           bool poolable)
-    : QuictunSessionBase(connection, owner, config, std::move(alpn)),
-      poolable_(poolable) {
+QuictunClientSession::QuictunClientSession(
+    QuicConnection* connection, Visitor* owner, const QuicConfig& config,
+    std::string alpn, const QuicServerId& server_id,
+    QuicCryptoClientConfig* crypto_config)
+    : QuictunSessionBase(connection, owner, config, std::move(alpn)) {
   static NoOpProofHandler* handler = new NoOpProofHandler();
   crypto_stream_ = std::make_unique<QuicCryptoClientStream>(
       server_id, this, crypto_config->proof_verifier()->CreateDefaultContext(),
       crypto_config, /*proof_handler=*/handler,
       /*has_application_state=*/false);
-  // See ever_had_stream_'s comment/ShouldKeepConnectionAlive(). Internal to
-  // this class -- QuictunClientConnection doesn't use
-  // SetStreamCreatedCallback() itself, so this doesn't collide with
-  // anything an owner might also want to set here.
-  SetStreamCreatedCallback(
-      [this](QuicStreamId /*id*/) { ever_had_stream_ = true; });
 }
 
 QuictunServerSession::QuictunServerSession(

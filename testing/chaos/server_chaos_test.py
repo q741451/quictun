@@ -66,14 +66,16 @@ def main():
     # See client_chaos_test.py's identical flag for the rationale. Applied
     # only to the "real" (correctly-keyed) clients below -- each of those
     # already gets hit by --threads-per-client concurrent actor threads, so
-    # even quic_conn=1 pools several genuinely-concurrent TCP flows onto
+    # even conn_per_udp=1 pools several genuinely-concurrent TCP flows onto
     # one connection, exercising the same reentrancy paths.
-    ap.add_argument("--quic-conn", type=int, default=0)
+    ap.add_argument("--conn-per-udp", type=int, default=1)
+    ap.add_argument("--udp-socket", type=int, default=1)
     args = ap.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
     tag = args.condition
-    quic_conn_flag = f"--quic_conn={args.quic_conn}"
+    pool_flags = [f"--conn_per_udp={args.conn_per_udp}",
+                  f"--udp_socket={args.udp_socket}"]
 
     target_port, server_listen_port, server_target_port = alloc_ports(3)
 
@@ -132,7 +134,7 @@ def main():
     sampler = chaos_monitor.Sampler(server_proc.pid)
     sampler.sample()
     baseline = sampler.summary()
-    print(f"=== [{tag}] quic_conn={args.quic_conn} baseline: fds={baseline['fds_last']} "
+    print(f"=== [{tag}] conn_per_udp={args.conn_per_udp} udp_socket={args.udp_socket} baseline: fds={baseline['fds_last']} "
           f"rss_kb={baseline['rss_kb_last']} ===", flush=True)
 
     round_reports = []
@@ -170,7 +172,7 @@ def main():
             p = start_proc(
                 [CLIENT_BIN, f"--local=127.0.0.1:{local_port}",
                  f"--remote={client_remote_addr}", f"--key={KEY}",
-                 "--idle_timeout_seconds=6", quic_conn_flag],
+                 "--idle_timeout_seconds=6", *pool_flags],
                 f"{args.log_dir}/{tag}_r{r}_real{i}.log")
             client_procs.append(("real", p))
             actor_addr = ("127.0.0.1", local_port)
@@ -252,7 +254,7 @@ def main():
     # client_remote_addr, for quic_bad/combo_all_bad, still points through
     # quic_relay -- the sanity_client's own handshake and echo are for real
     # subject to that relay's --loss (0.08), same as everything else in the
-    # test was. A dedicated timing comparison (--quic-conn=1 vs 0, single
+    # test was. A dedicated timing comparison (across pool shapes, single
     # round) confirmed pooling under combo_all_bad's full three-layer chaos
     # (server->target relay resets/blackhole + client->server relay loss +
     # each real client's own relay resets) can leave the *just-finished*
@@ -292,7 +294,7 @@ def main():
         print("!!! server process is dead, cannot run sanity check")
 
     summary = sampler.summary()
-    print(f"=== [{tag}] SUMMARY (quic_conn={args.quic_conn}) ===")
+    print(f"=== [{tag}] SUMMARY (conn_per_udp={args.conn_per_udp} udp_socket={args.udp_socket}) ===")
     print(f"  server_alive={server_proc.poll() is None}")
     print(f"  sanity_echo_ok={sanity_ok}")
     print(f"  fds: first={summary['fds_first']} max={summary['fds_max']} last={summary['fds_last']}")

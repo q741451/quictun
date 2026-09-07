@@ -41,10 +41,10 @@ namespace quic {
 // shared UDP socket (see quictun_client_driver.h) -- and one
 // stream (plus QuictunTunnel pumping bytes between that stream and an
 // accepted --local TCP connection) per TCP connection assigned to it via
-// AssignNewTcp() -- exactly one, ever, if --quic_conn=0 (unchanged from
-// quictun's original one-connection-per-tunnel design), or possibly many
-// over this object's lifetime if --quic_conn pools connections (see
-// quictun_client_driver.h). Constructed by QuictunClientDriver; destroyed
+// AssignNewTcp() -- possibly many over this object's lifetime, since the
+// driver keeps a fixed pool of connections and round-robins accepted TCPs
+// across it (see quictun_client_driver.h). Constructed by
+// QuictunClientDriver; destroyed
 // (by the driver, via the on_closed callback) once the whole QUIC
 // connection closes for any reason -- not when any single stream's tunnel
 // finishes; see AssignNewTcp() and the class comment on
@@ -58,13 +58,10 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   // `crypto_config`, and `buffer_allocator` are shared across every
   // QuictunClientConnection the driver creates and must outlive this
   // object; `config` is copied. Does not itself accept any TCP connection --
-  // call AssignNewTcp() once (--quic_conn=0) or repeatedly (pooling) after
-  // construction. `poolable` is whether the driver is holding this
-  // connection in one of its own pool_slots_ (--quic_conn > 0) for
-  // possible reuse by a later TCP -- see ShouldKeepConnectionAlive()'s
-  // comment in quictun_session.h for why this needs to be known this
-  // early (it's latched into the session at construction, not something
-  // that can be flipped later). `transparent` mirrors --transparent --
+  // call AssignNewTcp() once or repeatedly after construction, once per
+  // TCP connection assigned to this one. `writer` writes to the local UDP
+  // socket this connection is pinned to for its whole life (see
+  // --udp_socket); borrowed, not owned. `transparent` mirrors --transparent --
   // when true, every AssignNewTcp() call on this connection must supply a
   // captured_dest (see that method's comment); StartTunnel() sends it as
   // an address header right after the --key preamble instead of quictun's
@@ -77,8 +74,7 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
       const QuicServerId& server_id, const QuicSocketAddress& remote_address,
       QuicCryptoClientConfig* crypto_config, const std::string& psk,
       CongestionControlType congestion_control, bool so_txtime_enabled,
-      bool poolable, bool transparent,
-      const QuicSocketAddress& self_address, QuicPacketWriter* shared_writer,
+      bool transparent, QuicPacketWriter* writer,
       QuicConnectionId client_connection_id, QuictunIdleTracker* idle_tracker,
       std::function<void(QuicBlockedWriterInterface*)> on_write_blocked,
       std::function<void(QuictunClientConnection*)> on_closed);
@@ -93,9 +89,7 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   // Queues if a new stream can't be opened immediately (no 0-RTT session
   // yet and the handshake hasn't supplied a max_streams value, or the
   // negotiated/granted stream count is temporarily exhausted); multiple
-  // TCPs can be queued at once (relevant only under --quic_conn pooling --
-  // --quic_conn=0 only ever calls this once per connection, so there's
-  // never more than one pending at a time there). No-op (closes
+  // TCPs can be queued at once. No-op (closes
   // `accepted_tcp_fd` immediately) if this connection is already closed --
   // callers doing their own pooling should check closed()/query state
   // through the driver, not rely on this to signal that. `captured_dest`
@@ -110,8 +104,8 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
 
   // Exposed for QuictunClientDriver to apply per-connection startup tuning
   // (see SetQuictunStartupBandwidthHint()) right after construction, and
-  // (under --quic_conn pooling) to know whether this connection is still
-  // eligible to have more TCPs assigned to it -- see quictun_client_driver.cc.
+  // to know whether this connection is still eligible to have more TCPs
+  // assigned to it -- see quictun_client_driver.cc.
   QuicConnection* connection() const { return connection_.get(); }
   bool closed() const { return closed_; }
 
@@ -169,15 +163,14 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
 
   QuictunClientConnection(
       QuicEventLoop* event_loop,
-      const QuicSocketAddress& self_address,
       const QuicSocketAddress& remote_address, QuicConnectionHelperInterface* helper,
       QuicAlarmFactory* alarm_factory,
       ConnectionIdGeneratorInterface& connection_id_generator,
       quiche::QuicheBufferAllocator* buffer_allocator, const QuicConfig& config,
       const QuicServerId& server_id, QuicCryptoClientConfig* crypto_config,
       const std::string& psk, CongestionControlType congestion_control,
-      bool so_txtime_enabled, bool poolable, bool transparent,
-      QuicPacketWriter* shared_writer, QuicConnectionId client_connection_id,
+      bool so_txtime_enabled, bool transparent,
+      QuicPacketWriter* writer, QuicConnectionId client_connection_id,
       QuictunIdleTracker* idle_tracker,
       std::function<void(QuicBlockedWriterInterface*)> on_write_blocked,
       std::function<void(QuictunClientConnection*)> on_closed);
@@ -202,7 +195,6 @@ class QUICHE_EXPORT QuictunClientConnection : public QuicSession::Visitor,
   void Close();
 
   QuicEventLoop* const event_loop_;
-  const QuicSocketAddress self_address_;
   std::unique_ptr<QuicConnection> connection_;
   std::unique_ptr<QuictunClientSession> session_;
 

@@ -71,24 +71,20 @@ def find_closed_port():
 
 def main():
     ap = argparse.ArgumentParser()
-    # 0 (default): unchanged original behavior -- each attempt is its own
-    # brand-new quictun_client process/connection. >0: all n_attempts run
-    # as sequential streams on ONE pooled client process/connection
-    # instead -- since the target never resolves, the connection itself
-    # never has a reason to close between attempts (ShouldKeepConnectionAlive()
-    # keeps a poolable connection alive regardless of its streams' state),
-    # so this specifically tests whether one stream's dial failure
-    # (StartTunnelForStream()'s error path, tracked per-stream in
-    # stream_targets_) wedges or crashes the shared connection for the
-    # next stream/attempt -- a scenario the unpooled path can't exercise
-    # at all, since there each attempt gets its own fresh connection no
-    # matter what happened to the previous one.
-    ap.add_argument("--quic-conn", type=int, default=0)
+    # Default: each attempt is its own brand-new quictun_client process,
+    # matching how a real client (e.g. `git push`) sees it. --reuse-client:
+    # all n_attempts run as sequential streams on ONE long-lived client
+    # instead -- since the target never resolves, the connection has no
+    # reason to close between attempts, so this tests whether one stream's
+    # dial failure (StartTunnelForStream()'s error path, tracked per-stream
+    # in stream_targets_) wedges or crashes the connection for the next
+    # attempt.
+    ap.add_argument("--reuse-client", action="store_true")
     args = ap.parse_args()
 
     log_dir = "/tmp/quictun_chaos_logs"
     os.makedirs(log_dir, exist_ok=True)
-    tag = "target_unreachable" + (f"_qc{args.quic_conn}" if args.quic_conn else "")
+    tag = "target_unreachable" + ("_reuse" if args.reuse_client else "")
 
     dead_target_port = find_closed_port()
     server_listen_port, local_port = 26920, 26921
@@ -112,11 +108,11 @@ def main():
     torn_down_cleanly = 0
 
     pooled_client_proc = None
-    if args.quic_conn > 0:
+    if args.reuse_client:
         pooled_client_proc = start_proc(
             [CLIENT_BIN, f"--local=127.0.0.1:{local_port}",
              f"--remote=127.0.0.1:{server_listen_port}", f"--key={KEY}",
-             "--idle_timeout_seconds=10", f"--quic_conn={args.quic_conn}"],
+             "--idle_timeout_seconds=10"],
             f"{log_dir}/{tag}_client.log")
         time.sleep(1.0)
         if pooled_client_proc.poll() is not None:
@@ -125,11 +121,8 @@ def main():
         wait_tcp_ready("127.0.0.1", local_port, timeout=3)
 
     # A handful of connection attempts against the dead target -- each its
-    # own brand-new quictun_client (--quic-conn=0, matching how a real
-    # client, e.g. `git push`, would see it: connect, try to use the
-    # tunnel, get told it's closed) or, under pooling, each its own new
-    # stream on the SAME already-running pooled client/connection (see the
-    # --quic-conn help above).
+    # own brand-new quictun_client, or -- under --reuse-client -- each its
+    # own new stream on the SAME already-running client/connection.
     for i in range(n_attempts):
         client_proc = pooled_client_proc
         if client_proc is None:

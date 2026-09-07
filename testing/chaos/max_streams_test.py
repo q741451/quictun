@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage-gap test: --quic_conn pooling against QUIC's own real,
+"""Coverage-gap test: connection pooling against QUIC's own real,
 protocol-level max_streams-per-connection ceiling (--max_streams_per_connection,
 quictun_flags.h -- see its own comment).
 
@@ -143,7 +143,7 @@ def phases_1_and_2(max_streams, log_dir):
     client_proc = start_proc(
         [CLIENT_BIN, f"--local=127.0.0.1:{client_port}",
          f"--remote=127.0.0.1:{server_port}", f"--key={KEY}",
-         "--idle_timeout_seconds=20", "--quic_conn=1"],
+         "--idle_timeout_seconds=20", "--conn_per_udp=1"],
         f"{log_dir}/{tag}_client.log")
     time.sleep(1.0)
     if client_proc.poll() is not None:
@@ -152,7 +152,7 @@ def phases_1_and_2(max_streams, log_dir):
     wait_tcp_ready("127.0.0.1", client_port)
 
     print(f"=== [{tag}] opening {n_conns} concurrent held TCP conns through a "
-          f"single --quic_conn=1 connection capped at max_streams_per_connection="
+          f"single --conn_per_udp=1 connection capped at max_streams_per_connection="
           f"{max_streams} ===", flush=True)
     conns = [HeldConn(i, client_port) for i in range(n_conns)]
     for c in conns:
@@ -248,7 +248,7 @@ def phase_3_multi_client(max_streams, log_dir):
         p = start_proc(
             [CLIENT_BIN, f"--local=127.0.0.1:{port}",
              f"--remote=127.0.0.1:{server_port}", f"--key={KEY}",
-             "--idle_timeout_seconds=20", "--quic_conn=1"],
+             "--idle_timeout_seconds=20", "--conn_per_udp=1"],
             f"{log_dir}/{tag}_client{i}.log")
         client_procs.append(p)
     time.sleep(1.0)
@@ -259,7 +259,7 @@ def phase_3_multi_client(max_streams, log_dir):
         wait_tcp_ready("127.0.0.1", port)
 
     print(f"=== [{tag}] 2 independent client processes, each opening "
-          f"{n_conns} conns through its own --quic_conn=1 connection, "
+          f"{n_conns} conns through its own --conn_per_udp=1 connection, "
           f"same server capped at max_streams_per_connection={max_streams} ===",
           flush=True)
 

@@ -162,23 +162,21 @@ def main():
     # same --trigger-after budget land on whichever of the two actually
     # reaches the wire Nth, which in batch mode is usually Flush().
     ap.add_argument("--so-txtime", action="store_true")
-    # 0 (default): unchanged original behavior, one stream, one connection.
-    # >0: the big transfer runs on a --quic_conn-pooled client, with a
-    # SECOND, small, concurrent connection sharing the same underlying
-    # connection (as a sibling stream) for the whole duration -- testing
-    # that RearmOnBlockPacketWriter's recovery is connection-level, not
-    # somehow scoped to just the one stream that happened to be mid-write
-    # when the injected block fired: a real block affects the shared UDP
-    # writer, so every stream queued behind it needs to un-stick together,
-    # not just whichever stream's data the fault injection counter landed
-    # on. Untested until now -- every existing writeblock scenario only
-    # ever had the one stream to begin with.
-    ap.add_argument("--quic-conn", type=int, default=0)
+    # The big transfer always runs alongside a SECOND, small, concurrent
+    # connection sharing the same underlying QUIC connection (as a sibling
+    # stream) for the whole duration -- testing that
+    # RearmOnBlockPacketWriter's recovery is connection-level, not somehow
+    # scoped to just the one stream that happened to be mid-write when the
+    # injected block fired: a real block affects the shared UDP writer, so
+    # every stream queued behind it needs to un-stick together. Defaults
+    # put both on one connection over one socket, the widest such window.
+    ap.add_argument("--conn-per-udp", type=int, default=1)
+    ap.add_argument("--udp-socket", type=int, default=1)
     args = ap.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
     tag = (f"writeblock_fault_{args.side}" + ("_sotxtime" if args.so_txtime else "")
-           + (f"_qc{args.quic_conn}" if args.quic_conn else ""))
+           + f"_c{args.conn_per_udp}u{args.udp_socket}")
 
     target_port = 26910
     server_listen_port = 26911
@@ -211,14 +209,16 @@ def main():
         print(f"!!! server exited immediately, check {args.log_dir}/{tag}_server.log")
         sys.exit(1)
 
-    quic_conn_flags = [f"--quic_conn={args.quic_conn}"] if args.quic_conn else []
+    pool_flags = [f"--conn_per_udp={args.conn_per_udp}",
+                  f"--udp_socket={args.udp_socket}"]
     print(f"=== [{tag}] starting quictun_client (inject={inject_client}, "
-          f"trigger_after={args.trigger_after}, quic_conn={args.quic_conn}) ===",
+          f"trigger_after={args.trigger_after}, "
+          f"conn_per_udp={args.conn_per_udp}, udp_socket={args.udp_socket}) ===",
           flush=True)
     client_proc = start_proc(
         [CLIENT_BIN, f"--local=127.0.0.1:{local_port}",
          f"--remote=127.0.0.1:{server_listen_port}", f"--key={KEY}",
-         "--idle_timeout_seconds=20"] + so_txtime_flags + quic_conn_flags,
+         "--idle_timeout_seconds=20"] + so_txtime_flags + pool_flags,
         f"{args.log_dir}/{tag}_client.log", env=make_env(inject_client))
     time.sleep(1.0)
     if client_proc.poll() is not None:
@@ -240,13 +240,12 @@ def main():
     server_sampler.sample()
     server_baseline = server_sampler.summary()
 
-    # Under pooling, a second connection to the same --local port becomes a
-    # sibling stream sharing the SAME underlying (pooled) connection as the
-    # big transfer below -- see --quic-conn's help. Runs concurrently with
-    # the transfer, in its own thread, doing repeated small echoes for the
-    # transfer's whole duration so it's genuinely still in flight, sharing
-    # the writer, when the injected block fires.
-    sibling_ok = [True]  # mutable cell; only meaningful if args.quic_conn
+    # A second connection to the same --local port becomes a sibling
+    # stream sharing the same underlying connection as the big transfer
+    # below. Runs concurrently with the transfer, in its own thread, doing
+    # repeated small echoes for the transfer's whole duration so it's
+    # genuinely still in flight, sharing the writer, when the block fires.
+    sibling_ok = [True]  # mutable cell, written from sibling_loop's thread
     sibling_stop = threading.Event()
 
     def sibling_loop():
@@ -258,10 +257,8 @@ def main():
                 sibling_ok[0] = False
             time.sleep(0.2)
 
-    sibling_thread = None
-    if args.quic_conn:
-        sibling_thread = threading.Thread(target=sibling_loop)
-        sibling_thread.start()
+    sibling_thread = threading.Thread(target=sibling_loop)
+    sibling_thread.start()
 
     n_bytes = int(args.payload_mb * 1024 * 1024)
     print(f"=== [{tag}] transferring {args.payload_mb}MB (should trip the "
