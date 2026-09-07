@@ -134,14 +134,9 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
       connections_;
   std::vector<QuicConnectionId> pending_removal_;
 
-  // Per-event-loop-iteration budget for how many brand-new connections
-  // ProcessPacket() may create -- see max_new_connections_per_event_loop_
-  // above. Reset to that value by CollectGarbage()
-  // (called once per iteration, right after the packets that iteration's
-  // RunEventLoopOnce() delivered have all been processed -- see quictun_
-  // server_bin.cc's main loop), decremented once per connection actually
-  // created, checked (and, if exhausted, left at zero without going
-  // negative) before ProcessPacket() creates another.
+  // Per-iteration budget for new connections, reset by CollectGarbage()
+  // and decremented by ProcessPacket(). See
+  // --max_new_connections_per_event_loop.
   int32_t new_connections_allowed_this_event_loop_ = 0;
 };
 

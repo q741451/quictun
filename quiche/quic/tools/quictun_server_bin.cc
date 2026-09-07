@@ -46,21 +46,19 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "another past that are dropped once the budget hits zero for that "
     "tick (a legitimate client's own QUIC handshake retransmission just "
     "retries, so this only spreads out genuine bursts, never silently "
-    "drops them for good). Bounds how much CPU/memory a flood of "
-    "spoofed-source garbage packets can force per tick. Default (100) "
-    "matches real QUICHE's own "
-    "QuicBufferedPacketStore::kDefaultMaxConnectionsInStore.");
+    "drops them for good). Bounds how much CPU a flood of spoofed-source "
+    "garbage packets can force per tick. Higher than QUICHE's own "
+    "kNumSessionsToCreatePerSocketEvent (16) because QUICHE buffers what "
+    "it defers and quictun drops it, so a tighter budget here would cost "
+    "a legitimate burst extra round trips.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, max_concurrent_connections, 5000,
     "Hard cap on how many connections (established or mid-handshake) "
     "quictun_server will have open at once; packets that would create "
-    "another past that are dropped. Each connection holds at least one "
-    "dedicated UDP socket, so this bounds fd/memory exhaustion from a "
-    "flood of forged connection attempts instead of relying on the OS "
-    "fd limit to be the thing that eventually says no. Default (5000) "
-    "is meant to be generous relative to any realistic legitimate "
-    "load.");
+    "another past that are dropped. Bounds memory exhaustion from a flood "
+    "of forged connection attempts. Default (5000) is meant to be generous "
+    "relative to any realistic legitimate load.");
 
 #ifdef QUICTUN_COVERAGE_BUILD
 // Coverage-instrumented builds only (--copt=-DQUICTUN_COVERAGE_BUILD,
