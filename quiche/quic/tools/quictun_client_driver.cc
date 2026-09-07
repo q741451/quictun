@@ -370,7 +370,25 @@ void QuictunClientDriver::CollectGarbage() {
   // closed_streams_ via its own alarm rather than something external
   // polling it. This method only ever handled whole-connection removal.
   for (QuictunClientConnection* connection : pending_removal_) {
-    connections_.erase(connection);
+    // Look it up rather than dereferencing straight away, so this stays
+    // correct on its own terms if the same connection is ever queued twice
+    // -- matching QuictunServerDriver::CollectGarbage().
+    auto it = connections_.find(connection);
+    if (it == connections_.end()) {
+      continue;
+    }
+    // Same backstop as the server's. Scans every socket rather than the one
+    // the connection was created on: the point is to catch a connection
+    // that got back onto some list after RemoveConnection() already ran, so
+    // trusting that index would defeat it. --udp_socket is a handful of
+    // entries at most.
+    for (const std::unique_ptr<UdpSocket>& udp : udp_sockets_) {
+      if (udp->write_blocked_list.Remove(*connection->connection())) {
+        QUIC_BUG(quictun_bug_client_blocked_writer_at_destruction)
+            << "Connection was still in the blocked-writer list at destruction";
+      }
+    }
+    connections_.erase(it);
   }
   pending_removal_.clear();
 }

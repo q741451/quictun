@@ -174,8 +174,11 @@ void QuictunServerDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
     bool more_to_read = true;
     while (more_to_read) {
       more_to_read = reader_.ReadAndDispatchPackets(
-          *listen_fd_, listen_address_.port(), *event_loop_->GetClock(),
-          this, /*packets_dropped=*/nullptr);
+          *listen_fd_, listen_address_.port(), *event_loop_->GetClock(), this,
+          // Nothing to pass: QuicPacketReader ignores this parameter
+          // outright, whatever its header still claims. Kernel receive-buffer
+          // drops show up in /proc/net/snmp's UdpRcvbufErrors instead.
+          /*packets_dropped=*/nullptr);
     }
     if (!event_loop_->SupportsEdgeTriggered()) {
       event_loop_->RearmSocket(*listen_fd_, kSocketEventReadable);
@@ -221,12 +224,6 @@ void QuictunServerDriver::ProcessPacket(const QuicSocketAddress& self_address,
   auto existing = connections_.find(dcid);
   if (existing != connections_.end()) {
     existing->second->ProcessPacket(self_address, peer_address, packet);
-    return;
-  }
-
-  if (header_error != QUIC_NO_ERROR) {
-    QUIC_DVLOG(1) << "Dropping unparseable first packet from " << peer_address
-                 << ": " << detailed_error;
     return;
   }
 
@@ -307,7 +304,20 @@ void QuictunServerDriver::CollectGarbage() {
   // closed_streams_ via its own alarm rather than something external
   // polling it. This method only ever handled whole-connection removal.
   for (const QuicConnectionId& id : pending_removal_) {
-    connections_.erase(id);
+    // Second half of QuicDispatcher's own pair (CleanUpSession() removes on
+    // close, DeleteSessions() asserts nothing is left by destruction): the
+    // list holds a raw pointer, so anything still in it here becomes
+    // dangling the moment the erase below runs.
+    auto it = connections_.find(id);
+    if (it == connections_.end()) {
+      continue;
+    }
+    if (write_blocked_list_.Remove(*it->second->connection())) {
+      QUIC_BUG(quictun_bug_blocked_writer_at_destruction)
+          << "Connection was still in the blocked-writer list at destruction: "
+          << id;
+    }
+    connections_.erase(it);
   }
   pending_removal_.clear();
 
