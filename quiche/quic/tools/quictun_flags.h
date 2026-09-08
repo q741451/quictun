@@ -84,6 +84,20 @@ struct QuictunTuningOptions {
   // is simply idle rather than dead.
   QuicTime::Delta tcp_idle_timeout = QuicTime::Delta::FromSeconds(24 * 60 * 60);
 
+  // The same question as tcp_idle_timeout, asked of a tunnel that is not
+  // merely quiet but STALLED -- one holding buffered data it cannot hand
+  // on, because either the peer stopped reading the QUIC stream or the
+  // target TCP socket stopped draining. The distinction matters because
+  // the two cost different things. A quiet tunnel costs an fd and a stream;
+  // a stalled one is holding session flow-control credit and send buffer
+  // that every other tunnel on the same QUIC connection shares, so leaving
+  // it for tcp_idle_timeout can wedge the whole connection for a day. Only
+  // a tunnel that moves nothing at all for this long is closed -- any
+  // progress in either direction restarts the clock -- so it cuts a stalled
+  // transfer, never a slow one. Clamped to tcp_idle_timeout by whoever
+  // sweeps; exceeding it would mean a stalled tunnel outliving a quiet one.
+  QuicTime::Delta tcp_stalled_timeout = QuicTime::Delta::FromSeconds(180);
+
   // Initial per-stream flow-control window. On a high-bandwidth-delay-
   // product path this is what caps a single tunnel's throughput, and
   // since several tunnels share a connection, the session window

@@ -22,6 +22,7 @@ bazel build -c opt //quiche:quictun_client //quiche:quictun_server
 | `writeblock_fault_test.py` | Fault injection for the write-blocked-forever bug. Needs `-DQUICTUN_TEST_BUILD`. |
 | `writeblock_close_test.py` | A connection closing while still write blocked. Needs `-DQUICTUN_TEST_BUILD`. |
 | `pollhup_spin_test.py` | Event-loop spin from a POLLHUP on an idle-but-registered TCP socket. |
+| `stalled_timeout_test.py` | `--tcp_stalled_timeout_seconds` reaps a tunnel holding buffered data, and leaves a merely quiet one alone. |
 | `target_unreachable_test.py` | `--target` refusing the TCP connect. |
 | `dualstack_ipv6_test.py` | IPv6 dual-stack `--listen=[::]` reached by an IPv4 peer. |
 

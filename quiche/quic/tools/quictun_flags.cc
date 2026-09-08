@@ -80,6 +80,18 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "hold, so set it the same on both ends.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, tcp_stalled_timeout_seconds, 180,
+    "--tcp_idle_timeout_seconds, but for a tunnel that is stalled rather "
+    "than merely quiet: one holding buffered data it cannot hand on, "
+    "because the peer stopped reading the QUIC stream or the target TCP "
+    "socket stopped draining. That costs flow-control credit and memory the "
+    "whole QUIC connection shares, so enough such tunnels wedge every other "
+    "tunnel on it -- hence a much shorter default. Any progress in either "
+    "direction restarts the clock, so this cuts a stalled transfer, never a "
+    "slow one. Capped at --tcp_idle_timeout_seconds. Set it the same on "
+    "both ends.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, initial_stream_flow_control_window_kb, 512,
     "Initial per-stream flow-control window advertised to the peer, in "
     "KiB. Independent of --initial_session_flow_control_window_kb -- with "
@@ -154,6 +166,8 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
       quiche::GetQuicheCommandLineFlag(FLAGS_idle_timeout_seconds));
   options.tcp_idle_timeout = QuicTime::Delta::FromSeconds(
       quiche::GetQuicheCommandLineFlag(FLAGS_tcp_idle_timeout_seconds));
+  options.tcp_stalled_timeout = QuicTime::Delta::FromSeconds(
+      quiche::GetQuicheCommandLineFlag(FLAGS_tcp_stalled_timeout_seconds));
   options.initial_stream_flow_control_window_bytes =
       static_cast<QuicByteCount>(quiche::GetQuicheCommandLineFlag(
           FLAGS_initial_stream_flow_control_window_kb)) *
@@ -227,6 +241,8 @@ void PrintQuictunStartupBanner(
                     absl::StrCat(options.idle_timeout.ToSeconds())});
   lines.push_back({"tcp_idle_timeout_seconds",
                     absl::StrCat(options.tcp_idle_timeout.ToSeconds())});
+  lines.push_back({"tcp_stalled_timeout_seconds",
+                    absl::StrCat(options.tcp_stalled_timeout.ToSeconds())});
   lines.push_back(
       {"initial_stream_flow_control_window_kb",
        absl::StrCat(options.initial_stream_flow_control_window_bytes /

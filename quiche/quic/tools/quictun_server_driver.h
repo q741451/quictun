@@ -81,12 +81,13 @@ class QUICHE_EXPORT QuictunServerDriver : public QuicSocketEventListener,
 
   void CollectGarbage();
 
-  // Closes every tunnel that has gone quiet for --tcp_idle_timeout_seconds.
+  // Closes every tunnel that has gone quiet for --tcp_idle_timeout_seconds,
+  // or for --tcp_stalled_timeout_seconds if it is holding buffered data.
   // Called once per event-loop iteration alongside CollectGarbage(), and
   // for the same reason it lives there rather than in an alarm: closing a
   // tunnel reenters its owner, so it has to happen at a point where no
-  // tunnel's or connection's own call stack is still unwinding. Costs one
-  // comparison when nothing has expired -- see QuictunIdleTracker.
+  // tunnel's or connection's own call stack is still unwinding. Costs two
+  // comparisons when nothing has expired -- see QuictunIdleTracker.
   void CloseIdleTunnels();
 
 

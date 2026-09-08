@@ -63,22 +63,31 @@ class QUICHE_EXPORT QuictunIdleTracker {
   QuictunIdleTracker& operator=(const QuictunIdleTracker&) = delete;
 
   // Records that `tunnel` just moved real data, making it the most recently
-  // active. Called only from QuictunTunnel::NoteActivity().
-  void Touch(QuictunTunnel* tunnel);
+  // active, and files it under `stalled` (see order_/stalled_order_).
+  // Called only from QuictunTunnel::NoteActivity() and UpdateIdleClass().
+  void Touch(QuictunTunnel* tunnel, bool stalled);
+
+  // Moves an ALREADY-tracked `tunnel` between the two orderings. A no-op if
+  // it isn't tracked: enrolling a tunnel is Start()'s job, via
+  // NoteActivity(), and a tunnel that has not started yet has nothing for a
+  // sweep to reason about.
+  void Refile(QuictunTunnel* tunnel, bool stalled);
 
   // Drops `tunnel` from the ordering. Called only from
   // QuictunTunnel::Close(), which is the one and only unlink site -- see
   // idle_tracker_'s comment there. No-op if not currently linked.
   void Remove(QuictunTunnel* tunnel);
 
-  // Closes every tunnel with no activity on either leg for `timeout`.
-  // Cheap enough to call on every event-loop iteration: returns after one
-  // comparison unless something has actually expired. Must only be called
-  // from outside any tunnel's or connection's own call stack (the same
-  // requirement, and for the same reason, as
-  // QuictunClientDriver::CollectGarbage()) -- closing a tunnel reenters its
-  // owner.
-  void CloseIdleTunnels(QuicTime now, QuicTime::Delta timeout);
+  // Closes every tunnel with no activity on either leg for long enough:
+  // `timeout` for a tunnel holding nothing, `stalled_timeout` for one
+  // holding buffered data (see stalled_order_). Cheap enough to call on
+  // every event-loop iteration: returns after two comparisons unless
+  // something has actually expired. Must only be called from outside any
+  // tunnel's or connection's own call stack (the same requirement, and for
+  // the same reason, as QuictunClientDriver::CollectGarbage()) -- closing a
+  // tunnel reenters its owner.
+  void CloseIdleTunnels(QuicTime now, QuicTime::Delta timeout,
+                        QuicTime::Delta stalled_timeout);
 
  private:
   // Oldest activity at the front, so the front is the only expiry
@@ -96,6 +105,19 @@ class QUICHE_EXPORT QuictunIdleTracker {
   // std::list<QuictunTunnel*> here: a std::list would heap-allocate a node
   // per element, an intrusive list allocates nothing at all.
   quiche::QuicheIntrusiveList<QuictunTunnel> order_;
+
+  // The same ordering, for tunnels that are stalled rather than merely
+  // quiet, swept against a much shorter timeout -- see
+  // QuictunTuningOptions::tcp_stalled_timeout for why the two classes
+  // cannot share one deadline. Two lists rather than one list and a
+  // per-tunnel timeout, because the sweep's whole cost model rests on
+  // "front not expired => nothing expired", which only holds while every
+  // tunnel in a list is measured against the same value; one mixed list
+  // would have to be walked in full on every event-loop iteration.
+  // QuicheIntrusiveLink allows membership in only one list at a time, which
+  // is exactly right here -- a tunnel is in one class or the other, and
+  // QuictunTunnel::UpdateIdleClass() moves it across as that changes.
+  quiche::QuicheIntrusiveList<QuictunTunnel> stalled_order_;
 };
 
 class QUICHE_EXPORT QuictunTunnel
@@ -233,6 +255,24 @@ class QUICHE_EXPORT QuictunTunnel
   // leg (see last_activity_'s comment).
   void NoteActivity();
 
+  // Whether this tunnel is holding buffered data it cannot hand on, in
+  // either direction: pending_to_tcp_ full means FillQueueFromStream() has
+  // stopped reading the stream, so unread bytes are piling up in the
+  // sequencer and holding the connection's shared receive credit;
+  // HasBufferedData() means ReceiveComplete() has stopped reading the TCP
+  // socket, so bytes are piling up in the stream's send buffer. Either way
+  // the cost is borne by the whole QUIC connection rather than by this
+  // tunnel alone -- see stalled_'s comment.
+  bool IsHoldingBuffer() const;
+
+  // Re-files this tunnel under the right idle class if IsHoldingBuffer()
+  // has changed since the last call. Must be called wherever that answer
+  // can change -- which is NOT only from NoteActivity(): ReceiveComplete()
+  // notes the activity and only then writes to the stream, so a tunnel
+  // becomes stalled strictly after its last NoteActivity(), and by
+  // definition may never have another.
+  void UpdateIdleClass();
+
   // Marks our own send direction done -- writing the stream's FIN if it
   // hasn't been written yet -- once the peer has finished sending (QUIC FIN
   // already seen) and every byte of that final delivery has actually been
@@ -367,6 +407,13 @@ class QUICHE_EXPORT QuictunTunnel
   // peers' connections -- and every target-side fd hanging off them -- held
   // for a day.
   QuicTime last_activity_ = QuicTime::Zero();
+
+  // Which of idle_tracker_'s two orderings this tunnel is currently filed
+  // under (IsHoldingBuffer() as of the last UpdateIdleClass()), cached so
+  // that call is a bool compare on paths that run after every chunk. Why
+  // the two classes get different deadlines: see
+  // QuictunTuningOptions::tcp_stalled_timeout.
+  bool stalled_ = false;
 
   // Whether socket_ has already been disconnected, so Close() must not do it
   // again. Mirrors StreamTcp::tcp_socket_disconnected /

@@ -4,6 +4,7 @@
 
 #include "quiche/quic/tools/quictun_server_driver.h"
 
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -330,8 +331,12 @@ void QuictunServerDriver::CollectGarbage() {
 }
 
 void QuictunServerDriver::CloseIdleTunnels() {
-  idle_tracker_.CloseIdleTunnels(event_loop_->GetClock()->ApproximateNow(),
-                                 options_.tcp_idle_timeout);
+  idle_tracker_.CloseIdleTunnels(
+      event_loop_->GetClock()->ApproximateNow(), options_.tcp_idle_timeout,
+      // A stalled tunnel outliving a merely quiet one is never what an
+      // operator meant, so a --tcp_stalled_timeout_seconds above
+      // --tcp_idle_timeout_seconds is read as "no separate stalled class".
+      std::min(options_.tcp_stalled_timeout, options_.tcp_idle_timeout));
 }
 
 }  // namespace quic

@@ -41,17 +41,50 @@ class FlushCloseAlarmDelegate : public QuicAlarm::DelegateWithoutContext {
   QuictunTunnel* const tunnel_;
 };
 
+void CloseExpired(quiche::QuicheIntrusiveList<QuictunTunnel>& list,
+                  QuicTime now, QuicTime::Delta timeout,
+                  absl::string_view reason) {
+  // Oldest activity is at the front, so the front is the only candidate: if
+  // it isn't expired, nothing is.
+  while (!list.empty() && now - list.front().last_activity() >= timeout) {
+    QuictunTunnel* tunnel = &list.front();
+    tunnel->Close(reason, /*reset_stream=*/true);
+    // Close() unlinks before it can reenter anything (see its own body), so
+    // the front always advances and this loop always terminates. Asserted
+    // rather than defended against: a Close() that stopped unlinking would
+    // spin here forever, and catching that in a debug run beats shipping a
+    // silent bound.
+    QUICHE_DCHECK(list.empty() || &list.front() != tunnel);
+  }
+}
+
 }  // namespace
 
-void QuictunIdleTracker::Touch(QuictunTunnel* tunnel) {
-  if (!order_.empty() && &order_.back() == tunnel) {
-    // Already the most recently active -- the overwhelmingly common case for
-    // a tunnel that is actively transferring, and for any connection
-    // carrying only one.
+void QuictunIdleTracker::Touch(QuictunTunnel* tunnel, bool stalled) {
+  quiche::QuicheIntrusiveList<QuictunTunnel>& list =
+      stalled ? stalled_order_ : order_;
+  if (!list.empty() && &list.back() == tunnel) {
+    // Already the most recently active in the class it belongs to -- the
+    // overwhelmingly common case for a tunnel that is actively
+    // transferring, and for any connection carrying only one.
     return;
   }
   Remove(tunnel);
-  order_.push_back(tunnel);
+  // The sweep only ever looks at the front, which is sound only while each
+  // list is ordered oldest-first. That holds by construction rather than by
+  // any sorting step, so the one thing that could break it is appending an
+  // entry older than the current tail -- checked here, where it is O(1),
+  // instead of validating the whole list from the sweep.
+  QUICHE_DCHECK(list.empty() ||
+                list.back().last_activity() <= tunnel->last_activity());
+  list.push_back(tunnel);
+}
+
+void QuictunIdleTracker::Refile(QuictunTunnel* tunnel, bool stalled) {
+  if (!quiche::QuicheIntrusiveList<QuictunTunnel>::is_linked(tunnel)) {
+    return;
+  }
+  Touch(tunnel, stalled);
 }
 
 void QuictunIdleTracker::Remove(QuictunTunnel* tunnel) {
@@ -62,19 +95,10 @@ void QuictunIdleTracker::Remove(QuictunTunnel* tunnel) {
 }
 
 void QuictunIdleTracker::CloseIdleTunnels(QuicTime now,
-                                          QuicTime::Delta timeout) {
-  // Oldest activity is at the front, so the front is the only candidate: if
-  // it isn't expired, nothing is.
-  while (!order_.empty() && now - order_.front().last_activity() >= timeout) {
-    QuictunTunnel* tunnel = &order_.front();
-    tunnel->Close("idle timeout", /*reset_stream=*/true);
-    // Close() unlinks before it can reenter anything (see its own body), so
-    // the front always advances and this loop always terminates. Asserted
-    // rather than defended against: a Close() that stopped unlinking would
-    // spin here forever, and catching that in a debug run beats shipping a
-    // silent bound.
-    QUICHE_DCHECK(order_.empty() || &order_.front() != tunnel);
-  }
+                                          QuicTime::Delta timeout,
+                                          QuicTime::Delta stalled_timeout) {
+  CloseExpired(order_, now, timeout, "idle timeout");
+  CloseExpired(stalled_order_, now, stalled_timeout, "stalled timeout");
 }
 
 QuictunTunnel::QuictunTunnel(QuictunStream* stream, ConnectingClientSocket* socket,
@@ -204,6 +228,7 @@ void QuictunTunnel::OnStreamCanWriteMore(QuicStreamId /*id*/) {
   // burst, on a low-RTT/high-throughput path more than this session's own
   // real-network testing exercised -- not worth the risk for a check that
   // was never actually fixing anything.
+  UpdateIdleClass();
   if (tcp_receive_in_flight_ || stream_->HasBufferedData()) {
     return;
   }
@@ -292,7 +317,11 @@ void QuictunTunnel::ReceiveComplete(
   if (!stream_->HasBufferedData()) {
     BeginReadFromTcp();
   }
-  // Otherwise wait for OnStreamCanWriteMore() to resume reading from TCP.
+  // Otherwise wait for OnStreamCanWriteMore() to resume reading from TCP --
+  // which is exactly the stalled state, hence the reclassification. It has
+  // to happen here rather than inside the NoteActivity() above, which ran
+  // before the write that created the backlog.
+  UpdateIdleClass();
 }
 
 void QuictunTunnel::SendComplete(absl::Status status) {
@@ -335,6 +364,10 @@ void QuictunTunnel::FillQueueFromStream() {
       break;
     }
   }
+  // Leaving the loop with the queue full means we stopped reading, so the
+  // rest of the burst is now sitting in the stream's receive buffer holding
+  // the connection's shared flow-control credit.
+  UpdateIdleClass();
 }
 
 void QuictunTunnel::BeginReadFromTcp() {
@@ -365,6 +398,10 @@ void QuictunTunnel::MaybeFlushQuicToTcp() {
   pending_to_tcp_.pop_front();
   tcp_send_in_flight_ = true;
   socket_->SendAsync(std::move(chunk));
+  // A slot just freed up, which may have taken this tunnel back out of the
+  // stalled class. After SendAsync() rather than before, since it can call
+  // back inline; UpdateIdleClass() is idempotent and guards on closed_.
+  UpdateIdleClass();
 }
 
 void QuictunTunnel::MaybeCloseAfterQuicFin() {
@@ -474,7 +511,36 @@ void QuictunTunnel::NoteActivity() {
     return;
   }
   last_activity_ = stream_->connection()->clock()->ApproximateNow();
-  idle_tracker_->Touch(this);
+  stalled_ = IsHoldingBuffer();
+  idle_tracker_->Touch(this, stalled_);
+}
+
+bool QuictunTunnel::IsHoldingBuffer() const {
+  return pending_to_tcp_.size() >= kMaxQueuedChunks ||
+         stream_->HasBufferedData();
+}
+
+void QuictunTunnel::UpdateIdleClass() {
+  // Same closed_ guard, and load-bearing for the same reason, as
+  // NoteActivity()'s: a late callback must not splice an already-unlinked
+  // tunnel back into idle_tracker_.
+  if (closed_) {
+    return;
+  }
+  const bool stalled = IsHoldingBuffer();
+  if (stalled == stalled_) {
+    return;
+  }
+  stalled_ = stalled;
+  // Both lists are sorted only by construction, so joining one at anything
+  // but "now" appends an entry older than the tail and the sweep, which
+  // only ever looks at the front, then reaps it late. Honest rather than a
+  // way of dodging the deadline -- every flip of IsHoldingBuffer() is
+  // itself real data movement (a chunk handed to the TCP socket, or the
+  // stream's send buffer draining onto the wire), which is exactly what
+  // last_activity_ records.
+  last_activity_ = stream_->connection()->clock()->ApproximateNow();
+  idle_tracker_->Refile(this, stalled_);
 }
 
 void QuictunTunnel::Close(absl::string_view reason, bool reset_stream) {

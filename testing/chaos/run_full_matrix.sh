@@ -176,6 +176,13 @@ echo "=== pollhup_spin_test.py ===" | tee -a "$RESULTS"
 python3 -u pollhup_spin_test.py >> "$RESULTS" 2>&1
 echo "exit=$? for pollhup_spin_test.py" | tee -a "$RESULTS"
 
+# A stalled tunnel holds session flow-control credit its whole QUIC
+# connection shares, so it gets a much shorter deadline than a quiet one.
+# The control -- a quiet tunnel surviving that deadline -- matters as much.
+echo "=== stalled_timeout_test.py ===" | tee -a "$RESULTS"
+python3 -u stalled_timeout_test.py >> "$RESULTS" 2>&1
+echo "exit=$? for stalled_timeout_test.py" | tee -a "$RESULTS"
+
 # --target refusing the TCP connect (ECONNREFUSED) -- another coverage gap
 # (QuictunServerConnection::ConnectComplete()'s failure branch), matching
 # the ordinary operational case of the backend service being down.
