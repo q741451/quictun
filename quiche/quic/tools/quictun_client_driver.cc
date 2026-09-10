@@ -80,34 +80,60 @@ QuictunClientDriver::QuictunClientDriver(QuicEventLoop* event_loop,
                      static_cast<size_t>(std::max(options.conn_per_udp, 1)));
 }
 
+absl::Status QuictunClientDriver::OpenUdpSocket(UdpSocket& entry) {
+  // Leaves `entry` empty on every failure path rather than half-built: a
+  // valid fd with a null writer would crash OnSocketEvent() if that fd
+  // number ever came back registered.
+  if (entry.fd.valid()) {
+    // Only ever false for an fd this never registered, i.e. after an
+    // earlier failure here.
+    (void)event_loop_->UnregisterSocket(*entry.fd);
+    // Before the fd it points at is closed and possibly reused.
+    entry.writer.reset();
+    entry.fd = OwnedSocketFd();
+  }
+  absl::StatusOr<OwnedSocketFd> ufd =
+      CreateQuicUdpSocket(remote_address_, options_.udp_socket_buffer_bytes);
+  if (!ufd.ok()) {
+    return ufd.status();
+  }
+  OwnedSocketFd fd = *std::move(ufd);
+  absl::Status cs = socket_api::Connect(*fd, remote_address_);
+  if (!cs.ok()) {
+    return cs;
+  }
+  absl::StatusOr<QuicSocketAddress> self = socket_api::GetSocketAddress(*fd);
+  if (!self.ok()) {
+    return self.status();
+  }
+  if (!event_loop_->RegisterSocket(
+          *fd, kSocketEventReadable | kSocketEventWritable | kSocketEventError,
+          this)) {
+    return absl::InternalError("failed to register a UDP socket");
+  }
+  entry.self_address = *self;
+  entry.writer = MakeQuictunPacketWriter(*fd, options_.so_txtime, event_loop_);
+  entry.fd = std::move(fd);
+  return absl::OkStatus();
+}
+
+bool QuictunClientDriver::UdpSocketIsIdle(size_t socket_index) const {
+  for (const auto& [connection, held] : connections_) {
+    if (held.socket_index == socket_index) {
+      return false;
+    }
+  }
+  return true;
+}
+
 absl::Status QuictunClientDriver::Start() {
   // One socket per --udp_socket, each on its own ephemeral source port
   // (bind is implicit in connect()) -- see --udp_socket's own comment.
   for (size_t i = 0; i < udp_socket_count_; ++i) {
     auto entry = std::make_unique<UdpSocket>();
-    absl::StatusOr<OwnedSocketFd> ufd =
-        CreateQuicUdpSocket(remote_address_, options_.udp_socket_buffer_bytes);
-    if (!ufd.ok()) {
-      return ufd.status();
-    }
-    entry->fd = *std::move(ufd);
-    absl::Status cs = socket_api::Connect(*entry->fd, remote_address_);
-    if (!cs.ok()) {
-      return cs;
-    }
-    absl::StatusOr<QuicSocketAddress> self =
-        socket_api::GetSocketAddress(*entry->fd);
-    if (!self.ok()) {
-      return self.status();
-    }
-    entry->self_address = *self;
-    entry->writer =
-        MakeQuictunPacketWriter(*entry->fd, options_.so_txtime, event_loop_);
-    if (!event_loop_->RegisterSocket(
-            *entry->fd,
-            kSocketEventReadable | kSocketEventWritable | kSocketEventError,
-            this)) {
-      return absl::InternalError("failed to register a UDP socket");
+    absl::Status os = OpenUdpSocket(*entry);
+    if (!os.ok()) {
+      return os;
     }
     udp_sockets_.push_back(std::move(entry));
   }
@@ -222,6 +248,30 @@ void QuictunClientDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
 std::shared_ptr<QuictunClientConnection>
 QuictunClientDriver::CreateNewConnection(size_t socket_index) {
   UdpSocket& udp = *udp_sockets_[socket_index];
+  // Nothing is left on this socket, so give it a fresh one before building
+  // anything that will hold its writer. connect() re-resolves the route and
+  // picks up whatever source address the host has now, which is the whole
+  // point: a WAN that redialled left the old socket bound to an address
+  // that no longer exists, and every write on it fails permanently.
+  //
+  // Structural rather than driven by the write error, deliberately. That
+  // error is ENETUNREACH, which any off-path attacker can produce with one
+  // forged ICMP packet, so acting on it would hand them a way to tear down
+  // a socket several connections share (see OnSocketEvent(), and
+  // 6990cb05d for why socket errors are consumed and never acted on). This
+  // is instead what that decision already assumed existed: back when every
+  // connection owned its socket, a route flap healed by itself because the
+  // next connection built a new one. Sharing sockets removed that, not the
+  // reasoning behind it.
+  if (UdpSocketIsIdle(socket_index)) {
+    QUICHE_DCHECK(udp.write_blocked_list.Empty());
+    absl::Status os = OpenUdpSocket(udp);
+    if (!os.ok()) {
+      QUIC_LOG_EVERY_N_SEC(WARNING, 10)
+          << "quictun could not reopen a UDP socket: " << os;
+      return nullptr;
+    }
+  }
   // Unique per connection and never reused: it is the routing key for every
   // packet the server sends back, on whichever socket (see ProcessPacket()).
   const uint64_t raw_cid = next_client_cid_++;
@@ -249,7 +299,7 @@ QuictunClientDriver::CreateNewConnection(size_t socket_index) {
                                  options_.startup_bandwidth_kbps,
                                  options_.startup_rtt_ms);
   std::shared_ptr<QuictunClientConnection> shared(std::move(connection));
-  connections_.emplace(shared.get(), shared);
+  connections_.emplace(shared.get(), HeldConnection{shared, socket_index});
   return shared;
 }
 

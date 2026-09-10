@@ -117,6 +117,24 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener,
     QuicBlockedWriterList write_blocked_list;
   };
 
+  // Creates the UDP socket for `entry`, connect()s it to --remote and
+  // registers it with the event loop, replacing whatever it held before.
+  // connect() is what pins the source address, so this is also the only
+  // thing that ever picks one up: after the WAN changes address the old
+  // socket is bound to one that no longer exists and every write on it
+  // fails for good. See CreateNewConnection() for when it is redone.
+  absl::Status OpenUdpSocket(UdpSocket& entry);
+
+  // Whether any connection that still holds udp_sockets_[socket_index]'s
+  // writer exists -- which is exactly whether connections_ still has an
+  // entry for it, since that map is what keeps such a connection alive and
+  // CollectGarbage()'s erase is what finally destroys it. Derived rather
+  // than counted on the way past, so it cannot drift out of step with the
+  // map it describes; connections_ holds at most one entry per pool slot,
+  // so the scan is over a handful of entries and only runs on a socket
+  // about to be reopened anyway.
+  bool UdpSocketIsIdle(size_t socket_index) const;
+
   // Which socket an event is for. A linear scan over --udp_socket
   // entries, which is a handful at most.
   UdpSocket* FindUdpSocketByFd(SocketFd fd);
@@ -161,9 +179,15 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener,
   // outlive connections_, since each tunnel unlinks from it in Close().
   QuictunIdleTracker idle_tracker_;
 
-  absl::flat_hash_map<QuictunClientConnection*,
-                      std::shared_ptr<QuictunClientConnection>>
-      connections_;
+  // socket_index is written once at insertion and never touched again --
+  // it is what UdpSocketIsIdle() reads, and what makes "is this writer
+  // still referenced" a property of this map rather than of separate
+  // bookkeeping that could drift out of step with it.
+  struct HeldConnection {
+    std::shared_ptr<QuictunClientConnection> connection;
+    size_t socket_index;
+  };
+  absl::flat_hash_map<QuictunClientConnection*, HeldConnection> connections_;
   // Populated by RemoveConnection() (invoked via a QuictunClientConnection's
   // on_closed callback, which fires from deep within that connection's own
   // socket-event callback stack) and drained by CollectGarbage(). Destroying
