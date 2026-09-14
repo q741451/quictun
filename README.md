@@ -54,6 +54,17 @@ resuming the previous handshake. This tool does **not** defend against
 0-RTT replay attacks -- only enable it on trusted or low-risk paths; disable
 with `--zero_rtt=false` if that matters for your deployment.
 
+The session-ticket key that 0-RTT resumption relies on is derived from
+`--key` rather than randomly per process. This is what lets several
+`quictun_server` instances share one `--listen` port (the listen socket is
+always bound with `SO_REUSEPORT`, so the kernel can spread connections
+across them for multi-core scaling -- run the client with `--udp_socket=2`
+or more so its connections actually spread) while a client's 0-RTT ticket
+still resumes on whichever instance the next connection lands on, and across
+a server restart. The trade-off is weaker forward secrecy for that 0-RTT
+data -- the key lives as long as `--key` instead of rotating -- which is the
+same shared-secret exposure `--key` already carries.
+
 ## Startup banner
 
 Both binaries log a banner once at startup: the binary name, the exact

@@ -87,7 +87,8 @@ QuictunServerDriver::QuictunServerDriver(QuicEventLoop* event_loop,
   // OnStreamDataAvailable() in quictun_server_connection.cc.
   crypto_config_ = std::make_unique<QuicCryptoServerConfig>(
       kSourceAddressTokenSecret, QuicRandom::GetInstance(),
-      MakeQuictunSelfSignedProofSource(), KeyExchangeSource::Default(),
+      MakeQuictunSelfSignedProofSource(options.psk),
+      KeyExchangeSource::Default(),
       /*proof_verifier=*/nullptr);
   crypto_config_->AddDefaultConfig(QuicRandom::GetInstance(),
                                    QuicDefaultClock::Get(),
@@ -111,6 +112,17 @@ absl::Status QuictunServerDriver::Start() {
     return fd.status();
   }
   listen_fd_ = *std::move(fd);
+
+  // Must precede bind(): SO_REUSEPORT lets several quictun_server instances
+  // share one --listen port so the kernel spreads connections across them,
+  // a core each, past a single core's throughput ceiling. Always on -- the
+  // session-ticket key is derived from --key (see MakeQuictunSelfSignedProofSource)
+  // so 0-RTT still resumes when a connection lands on a different instance
+  // than issued its ticket. A single instance is unaffected by it.
+  absl::Status reuse = SetReuseAddrAndPort(*listen_fd_);
+  if (!reuse.ok()) {
+    return reuse;
+  }
 
   absl::Status status = socket_api::Bind(*listen_fd_, listen_address_);
   if (!status.ok()) {

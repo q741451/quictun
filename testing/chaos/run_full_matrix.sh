@@ -210,5 +210,14 @@ echo "=== dualstack_ipv6_test.py --conn-per-udp=2 --udp-socket=2 ===" | tee -a "
 python3 -u dualstack_ipv6_test.py --conn-per-udp=2 --udp-socket=2 >> "$RESULTS" 2>&1
 echo "exit=$? for dualstack_ipv6_test.py --conn-per-udp=2 --udp-socket=2" | tee -a "$RESULTS"
 
+# Several server instances sharing one --listen port (always-on SO_REUSEPORT)
+# plus the --key-derived shared ticket key -- the multi-instance combination
+# no single-instance test above touches. Churns it (bursts, idle-out
+# resumption, an instance killed and restarted mid-run) and asserts it does
+# not crash / corrupt / leak / wedge.
+echo "=== reuseport_test.py ===" | tee -a "$RESULTS"
+python3 -u reuseport_test.py >> "$RESULTS" 2>&1
+echo "exit=$? for reuseport_test.py" | tee -a "$RESULTS"
+
 echo "=== MATRIX COMPLETE ===" | tee -a "$RESULTS"
 echo "Full results: $RESULTS"
