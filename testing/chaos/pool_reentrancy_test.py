@@ -190,12 +190,35 @@ def main():
     # Sanity: a brand-new echo against the now-stable, freshly-restarted
     # server, through the SAME client process (and, under pooling, likely
     # the same underlying connection(s)) that just weathered the churn.
-    sanity_results = [None]
+    #
+    # Recovery is expected WITHIN a bounded window, not instantly: the last
+    # kill can leave the client holding a connection to the old server that
+    # the restarted server has no state for. quictun does not send stateless
+    # resets, so the restarted server just drops that connection's packets;
+    # the client only abandons it once its own QUIC timers fire (blackhole
+    # detection, or --idle_timeout_seconds at the latest). A new TCP that
+    # round-robins onto that not-yet-abandoned connection fails until then.
+    # So retry until an echo succeeds or the window elapses -- a single
+    # attempt just races those timers, which is what made this test flaky --
+    # and record how long recovery took, so a regression that makes recovery
+    # slower still shows up (and blows the window if it exceeds it).
+    idle_timeout_s = 6  # matches --idle_timeout_seconds passed to both procs
+    recovery_deadline = time.time() + idle_timeout_s + 10
+    sanity_ok = False
+    recovery_s = None
     if final_alive:
-        t = threading.Thread(target=short_echo, args=(client_local_port, sanity_results, 0))
-        t.start()
-        t.join(timeout=5)
-    sanity_ok = bool(sanity_results[0])
+        t0 = time.time()
+        while time.time() < recovery_deadline:
+            r = [None]
+            short_echo(client_local_port, r, 0)
+            if r[0]:
+                sanity_ok = True
+                recovery_s = time.time() - t0
+                break
+            time.sleep(0.5)
+    print(f"=== [{tag}] sanity recovered={sanity_ok} recovery_s="
+          f"{f'{recovery_s:.1f}' if recovery_s is not None else 'n/a'} ===",
+          flush=True)
 
     fds_ok = True
     rss_ok = True
