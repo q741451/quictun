@@ -12,6 +12,7 @@
 
 #include "absl/strings/string_view.h"
 #include "openssl/aead.h"
+#include "openssl/err.h"
 #include "openssl/hkdf.h"
 #include "openssl/rand.h"
 #include "quiche/quic/core/crypto/certificate_util.h"
@@ -87,6 +88,16 @@ class SharedTicketCrypter : public ProofSource::TicketCrypter {
     if (!EVP_AEAD_CTX_open(aead_ctx_.get(), out.data(), &out_len, out.size(),
                            input, kIVSize, input + kIVSize, in.size() - kIVSize,
                            nullptr, 0)) {
+      // An undecryptable ticket is a normal, handled outcome (the server
+      // just declines resumption). But the failed open leaves a BAD_DECRYPT
+      // on BoringSSL's thread-local error queue, and left there it contaminates
+      // the rest of the handshake into a hard QUIC_HANDSHAKE_FAILED instead of
+      // a clean fall-back to 1-RTT -- exactly what wedges a client holding a
+      // ticket this server cannot decrypt (e.g. one issued by a previous build
+      // across an upgrade). SimpleTicketCrypter dodges this by short-circuiting
+      // on its key-epoch byte before ever calling open; we have no epoch, so
+      // clear the queue explicitly.
+      ERR_clear_error();
       return std::vector<uint8_t>();
     }
     out.resize(out_len);
