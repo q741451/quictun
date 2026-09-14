@@ -154,12 +154,15 @@ for side in client server both; do
   echo "exit=$? for writeblock_fault_test.py --side=$side" | tee -a "$RESULTS"
 done
 
-# Same, but with --so_txtime (QuicGsoBatchWriter) -- coverage showed this
+# Same, but with --udp_gso (QuicGsoBatchWriter) -- coverage showed this
 # whole path, including RearmOnBlockPacketWriter's Flush()-based block
-# detection, was never exercised by anything above.
-echo "=== writeblock_fault_test.py --side=both --so-txtime ===" | tee -a "$RESULTS"
-python3 -u writeblock_fault_test.py --side=both --so-txtime >> "$RESULTS" 2>&1
-echo "exit=$? for writeblock_fault_test.py --side=both --so-txtime" | tee -a "$RESULTS"
+# detection, was never exercised by anything above. Then with --so_txtime
+# on top, which batches differently.
+for gso in "--udp-gso" "--udp-gso --so-txtime"; do
+  echo "=== writeblock_fault_test.py --side=both $gso ===" | tee -a "$RESULTS"
+  python3 -u writeblock_fault_test.py --side=both $gso >> "$RESULTS" 2>&1
+  echo "exit=$? for writeblock_fault_test.py --side=both $gso" | tee -a "$RESULTS"
+done
 
 # A connection closing while it is still write blocked -- the blocked-writer
 # list holds a raw pointer the connection does not unregister itself. See

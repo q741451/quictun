@@ -194,7 +194,7 @@ class FaultInjectingPacketWriter : public QuicPacketWriter {
   // Shares `remaining_` with WritePacket() rather than counting separately,
   // so the same QUICTUN_INJECT_WRITE_BLOCK_AFTER budget can land on
   // whichever call actually reaches the wire Nth -- necessary to reach
-  // QuicGsoBatchWriter (--so_txtime): in batch mode, WritePacket() usually
+  // QuicGsoBatchWriter (--udp_gso): in batch mode, WritePacket() usually
   // just buffers into the pending GSO segment and reports OK immediately;
   // the real send (and thus the real place a block can happen) is Flush(),
   // called either explicitly or implicitly once the batch fills.
@@ -262,9 +262,9 @@ void EnableQuictunSoTxTime() {
 }
 
 std::unique_ptr<QuicPacketWriter> MakeQuictunPacketWriter(
-    SocketFd fd, bool so_txtime_enabled, QuicEventLoop* event_loop) {
+    SocketFd fd, bool udp_gso, QuicEventLoop* event_loop) {
   std::unique_ptr<QuicPacketWriter> writer;
-  if (so_txtime_enabled) {
+  if (udp_gso) {
     writer = std::make_unique<QuicGsoBatchWriter>(fd, CLOCK_MONOTONIC);
   } else {
     writer = std::make_unique<QuicDefaultPacketWriter>(fd);

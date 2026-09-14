@@ -134,6 +134,10 @@ int main(int argc, char* argv[]) {
     std::cerr << "--key is required" << std::endl;
     return 1;
   }
+  if (options.so_txtime && !options.udp_gso) {
+    std::cerr << "--so_txtime requires --udp_gso" << std::endl;
+    return 1;
+  }
   options.zero_rtt = quiche::GetQuicheCommandLineFlag(FLAGS_zero_rtt);
   options.udp_socket = quiche::GetQuicheCommandLineFlag(FLAGS_udp_socket);
   options.conn_per_udp = quiche::GetQuicheCommandLineFlag(FLAGS_conn_per_udp);

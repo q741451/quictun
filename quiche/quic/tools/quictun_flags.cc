@@ -35,10 +35,16 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "one of cubic, bbr, bbr2, bbr3.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    bool, udp_gso, false,
+    "Send through UDP GSO: consecutive packets to the same peer leave in "
+    "one sendmsg instead of one each. Needs Linux 4.18+.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
     bool, so_txtime, false,
-    "Use SO_TXTIME (Linux packet pacing offload) for the UDP send path. "
-    "Off by default; falls back silently if the kernel doesn't support "
-    "it.");
+    "Hand packet pacing to the kernel via SO_TXTIME. Requires --udp_gso. "
+    "Only the fq qdisc on Linux 4.20+ honors it; under any other qdisc "
+    "(fq_codel, pfifo_fast, ...) packets leave up to 10ms early, in "
+    "bursts.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     bool, transparent, false,
@@ -160,6 +166,7 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
   options.psk = quiche::GetQuicheCommandLineFlag(FLAGS_key);
   options.congestion_control =
       quiche::GetQuicheCommandLineFlag(FLAGS_congestion_control);
+  options.udp_gso = quiche::GetQuicheCommandLineFlag(FLAGS_udp_gso);
   options.so_txtime = quiche::GetQuicheCommandLineFlag(FLAGS_so_txtime);
   options.transparent = quiche::GetQuicheCommandLineFlag(FLAGS_transparent);
   options.idle_timeout = QuicTime::Delta::FromSeconds(
@@ -235,6 +242,7 @@ void PrintQuictunStartupBanner(
   lines.push_back(
       {"key", absl::StrCat("<redacted, ", options.psk.size(), " bytes>")});
   lines.push_back({"congestion_control", options.congestion_control});
+  lines.push_back({"udp_gso", options.udp_gso ? "true" : "false"});
   lines.push_back({"so_txtime", options.so_txtime ? "true" : "false"});
   lines.push_back({"transparent", options.transparent ? "true" : "false"});
   lines.push_back({"idle_timeout_seconds",

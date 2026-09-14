@@ -112,7 +112,7 @@ absl::Status QuictunClientDriver::OpenUdpSocket(UdpSocket& entry) {
     return absl::InternalError("failed to register a UDP socket");
   }
   entry.self_address = *self;
-  entry.writer = MakeQuictunPacketWriter(*fd, options_.so_txtime, event_loop_);
+  entry.writer = MakeQuictunPacketWriter(*fd, options_.udp_gso, event_loop_);
   entry.fd = std::move(fd);
   return absl::OkStatus();
 }

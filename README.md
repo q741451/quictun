@@ -22,8 +22,8 @@ carries on top: BBR/BBRv2/BBRv3 congestion control, loss recovery, 1-RTT and
 
 Throughput comes from how much work each syscall does:
 
-- **Batched sends.** With `--so_txtime`, packets leave via UDP GSO -- up to
-  45 segments per `sendmsg` instead of one packet per call.
+- **Batched sends.** With `--udp_gso`, consecutive packets leave in one
+  `sendmsg` via UDP GSO (at most 45 per call) instead of one per call.
 - **Batched receives.** `recvmmsg` collects 16 packets per call.
 - **Per-connection keys.** AEAD keys are derived once per connection; each
   packet costs a nonce XOR, not a fresh key schedule.
@@ -73,6 +73,7 @@ quictun_server  (built 2026/08/06 20:14:23)
   max_concurrent_connections              = 5000
   key                                     = <redacted, 20 bytes>
   congestion_control                      = bbr2
+  udp_gso                                 = false
   so_txtime                               = false
   transparent                             = false
   idle_timeout_seconds                    = 60
@@ -95,7 +96,8 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | --- | --- | --- |
 | `--key` | *(required)* | Shared secret checked as an application-layer preamble at the start of every tunnel. The two endpoints must be configured with the identical value. |
 | `--congestion_control` | `cubic` | `cubic`, `bbr`, `bbr2`, or `bbr3`. Applies independently to *this endpoint's own send direction* -- client and server each pick their own, and the two need not match. An unrecognized value falls back to `cubic` with a logged warning rather than failing to start. |
-| `--so_txtime` | `false` | Use `SO_TXTIME` (Linux packet pacing offload) on the UDP send path. Falls back silently if the kernel doesn't support it. |
+| `--udp_gso` | `false` | Send through UDP GSO: consecutive packets to the same peer leave in one `sendmsg` instead of one each. Needs Linux 4.18+. |
+| `--so_txtime` | `false` | Hand packet pacing to the kernel via `SO_TXTIME`. Requires `--udp_gso`. Only the `fq` qdisc on Linux 4.20+ honors it; under any other qdisc (`fq_codel`, `pfifo_fast`, ...) packets leave up to 10ms early, in bursts. |
 | `--transparent` | `false` | Transparent-proxy mode (Linux only). `quictun_client` captures each accepted TCP connection's original destination via `SO_ORIGINAL_DST` (populated by an external iptables/nftables `REDIRECT` rule the operator sets up separately -- quictun itself never touches netfilter config) instead of always tunneling to one fixed address; `quictun_server` connects out to that per-stream destination instead of `--target`. Mutually exclusive with `--target` on the server -- setting both is a startup error, since the two modes speak incompatible wire formats (`--target`'s existing mode has zero framing after the `--key` preamble; transparent mode prepends an address header, IPv4/IPv6 only, no domain names). Both `quictun_client` and `quictun_server` must be started with the same value, the same as `--key`. |
 | `--idle_timeout_seconds` | `60` | QUIC connection idle timeout, in seconds: how long a connection may go without receiving anything from the peer before it is torn down. Keepalive PINGs keep resetting it while the peer is alive, so in practice it only fires once the peer really is gone -- it bounds how long a vanished peer's connection (its UDP socket, its session state, and every tunnel's target-side TCP socket) is held before being reclaimed, so keep it short. Does not govern how long a quiet tunnel stays open -- that is `--tcp_idle_timeout_seconds`. |
 | `--tcp_idle_timeout_seconds` | `86400` | Per-tunnel idle timeout, in seconds: one tunnel with no real data in either direction for this long is closed, leaving the QUIC connection carrying it -- and every other tunnel on it -- untouched. Independent of `--idle_timeout_seconds`, which reclaims connections whose peer has vanished; this is policy for a tunnel that is merely quiet, so the default (24h) is deliberately lax enough never to cut a connection that is simply idle rather than dead. Set it the same on both ends. |

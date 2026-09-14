@@ -153,7 +153,7 @@ def main():
     ap.add_argument("--payload-mb", type=float, default=2.0)
     ap.add_argument("--timeout-s", type=float, default=20.0)
     ap.add_argument("--log-dir", default="/tmp/quictun_chaos_logs")
-    # --so_txtime switches the writer under test from QuicDefaultPacketWriter
+    # --udp-gso switches the writer under test from QuicDefaultPacketWriter
     # to QuicGsoBatchWriter -- coverage showed the whole GSO/batch path,
     # including RearmOnBlockPacketWriter's Flush()-based block detection
     # (as opposed to WritePacket()-based), was never exercised by any
@@ -161,6 +161,8 @@ def main():
     # Flush() counter (see quictun_connection_factory.cc) is what lets the
     # same --trigger-after budget land on whichever of the two actually
     # reaches the wire Nth, which in batch mode is usually Flush().
+    # --so-txtime adds release times on top, which changes what batches.
+    ap.add_argument("--udp-gso", action="store_true")
     ap.add_argument("--so-txtime", action="store_true")
     # The big transfer always runs alongside a SECOND, small, concurrent
     # connection sharing the same underlying QUIC connection (as a sibling
@@ -175,13 +177,15 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
-    tag = (f"writeblock_fault_{args.side}" + ("_sotxtime" if args.so_txtime else "")
+    tag = (f"writeblock_fault_{args.side}" + ("_gso" if args.udp_gso else "")
+           + ("_sotxtime" if args.so_txtime else "")
            + f"_c{args.conn_per_udp}u{args.udp_socket}")
 
     target_port = 26910
     server_listen_port = 26911
     local_port = 26912
-    so_txtime_flags = ["--so_txtime=true"] if args.so_txtime else []
+    writer_flags = ((["--udp_gso=true"] if args.udp_gso else [])
+                    + (["--so_txtime=true"] if args.so_txtime else []))
 
     def make_env(inject):
         if not inject:
@@ -202,7 +206,7 @@ def main():
     server_proc = start_proc(
         [SERVER_BIN, f"--listen=127.0.0.1:{server_listen_port}",
          f"--target=127.0.0.1:{target_port}", f"--key={KEY}",
-         "--idle_timeout_seconds=20"] + so_txtime_flags,
+         "--idle_timeout_seconds=20"] + writer_flags,
         f"{args.log_dir}/{tag}_server.log", env=make_env(inject_server))
     time.sleep(1.0)
     if server_proc.poll() is not None:
@@ -218,7 +222,7 @@ def main():
     client_proc = start_proc(
         [CLIENT_BIN, f"--local=127.0.0.1:{local_port}",
          f"--remote=127.0.0.1:{server_listen_port}", f"--key={KEY}",
-         "--idle_timeout_seconds=20"] + so_txtime_flags + pool_flags,
+         "--idle_timeout_seconds=20"] + writer_flags + pool_flags,
         f"{args.log_dir}/{tag}_client.log", env=make_env(inject_client))
     time.sleep(1.0)
     if client_proc.poll() is not None:

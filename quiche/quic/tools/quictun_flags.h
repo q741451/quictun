@@ -61,8 +61,14 @@ struct QuictunTuningOptions {
   // no-op -- quictun's original pure-port-forward behavior, unchanged.
   bool transparent = false;
 
-  // Whether to use SO_TXTIME (Linux packet pacing offload) on the UDP send
-  // path. Falls back silently if the kernel doesn't support it.
+  // Send through QuicGsoBatchWriter (UDP GSO) instead of
+  // QuicDefaultPacketWriter.
+  bool udp_gso = false;
+
+  // Give QuicGsoBatchWriter release times (SO_TXTIME), so QUICHE hands
+  // packets to the kernel up to 10ms early and trusts the qdisc to hold
+  // them. Only fq (4.20+) does; anything else sends them at once, in bursts.
+  // Meaningless without udp_gso, and rejected at startup without it.
   bool so_txtime = false;
 
   // QUIC's own max_idle_timeout: how long a connection may go without
@@ -181,7 +187,7 @@ struct QuictunTuningOptions {
   int32_t conn_per_udp = 1;
 };
 
-// Defines --key, --zero_rtt, --congestion_control, --so_txtime,
+// Defines --key, --zero_rtt, --congestion_control, --udp_gso, --so_txtime,
 // --transparent, --idle_timeout_seconds,
 // --initial_stream_flow_control_window_kb,
 // --initial_session_flow_control_window_kb, --udp_socket_buffer_kb,

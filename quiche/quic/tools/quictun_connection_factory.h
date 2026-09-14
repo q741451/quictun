@@ -25,16 +25,14 @@ namespace quic {
 
 // Enables the SO_TXTIME restart flag process-wide. Must be called (once, at
 // startup) before constructing any writer via MakeQuictunPacketWriter() with
-// `so_txtime_enabled=true`, since QuicGsoBatchWriter only enables release
-// time if the flag is already set at construction time.
+// `udp_gso=true`, since QuicGsoBatchWriter only enables release time if the
+// flag is already set at construction time.
 void EnableQuictunSoTxTime();
 
-// Returns a QuicDefaultPacketWriter, or -- if `so_txtime_enabled` -- a
-// QuicGsoBatchWriter (Linux packet pacing offload) -- either way wrapped so
-// that, the moment a write actually blocks, `event_loop` is told to resume
-// watching `fd` for writability. Falls back silently to the plain writer if
-// the kernel doesn't support SO_TXTIME, same as QuicGsoBatchWriter always
-// does when release time isn't available.
+// Returns a QuicDefaultPacketWriter, or -- if `udp_gso` -- a
+// QuicGsoBatchWriter -- either way wrapped so that, the moment a write
+// actually blocks, `event_loop` is told to resume watching `fd` for
+// writability.
 //
 // This rearming is necessary, not an optional nicety: quictun only ever asks
 // its (poll()-based, always level-triggered -- see
@@ -66,7 +64,7 @@ void EnableQuictunSoTxTime();
 // environment. Without that macro, none of this code exists in the binary
 // at all, not just at runtime.
 std::unique_ptr<QuicPacketWriter> MakeQuictunPacketWriter(
-    SocketFd fd, bool so_txtime_enabled, QuicEventLoop* event_loop);
+    SocketFd fd, bool udp_gso, QuicEventLoop* event_loop);
 
 // Parses "cubic" | "bbr" | "bbr2" | "bbr3" into a CongestionControlType.
 // Returns kCubicBytes (quictun's default) and logs a warning for any other
