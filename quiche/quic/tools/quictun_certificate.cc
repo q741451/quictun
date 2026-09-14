@@ -72,11 +72,12 @@ class SharedTicketCrypter : public ProofSource::TicketCrypter {
   void Decrypt(
       absl::string_view in,
       std::shared_ptr<ProofSource::DecryptCallback> callback) override {
-    callback->Run(Decrypt(in));
+    callback->Run(DecryptToBytes(in));
   }
 
  private:
-  std::vector<uint8_t> Decrypt(absl::string_view in) {
+  // Not named Decrypt so it can't shadow the base's virtual Decrypt().
+  std::vector<uint8_t> DecryptToBytes(absl::string_view in) {
     if (in.size() < kIVSize) {
       return std::vector<uint8_t>();
     }
