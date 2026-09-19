@@ -46,6 +46,14 @@ struct QuictunTuningOptions {
   // direction only.
   std::string congestion_control = "cubic";
 
+  // Upper bound on this endpoint's congestion window (send direction), in
+  // bytes. BBR sizes the window to the path but never above this, so it is
+  // what caps single-flow throughput on a high-bandwidth-delay path when
+  // there is no loss. Applied (converted to packets) by
+  // ApplyQuictunCongestionTuning(). The default equals QUICHE's built-in
+  // 2000-packet cap, so leaving it alone changes nothing.
+  QuicByteCount max_congestion_window_bytes = 2851 * 1024;
+
   // Transparent-proxy mode: quictun_client captures each accepted TCP
   // connection's original destination (Linux SO_ORIGINAL_DST, i.e. an
   // external iptables/nftables REDIRECT rule) instead of always tunneling
@@ -187,8 +195,8 @@ struct QuictunTuningOptions {
   int32_t conn_per_udp = 1;
 };
 
-// Defines --key, --zero_rtt, --congestion_control, --udp_gso, --so_txtime,
-// --transparent, --idle_timeout_seconds,
+// Defines --key, --zero_rtt, --congestion_control, --max_congestion_window_kb,
+// --udp_gso, --so_txtime, --transparent, --idle_timeout_seconds,
 // --initial_stream_flow_control_window_kb,
 // --initial_session_flow_control_window_kb, --udp_socket_buffer_kb,
 // --startup_bandwidth_kbps, --startup_rtt_ms,
@@ -196,6 +204,15 @@ struct QuictunTuningOptions {
 // QuictunTuningOptions. Must be called after
 // quiche::QuicheParseCommandLineFlags().
 QuictunTuningOptions GetQuictunTuningOptionsFromFlags();
+
+// Applies the congestion/flow-control tuning that has to be set as global
+// QUICHE flags (rather than per-connection QuicConfig): the congestion-window
+// cap from options.max_congestion_window_bytes, and a sent-packet tracking
+// limit sized automatically to match it and the receive window. Both binaries
+// must call this once at startup, after GetQuictunTuningOptionsFromFlags() --
+// the receiver needs the raised tracking limit for its ACK stream just as the
+// sender needs it for its data stream.
+void ApplyQuictunCongestionTuning(const QuictunTuningOptions& options);
 
 // Parses `value` as "host:port" or "[ipv6-literal]:port" into a
 // QuicSocketAddress. Returns nullopt (after logging why) if `value` isn't a

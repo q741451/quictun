@@ -15,8 +15,10 @@
 
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
+#include "quiche/quic/core/quic_constants.h"
 #include "quiche/quic/core/quic_server_id.h"
 #include "quiche/quic/core/quic_time.h"
+#include "quiche/quic/platform/api/quic_flags.h"
 #include "quiche/quic/platform/api/quic_ip_address.h"
 #include "quiche/quic/platform/api/quic_logging.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
@@ -98,6 +100,17 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "both ends.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, max_congestion_window_kb, 2851,
+    "Upper bound on this endpoint's congestion window (send direction), in "
+    "KiB. BBR sizes the window to the path (~2x bandwidth-delay product) but "
+    "never above this, so raise it on high-bandwidth-delay paths where the "
+    "default (2851 KiB = QUICHE's 2000-packet default) caps throughput with "
+    "no loss present. Under packet loss the separate lever is the receive "
+    "window (--initial_stream_flow_control_window_kb). Raising this is free "
+    "until reached, and the sent-packet tracking limit is scaled to match "
+    "automatically.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, initial_stream_flow_control_window_kb, 512,
     "Initial per-stream flow-control window advertised to the peer, in "
     "KiB. Independent of --initial_session_flow_control_window_kb -- with "
@@ -166,6 +179,10 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
   options.psk = quiche::GetQuicheCommandLineFlag(FLAGS_key);
   options.congestion_control =
       quiche::GetQuicheCommandLineFlag(FLAGS_congestion_control);
+  options.max_congestion_window_bytes =
+      static_cast<QuicByteCount>(
+          quiche::GetQuicheCommandLineFlag(FLAGS_max_congestion_window_kb)) *
+      1024;
   options.udp_gso = quiche::GetQuicheCommandLineFlag(FLAGS_udp_gso);
   options.so_txtime = quiche::GetQuicheCommandLineFlag(FLAGS_so_txtime);
   options.transparent = quiche::GetQuicheCommandLineFlag(FLAGS_transparent);
@@ -194,6 +211,30 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
   options.max_streams_per_connection =
       quiche::GetQuicheCommandLineFlag(FLAGS_max_streams_per_connection);
   return options;
+}
+
+void ApplyQuictunCongestionTuning(const QuictunTuningOptions& options) {
+  // Congestion-window cap. BBR tracks the window as a packet count times
+  // kDefaultTCPMSS, so convert bytes to packets (rounding up so the byte
+  // ceiling is at least what was asked for).
+  const QuicByteCount cwnd_bytes = options.max_congestion_window_bytes;
+  const QuicByteCount cwnd_packets =
+      (cwnd_bytes + kDefaultTCPMSS - 1) / kDefaultTCPMSS;
+  SetQuicFlag(quic_max_congestion_window, static_cast<int32_t>(cwnd_packets));
+
+  // The connection aborts (QUIC_TOO_MANY_OUTSTANDING_SENT_PACKETS) if the gap
+  // between the largest packet sent and the oldest unacked one grows past
+  // this. The send side drives that gap with a congestion window's worth of
+  // data packets; the receive side drives it with a receive window's worth of
+  // outgoing ACKs. Size it from whichever local budget is larger, counted in
+  // worst-case (small) packets, with 4x headroom. The divisor is a
+  // conservative floor on packet size, not kDefaultTCPMSS, so a small path
+  // MTU cannot under-provision it.
+  const QuicByteCount budget_bytes =
+      std::max(cwnd_bytes, options.initial_stream_flow_control_window_bytes);
+  int64_t tracked = static_cast<int64_t>(budget_bytes / 1000) * 4;
+  tracked = std::max<int64_t>(tracked, 10000);
+  SetQuicFlag(quic_max_tracked_packet_count, tracked);
 }
 
 std::optional<QuicSocketAddress> ParseQuictunSocketAddress(
@@ -242,6 +283,8 @@ void PrintQuictunStartupBanner(
   lines.push_back(
       {"key", absl::StrCat("<redacted, ", options.psk.size(), " bytes>")});
   lines.push_back({"congestion_control", options.congestion_control});
+  lines.push_back({"max_congestion_window_kb",
+                    absl::StrCat(options.max_congestion_window_bytes / 1024)});
   lines.push_back({"udp_gso", options.udp_gso ? "true" : "false"});
   lines.push_back({"so_txtime", options.so_txtime ? "true" : "false"});
   lines.push_back({"transparent", options.transparent ? "true" : "false"});

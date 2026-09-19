@@ -28,7 +28,11 @@ bazel build -c opt //quiche:quictun_client //quiche:quictun_server
 | `dualstack_ipv6_test.py` | IPv6 dual-stack `--listen=[::]` reached by an IPv4 peer. |
 
 Each runs standalone -- see its own `--help`/top comment (most also take
-`--conn-per-udp=N`/`--udp-socket=K` to vary the pool shape). Shared helpers
+`--conn-per-udp=N`/`--udp-socket=K` to vary the pool shape). The two
+`*_chaos_test.py` suites also take `--tuning=big`, which runs the endpoint
+under test with the large-BDP congestion/window flags (raised congestion
+window, multi-GB receive-window limit, always-on kNBHD) so the matrix
+exercises "does the large-window path crash under chaos". Shared helpers
 (imported/spawned, not run directly): `chaos_actor.py`, `chaos_monitor.py`,
 `chaos_target.py`, `netchaos_relay.py`.
 

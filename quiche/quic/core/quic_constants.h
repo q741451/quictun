@@ -87,10 +87,16 @@ inline constexpr QuicByteCount kDefaultFlowControlSendWindow =
     16 * 1024;  // 16 KB
 
 // Maximum flow control receive window limits for connection and stream.
+// Raised well above upstream's 16/24 MB so a single high-bandwidth-delay
+// tunnel can advertise a window large enough to keep the pipe full at high
+// RTT and loss (the flow-control window, not the congestion window, is the
+// binding limit under loss). This is only a growth ceiling: the sequencer
+// buffer is block-allocated on demand, so a connection that advertises a
+// small --initial_*_flow_control_window_kb still costs only that much.
 inline constexpr QuicByteCount kStreamReceiveWindowLimit =
-    16 * 1024 * 1024;  // 16 MB
+    2ull * 1024 * 1024 * 1024;  // 2 GB
 inline constexpr QuicByteCount kSessionReceiveWindowLimit =
-    24 * 1024 * 1024;  // 24 MB
+    3ull * 1024 * 1024 * 1024;  // 3 GB
 
 // Minimum size of the CWND, in packets, when doing bandwidth resumption.
 inline constexpr QuicPacketCount kMinCongestionWindowForBandwidthResumption =

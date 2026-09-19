@@ -30,6 +30,19 @@ TARGET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chaos_target.
 KEY = "chaostest-client-key"
 BASE_PORT = 28000
 
+# Large-BDP tuning appended to the observed quictun_client under test when
+# --tuning=big (raised congestion window, multi-GB receive-window limit,
+# auto-derived tracking limit, always-on kNBHD). See run_full_matrix.sh's
+# big-window pass -- "mainly test it doesn't crash".
+TUNING_FLAGS = {
+    "default": [],
+    "big": ["--congestion_control=bbr",
+            "--max_congestion_window_kb=65536",
+            "--initial_stream_flow_control_window_kb=65536",
+            "--initial_session_flow_control_window_kb=98304",
+            "--udp_socket_buffer_kb=65536"],
+}
+
 
 def alloc_ports(n):
     global BASE_PORT
@@ -77,6 +90,9 @@ def main():
     # tunnels over more connections, --udp-socket over more writers.
     ap.add_argument("--conn-per-udp", type=int, default=1)
     ap.add_argument("--udp-socket", type=int, default=1)
+    ap.add_argument("--tuning", choices=list(TUNING_FLAGS), default="default",
+                    help="'big' appends the large-BDP congestion/window flags "
+                         "to the observed client under test (see TUNING_FLAGS).")
     args = ap.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
@@ -121,7 +137,7 @@ def main():
     observed_client = start_proc(
         [CLIENT_BIN, f"--local=127.0.0.1:{observed_local_port}",
          f"--remote={client_remote_addr}", f"--key={KEY}", "--idle_timeout_seconds=6",
-         *pool_flags],
+         *pool_flags, *TUNING_FLAGS[args.tuning]],
         f"{args.log_dir}/{tag}_observed_client.log")
     time.sleep(1.0)
     if observed_client.poll() is not None:

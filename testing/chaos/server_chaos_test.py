@@ -28,6 +28,20 @@ TARGET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chaos_target.
 KEY = "chaostest-server-key"
 BASE_PORT = 26000
 
+# Large-BDP tuning appended to the quictun_server under test when
+# --tuning=big: exercises the raised congestion window, the multi-GB
+# receive-window limit, the auto-derived sent-packet tracking limit, and
+# always-on kNBHD blackhole-detection-off under the same chaos. "mainly test
+# it doesn't crash" -- see run_full_matrix.sh's big-window pass.
+TUNING_FLAGS = {
+    "default": [],
+    "big": ["--congestion_control=bbr",
+            "--max_congestion_window_kb=65536",
+            "--initial_stream_flow_control_window_kb=65536",
+            "--initial_session_flow_control_window_kb=98304",
+            "--udp_socket_buffer_kb=65536"],
+}
+
 
 def alloc_ports(n):
     global BASE_PORT
@@ -70,6 +84,9 @@ def main():
     # one connection, exercising the same reentrancy paths.
     ap.add_argument("--conn-per-udp", type=int, default=1)
     ap.add_argument("--udp-socket", type=int, default=1)
+    ap.add_argument("--tuning", choices=list(TUNING_FLAGS), default="default",
+                    help="'big' appends the large-BDP congestion/window flags "
+                         "to the server under test (see TUNING_FLAGS).")
     args = ap.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
@@ -107,7 +124,7 @@ def main():
     server_proc = start_proc(
         [SERVER_BIN, f"--listen=127.0.0.1:{server_listen_port}",
          f"--target={server_target_addr}", f"--key={KEY}",
-         "--idle_timeout_seconds=6"],
+         "--idle_timeout_seconds=6"] + TUNING_FLAGS[args.tuning],
         f"{args.log_dir}/{tag}_server.log")
     time.sleep(1.0)
     if server_proc.poll() is not None:

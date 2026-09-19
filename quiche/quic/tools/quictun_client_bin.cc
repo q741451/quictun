@@ -138,6 +138,7 @@ int main(int argc, char* argv[]) {
     std::cerr << "--so_txtime requires --udp_gso" << std::endl;
     return 1;
   }
+  quic::ApplyQuictunCongestionTuning(options);
   options.zero_rtt = quiche::GetQuicheCommandLineFlag(FLAGS_zero_rtt);
   options.udp_socket = quiche::GetQuicheCommandLineFlag(FLAGS_udp_socket);
   options.conn_per_udp = quiche::GetQuicheCommandLineFlag(FLAGS_conn_per_udp);

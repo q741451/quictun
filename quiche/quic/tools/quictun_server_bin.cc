@@ -124,6 +124,7 @@ int main(int argc, char* argv[]) {
     std::cerr << "--so_txtime requires --udp_gso" << std::endl;
     return 1;
   }
+  quic::ApplyQuictunCongestionTuning(options);
 
   std::string target_flag = quiche::GetQuicheCommandLineFlag(FLAGS_target);
   std::optional<quic::QuicSocketAddress> target_address;

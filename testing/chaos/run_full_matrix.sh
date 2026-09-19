@@ -87,6 +87,24 @@ for combo in $SERVER_POOL_COMBOS; do
   echo "exit=$? for server_chaos_test.py $desc" | tee -a "$RESULTS"
 done
 
+# Large-BDP tuning under chaos: the raised congestion window, multi-GB
+# receive-window limit, auto-derived sent-packet tracking limit, and
+# always-on kNBHD (blackhole-detection-off) run through the same chaos
+# conditions with --tuning=big -- "mainly test it doesn't crash", i.e. no
+# QUIC_TOO_MANY_OUTSTANDING_SENT_PACKETS, no leak, no wedge, on top of the
+# large windows/cwnd. A subset of conditions (clean + the two that stress
+# the QUIC path hardest) keeps runtime sane.
+for cond in clean quic_bad combo_all_bad; do
+  echo "=== server_chaos_test.py --tuning=big --condition=$cond ===" | tee -a "$RESULTS"
+  python3 -u server_chaos_test.py --tuning=big --condition="$cond" >> "$RESULTS" 2>&1
+  echo "exit=$? for server_chaos_test.py --tuning=big --condition=$cond" | tee -a "$RESULTS"
+done
+for cond in clean quic_bad combo_all_bad; do
+  echo "=== client_chaos_test.py --tuning=big --condition=$cond ===" | tee -a "$RESULTS"
+  python3 -u client_chaos_test.py --tuning=big --condition="$cond" >> "$RESULTS" 2>&1
+  echo "exit=$? for client_chaos_test.py --tuning=big --condition=$cond" | tee -a "$RESULTS"
+done
+
 # Deterministic reentrancy regression, targeted (not incidental like the
 # chaos suites above) at the exact crashes fixed in 715a5f926: concurrent
 # TCP bursts through quictun_client while quictun_server gets killed mid-

@@ -12,6 +12,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "quiche/quic/core/crypto/crypto_protocol.h"
 #include "quiche/quic/core/quic_constants.h"
 #include "quiche/quic/tools/quictun_connection_factory.h"
 #include "quiche/quic/tools/fake_proof_verifier.h"
@@ -49,6 +50,19 @@ QuictunClientDriver::QuictunClientDriver(QuicEventLoop* event_loop,
   // for this (the client's own incoming limit) to ever gate.
   config_template_.SetMaxBidirectionalStreamsToSend(
       options.max_streams_per_connection);
+  // Disable QUIC's network-blackhole detection (kNBHD, a client-sent
+  // connection option both ends honor). Blackhole detection closes the whole
+  // connection after 5 consecutive retransmission timeouts on the theory that
+  // the path has gone dead -- sound for a browser, but a false positive on a
+  // lossy-but-alive tunnel: with a large congestion window on a
+  // high-bandwidth-delay path, a run of losses can starve acks for those 5
+  // timeouts (~10s at 200ms RTT) while the path is merely lossy, tearing down
+  // a working connection. Those false positives are frequent under real loss;
+  // a genuinely dead peer (e.g. an operator/GFW flow cut) is still reaped, by
+  // the receive-based idle timeout (--idle_timeout_seconds) instead, after
+  // which the affected tunnels reconnect -- and quictun's other connections
+  // keep serving in the meantime.
+  config_template_.SetConnectionOptionsToSend(QuicTagVector{kNBHD});
 
   // NOTE: QuicCryptoClientConfig::set_pre_shared_key() is *not* used here --
   // it's an unimplemented stub for TLS-based QUIC in this snapshot
