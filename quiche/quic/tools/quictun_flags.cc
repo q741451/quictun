@@ -135,7 +135,12 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "packets before quictun ever sees them, which looks like network loss "
     "to the congestion controller; raise it if system-wide UDP receive "
     "buffer drops (visible via /proc/net/snmp's Udp: RcvbufErrors column, "
-    "or nstat -az UdpRcvbufErrors) climb during a transfer.");
+    "or nstat -az UdpRcvbufErrors) climb during a transfer. The kernel "
+    "silently caps this at net.core.rmem_max/wmem_max -- 208 KiB on most "
+    "systems, below even this default -- so raise those sysctls to match, "
+    "and restart quictun, which fixes the size when it creates the socket. "
+    "A larger congestion or flow-control window raises what is needed "
+    "here.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, startup_bandwidth_kbps, 0,
