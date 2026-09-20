@@ -183,8 +183,14 @@ QuicSession::QuicSession(
           connection->version().IsIetfQuic() ? 0
                                              : kMinimumFlowControlSendWindow,
           config.GetInitialSessionFlowControlWindowToSend(),
-          kSessionReceiveWindowLimit, perspective() == Perspective::IS_SERVER,
-          nullptr),
+          kSessionReceiveWindowLimit,
+          // Off on the server too, where upstream enables it. Auto-tuning
+          // treats the configured window as a floor and grows from it,
+          // bounded only by kSessionReceiveWindowLimit -- which quictun
+          // raises far above upstream's, so leaving it on would bound a
+          // server's buffering by that ceiling instead of by what the
+          // operator configured. Both ends use their window as given.
+          /*should_auto_tune_receive_window=*/false, nullptr),
       control_frame_manager_(this),
       datagram_queue_(this, std::move(datagram_observer)),
       is_configured_(false),

@@ -77,8 +77,8 @@ def run_phase(name, stalled_seconds, observe_seconds, log_dir):
     # Small windows so the QUIC side backs up quickly, which is what makes
     # the server stop reading from --target. Idle timeout well past the
     # observation window, so anything reaped here was reaped as stalled.
-    tuning = ["--initial_stream_flow_control_window_kb=64",
-              "--initial_session_flow_control_window_kb=64",
+    tuning = ["--stream_flow_control_window_kb=64",
+              "--session_flow_control_window_kb=64",
               "--tcp_idle_timeout_seconds=3600",
               f"--tcp_stalled_timeout_seconds={stalled_seconds}"]
     server = subprocess.Popen(

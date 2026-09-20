@@ -66,9 +66,9 @@ QuictunServerDriver::QuictunServerDriver(QuicEventLoop* event_loop,
           ParseQuictunCongestionControl(options.congestion_control)) {
   config_template_.SetIdleNetworkTimeout(options.idle_timeout);
   config_template_.SetInitialStreamFlowControlWindowToSend(
-      options.initial_stream_flow_control_window_bytes);
+      options.stream_flow_control_window_bytes);
   config_template_.SetInitialSessionFlowControlWindowToSend(
-      options.initial_session_flow_control_window_bytes);
+      options.session_flow_control_window_bytes);
   // See --max_streams_per_connection's own comment (quictun_flags.h) --
   // in practice this is the value that actually matters (quictun's
   // streams are always client-initiated, so it's what the SERVER

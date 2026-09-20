@@ -37,8 +37,8 @@ TUNING_FLAGS = {
     "default": [],
     "big": ["--congestion_control=bbr",
             "--max_congestion_window_kb=65536",
-            "--initial_stream_flow_control_window_kb=65536",
-            "--initial_session_flow_control_window_kb=98304",
+            "--stream_flow_control_window_kb=65536",
+            "--session_flow_control_window_kb=98304",
             "--udp_socket_buffer_kb=65536"],
 }
 

@@ -27,7 +27,8 @@ Throughput comes from how much work each syscall does:
 - **Batched receives.** `recvmmsg` collects 16 packets per call.
 - **Per-connection keys.** AEAD keys are derived once per connection; each
   packet costs a nonce XOR, not a fresh key schedule.
-- **Windows you can open up.** `--initial_*_flow_control_window_kb` plus
+- **Windows you can open up.** `--stream_flow_control_window_kb`/
+  `--session_flow_control_window_kb` plus
   `--startup_bandwidth_kbps`/`--startup_rtt_ms` fill a high
   bandwidth-delay-product path from the first RTT instead of crawling up
   through slow start.
@@ -78,23 +79,23 @@ git hash or re-read a shell history:
 ==================================================================
 quictun_server  (built 2026/08/06 20:14:23)
 ------------------------------------------------------------------
-  listen                                  = [::]:4433
-  target                                  = 127.0.0.1:12948
-  max_new_connections_per_event_loop      = 100
-  max_concurrent_connections              = 5000
-  key                                     = <redacted, 20 bytes>
-  congestion_control                      = bbr2
-  max_congestion_window_kb                = 2851
-  udp_gso                                 = false
-  so_txtime                               = false
-  transparent                             = false
-  idle_timeout_seconds                    = 60
-  tcp_idle_timeout_seconds                = 86400
-  tcp_stalled_timeout_seconds             = 180
-  initial_stream_flow_control_window_kb   = 512
-  initial_session_flow_control_window_kb  = 512
-  udp_socket_buffer_kb                    = 1024
-  max_streams_per_connection              = 10000
+  listen                              = [::]:4433
+  target                              = 127.0.0.1:12948
+  max_new_connections_per_event_loop  = 100
+  max_concurrent_connections          = 5000
+  key                                 = <redacted, 20 bytes>
+  congestion_control                  = bbr2
+  max_congestion_window_kb            = 2851
+  udp_gso                             = false
+  so_txtime                           = false
+  transparent                         = false
+  idle_timeout_seconds                = 60
+  tcp_idle_timeout_seconds            = 86400
+  tcp_stalled_timeout_seconds         = 180
+  stream_flow_control_window_kb       = 512
+  session_flow_control_window_kb      = 512
+  udp_socket_buffer_kb                = 1024
+  max_streams_per_connection          = 10000
 ==================================================================
 ```
 
@@ -115,8 +116,8 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | `--idle_timeout_seconds` | `60` | QUIC connection idle timeout, in seconds: how long a connection may go without receiving anything from the peer before it is torn down. Keepalive PINGs keep resetting it while the peer is alive, so in practice it only fires once the peer really is gone -- it bounds how long a vanished peer's connection (its UDP socket, its session state, and every tunnel's target-side TCP socket) is held before being reclaimed, so keep it short. quictun disables QUIC's own network-blackhole detection (which would otherwise close a connection after ~5 consecutive retransmission timeouts) because it false-positives on a lossy-but-alive tunnel, so this idle timeout is the sole reaper of a genuinely dead connection. Does not govern how long a quiet tunnel stays open -- that is `--tcp_idle_timeout_seconds`. |
 | `--tcp_idle_timeout_seconds` | `86400` | Per-tunnel idle timeout, in seconds: one tunnel with no real data in either direction for this long is closed, leaving the QUIC connection carrying it -- and every other tunnel on it -- untouched. Independent of `--idle_timeout_seconds`, which reclaims connections whose peer has vanished; this is policy for a tunnel that is merely quiet, so the default (24h) is deliberately lax enough never to cut a connection that is simply idle rather than dead. Set it the same on both ends. |
 | `--tcp_stalled_timeout_seconds` | `180` | The same, for a tunnel that is *stalled* rather than merely quiet: one holding buffered data it cannot hand on, because the peer stopped reading the QUIC stream or the target TCP socket stopped draining. That costs flow-control credit and memory the whole QUIC connection shares, so enough such tunnels wedge every other tunnel on it -- hence a much shorter default than a quiet tunnel gets. Any progress in either direction restarts the clock, so this cuts a stalled transfer, never a slow one. Capped at `--tcp_idle_timeout_seconds`. Set it the same on both ends. |
-| `--initial_stream_flow_control_window_kb` | `512` | Initial per-stream flow-control window advertised to the peer, in KiB. Independent of `--initial_session_flow_control_window_kb` -- this being per stream, it is what caps a single tunnel's throughput; since several tunnels share a connection, the session window also caps their combined total. Raise both together for high-bandwidth-delay-product paths. |
-| `--initial_session_flow_control_window_kb` | `512` | Initial per-session flow-control window advertised to the peer, in KiB. See `--initial_stream_flow_control_window_kb` above. |
+| `--stream_flow_control_window_kb` | `512` | Per-stream flow-control window advertised to the peer, in KiB, fixed for the life of the connection rather than a starting point the stack grows on its own. Being per stream, it is what caps a single tunnel's throughput; since several tunnels share a connection, `--session_flow_control_window_kb` caps their combined total, so raise both together for high-bandwidth-delay-product paths. Each end advertises its own, and it is the *receiving* end's that bounds a transfer -- a server taking uploads needs its own raised. |
+| `--session_flow_control_window_kb` | `512` | Per-session flow-control window advertised to the peer, in KiB: the cap on unread data across all tunnels sharing one QUIC connection. See `--stream_flow_control_window_kb` above. |
 | `--udp_socket_buffer_kb` | `1024` | `SO_RCVBUF`/`SO_SNDBUF` size set on every UDP socket quictun creates (`--udp_socket` of them on the client, one on the server), in KiB; applies to both the receive and send buffer. Too small a value under load can cause the kernel to drop packets before quictun ever sees them, which looks like network loss to the congestion controller rather than a local buffering problem -- if `/proc/net/snmp`'s `Udp: RcvbufErrors` column (or `nstat -az UdpRcvbufErrors`) climbs during a transfer, raise this. |
 | `--startup_bandwidth_kbps` | `0` | If > 0, bootstrap every new connection's congestion controller with this assumed starting bandwidth (Kbps, i.e. kilobits/sec -- *not* KB/s or bytes) instead of ramping up from scratch. Only affects the controller while still in its startup/slow-start phase; has no effect once a connection reaches steady state. `0` disables this (normal cold-start ramp-up). Pairs with `--startup_rtt_ms`; set both sides (client and server) to the same values, since each governs only that endpoint's own send direction. |
 | `--startup_rtt_ms` | `0` | Assumed starting RTT in milliseconds, paired with `--startup_bandwidth_kbps` -- only used, and only meaningful, if that flag is also `> 0`. `0` falls back to QUICHE's own initial RTT guess (100ms). |

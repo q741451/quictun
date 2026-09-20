@@ -84,8 +84,8 @@ def main():
     time.sleep(0.5)
     # Small windows so the QUIC side backs up quickly, which is what makes
     # the server stop reading from --target.
-    flow = ["--initial_stream_flow_control_window_kb=64",
-            "--initial_session_flow_control_window_kb=64"]
+    flow = ["--stream_flow_control_window_kb=64",
+            "--session_flow_control_window_kb=64"]
     server = subprocess.Popen(
         [SERVER_BIN, f"--listen=127.0.0.1:{SERVER_PORT}",
          f"--target=127.0.0.1:{TARGET_PORT}", f"--key={KEY}"] + flow,

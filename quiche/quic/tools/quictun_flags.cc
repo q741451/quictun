@@ -106,23 +106,25 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "never above this, so raise it on high-bandwidth-delay paths where the "
     "default (2851 KiB = QUICHE's 2000-packet default) caps throughput with "
     "no loss present. Under packet loss the separate lever is the receive "
-    "window (--initial_stream_flow_control_window_kb). Raising this is free "
-    "until reached, and the sent-packet tracking limit is scaled to match "
+    "window (--stream_flow_control_window_kb). Raising this is free until "
+    "reached, and the sent-packet tracking limit is scaled to match "
     "automatically.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
-    int32_t, initial_stream_flow_control_window_kb, 512,
-    "Initial per-stream flow-control window advertised to the peer, in "
-    "KiB. Independent of --initial_session_flow_control_window_kb -- with "
-    "this being per stream, it is what caps a single tunnel's throughput; "
-    "since several tunnels share a connection, the session window also "
-    "caps their combined total. Raise both together for high-bandwidth-"
-    "delay-product paths.");
+    int32_t, stream_flow_control_window_kb, 512,
+    "Per-stream flow-control window advertised to the peer, in KiB, fixed "
+    "for the life of the connection rather than a starting point the stack "
+    "grows on its own. Independent of --session_flow_control_window_kb -- "
+    "with this being per stream, it is what caps a single tunnel's "
+    "throughput; since several tunnels share a connection, the session "
+    "window also caps their combined total. Raise both together for "
+    "high-bandwidth-delay-product paths.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
-    int32_t, initial_session_flow_control_window_kb, 512,
-    "Initial per-session flow-control window advertised to the peer, in "
-    "KiB. See --initial_stream_flow_control_window_kb.");
+    int32_t, session_flow_control_window_kb, 512,
+    "Per-session flow-control window advertised to the peer, in KiB -- the "
+    "cap on unread data across every tunnel sharing one QUIC connection. "
+    "See --stream_flow_control_window_kb.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     int32_t, udp_socket_buffer_kb, 1024,
@@ -192,13 +194,13 @@ QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
       quiche::GetQuicheCommandLineFlag(FLAGS_tcp_idle_timeout_seconds));
   options.tcp_stalled_timeout = QuicTime::Delta::FromSeconds(
       quiche::GetQuicheCommandLineFlag(FLAGS_tcp_stalled_timeout_seconds));
-  options.initial_stream_flow_control_window_bytes =
+  options.stream_flow_control_window_bytes =
       static_cast<QuicByteCount>(quiche::GetQuicheCommandLineFlag(
-          FLAGS_initial_stream_flow_control_window_kb)) *
+          FLAGS_stream_flow_control_window_kb)) *
       1024;
-  options.initial_session_flow_control_window_bytes =
+  options.session_flow_control_window_bytes =
       static_cast<QuicByteCount>(quiche::GetQuicheCommandLineFlag(
-          FLAGS_initial_session_flow_control_window_kb)) *
+          FLAGS_session_flow_control_window_kb)) *
       1024;
   options.udp_socket_buffer_bytes =
       static_cast<QuicByteCount>(
@@ -226,12 +228,13 @@ void ApplyQuictunCongestionTuning(const QuictunTuningOptions& options) {
   // between the largest packet sent and the oldest unacked one grows past
   // this. The send side drives that gap with a congestion window's worth of
   // data packets; the receive side drives it with a receive window's worth of
-  // outgoing ACKs. Size it from whichever local budget is larger, counted in
-  // worst-case (small) packets, with 4x headroom. The divisor is a
-  // conservative floor on packet size, not kDefaultTCPMSS, so a small path
-  // MTU cannot under-provision it.
+  // outgoing ACKs -- the session window, since that is what bounds the peer's
+  // in-flight total across every stream on the connection. Size it from
+  // whichever local budget is larger, counted in worst-case (small) packets,
+  // with 4x headroom. The divisor is a conservative floor on packet size, not
+  // kDefaultTCPMSS, so a small path MTU cannot under-provision it.
   const QuicByteCount budget_bytes =
-      std::max(cwnd_bytes, options.initial_stream_flow_control_window_bytes);
+      std::max(cwnd_bytes, options.session_flow_control_window_bytes);
   int64_t tracked = static_cast<int64_t>(budget_bytes / 1000) * 4;
   tracked = std::max<int64_t>(tracked, 10000);
   SetQuicFlag(quic_max_tracked_packet_count, tracked);
@@ -295,13 +298,11 @@ void PrintQuictunStartupBanner(
   lines.push_back({"tcp_stalled_timeout_seconds",
                     absl::StrCat(options.tcp_stalled_timeout.ToSeconds())});
   lines.push_back(
-      {"initial_stream_flow_control_window_kb",
-       absl::StrCat(options.initial_stream_flow_control_window_bytes /
-                     1024)});
+      {"stream_flow_control_window_kb",
+       absl::StrCat(options.stream_flow_control_window_bytes / 1024)});
   lines.push_back(
-      {"initial_session_flow_control_window_kb",
-       absl::StrCat(options.initial_session_flow_control_window_bytes /
-                     1024)});
+      {"session_flow_control_window_kb",
+       absl::StrCat(options.session_flow_control_window_bytes / 1024)});
   lines.push_back({"udp_socket_buffer_kb",
                     absl::StrCat(options.udp_socket_buffer_bytes / 1024)});
   if (options.startup_bandwidth_kbps > 0) {

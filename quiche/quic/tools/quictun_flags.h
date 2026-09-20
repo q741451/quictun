@@ -112,19 +112,21 @@ struct QuictunTuningOptions {
   // sweeps; exceeding it would mean a stalled tunnel outliving a quiet one.
   QuicTime::Delta tcp_stalled_timeout = QuicTime::Delta::FromSeconds(180);
 
-  // Initial per-stream flow-control window. On a high-bandwidth-delay-
-  // product path this is what caps a single tunnel's throughput, and
-  // since several tunnels share a connection, the session window
-  // (initial_session_flow_control_window_bytes) caps their combined
-  // total -- raise both together.
+  // Per-stream flow-control window. On a high-bandwidth-delay-product path
+  // this is what caps a single tunnel's throughput, and since several
+  // tunnels share a connection, the session window
+  // (session_flow_control_window_bytes) caps their combined total -- raise
+  // both together.
   // Independently tunable from the session window (unlike stock
   // QuicConfig, which would default both to the same 16 KB) so an
   // operator can match them to their own path's BDP instead of guessing.
-  QuicByteCount initial_stream_flow_control_window_bytes = 512 * 1024;
+  // Fixed for the life of the connection: quictun turns off receive-window
+  // auto-tuning (see QuicSession's flow_controller_).
+  QuicByteCount stream_flow_control_window_bytes = 512 * 1024;
 
-  // Initial per-session flow-control window. See
-  // initial_stream_flow_control_window_bytes above.
-  QuicByteCount initial_session_flow_control_window_bytes = 512 * 1024;
+  // Per-session flow-control window -- the cap on unread data across every
+  // tunnel sharing one QUIC connection. See stream_flow_control_window_bytes.
+  QuicByteCount session_flow_control_window_bytes = 512 * 1024;
 
   // SO_RCVBUF/SO_SNDBUF set on every UDP socket quictun creates (one per
   // QUIC connection). Too small a value under load can cause packets to be
@@ -197,9 +199,8 @@ struct QuictunTuningOptions {
 
 // Defines --key, --zero_rtt, --congestion_control, --max_congestion_window_kb,
 // --udp_gso, --so_txtime, --transparent, --idle_timeout_seconds,
-// --initial_stream_flow_control_window_kb,
-// --initial_session_flow_control_window_kb, --udp_socket_buffer_kb,
-// --startup_bandwidth_kbps, --startup_rtt_ms,
+// --stream_flow_control_window_kb, --session_flow_control_window_kb,
+// --udp_socket_buffer_kb, --startup_bandwidth_kbps, --startup_rtt_ms,
 // --max_streams_per_connection and reads their current values into a
 // QuictunTuningOptions. Must be called after
 // quiche::QuicheParseCommandLineFlags().
