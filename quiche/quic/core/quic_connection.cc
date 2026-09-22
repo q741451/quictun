@@ -679,6 +679,12 @@ void QuicConnection::SetFromConfig(const QuicConfig& config) {
       !config.HasMinAckDelayDraft10ToSend()) {
     QuicAckFrequencyFrame frame;
     frame.reordering_threshold = config.peer_reordering_threshold();
+    // OnAckFrequencyFrame() also takes ack_frequency_ from this frame, and
+    // latches AckFrequencyFrameReceived() so ack decimation never runs again.
+    // Left at the frame's default that cuts acks from one per ten packets to
+    // one per two, which is not what setting a reordering threshold asks for;
+    // carry decimation's own value so only the reordering behaviour changes.
+    frame.ack_eliciting_threshold = kMaxRetransmittablePacketsBeforeAck - 1;
     uber_received_packet_manager_.OnAckFrequencyFrame(frame);
   }
 }

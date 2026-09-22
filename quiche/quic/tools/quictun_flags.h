@@ -195,9 +195,19 @@ struct QuictunTuningOptions {
   // setting there. See QuictunServerConnection's class comment.
   int32_t udp_socket = 1;
   int32_t conn_per_udp = 1;
+
+  // Client-only: how far behind the largest packet already acked a packet
+  // must arrive before it is acked immediately instead of on the normal ack
+  // schedule. QUIC's default of 1 acks the moment a gap appears, which it
+  // cannot tell apart from a packet that is merely late -- on a path that
+  // reorders, that bypasses ack decimation on most packets and multiplies the
+  // return-path traffic. 0 never acks on reordering alone. Only the receiving
+  // end's value does anything, and only a client's is wired up
+  // (QuicConnection::SetFromConfig), so this is a client-side setting.
+  int32_t ack_reordering_threshold = 1;
 };
 
-// Defines --key, --zero_rtt, --congestion_control, --max_congestion_window_kb,
+// Defines --key, --congestion_control, --max_congestion_window_kb,
 // --udp_gso, --so_txtime, --transparent, --idle_timeout_seconds,
 // --stream_flow_control_window_kb, --session_flow_control_window_kb,
 // --udp_socket_buffer_kb, --startup_bandwidth_kbps, --startup_rtt_ms,

@@ -72,6 +72,22 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "--max_streams_per_connection budget; raise it to separate bulk and "
     "interactive traffic onto different congestion-control state.");
 
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    int32_t, ack_reordering_threshold, 1,
+    "How far behind the largest packet already acked a packet must arrive "
+    "before this client acks it immediately rather than on the normal ack "
+    "schedule. QUIC's default of 1 acks the moment a gap appears, and a gap "
+    "left by a reordered packet looks exactly like one left by a lost packet, "
+    "so on a path that reorders this bypasses ack decimation on most packets "
+    "and multiplies return-path traffic -- which costs real download "
+    "throughput when the uplink is much narrower than the downlink. 0 never "
+    "acks on reordering alone; a larger value acks only for packets this far "
+    "out of order. Check whether your path needs it with the out-of-order "
+    "count iperf3 -u -R reports. Costs at most one ack interval of "
+    "extra loss-detection delay, and values below 3 buy nothing, since the "
+    "sender does not declare loss under that much reordering anyway. Takes "
+    "effect on the receiving end only, so this is a client-side setting.");
+
 #ifdef QUICTUN_COVERAGE_BUILD
 // See quictun_server_bin.cc's identical block for why this exists --
 // coverage-instrumented builds only, absent from every normal build.
@@ -142,6 +158,12 @@ int main(int argc, char* argv[]) {
   options.zero_rtt = quiche::GetQuicheCommandLineFlag(FLAGS_zero_rtt);
   options.udp_socket = quiche::GetQuicheCommandLineFlag(FLAGS_udp_socket);
   options.conn_per_udp = quiche::GetQuicheCommandLineFlag(FLAGS_conn_per_udp);
+  options.ack_reordering_threshold =
+      quiche::GetQuicheCommandLineFlag(FLAGS_ack_reordering_threshold);
+  if (options.ack_reordering_threshold < 0) {
+    std::cerr << "--ack_reordering_threshold cannot be negative" << std::endl;
+    return 1;
+  }
 
   quic::PrintQuictunStartupBanner(
       "quictun_client",
@@ -149,7 +171,9 @@ int main(int argc, char* argv[]) {
        {"remote", remote_flag},
        {"zero_rtt", options.zero_rtt ? "true" : "false"},
        {"udp_socket", absl::StrCat(options.udp_socket)},
-       {"conn_per_udp", absl::StrCat(options.conn_per_udp)}},
+       {"conn_per_udp", absl::StrCat(options.conn_per_udp)},
+       {"ack_reordering_threshold",
+        absl::StrCat(options.ack_reordering_threshold)}},
       options);
 
   std::unique_ptr<quic::QuicEventLoop> event_loop =

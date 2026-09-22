@@ -64,6 +64,14 @@ QuictunClientDriver::QuictunClientDriver(QuicEventLoop* event_loop,
   // keep serving in the meantime.
   config_template_.SetConnectionOptionsToSend(QuicTagVector{kNBHD});
 
+  // Ack-generation tolerance for a path that reorders packets; see
+  // --ack_reordering_threshold. Left at QUIC's default of 1 this is inert.
+  // QUICHE already adapts to reordering when DETECTING loss
+  // (GeneralLossAlgorithm::use_adaptive_reordering_threshold_) but not when
+  // GENERATING acks, which is the gap this closes.
+  config_template_.set_peer_reordering_threshold(
+      static_cast<uint64_t>(options.ack_reordering_threshold));
+
   // NOTE: QuicCryptoClientConfig::set_pre_shared_key() is *not* used here --
   // it's an unimplemented stub for TLS-based QUIC in this snapshot
   // (TlsClientHandshaker::CryptoConnect() hard-crashes via QUIC_BUG if a PSK
