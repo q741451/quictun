@@ -29,10 +29,13 @@ bazel build -c opt //quiche:quictun_client //quiche:quictun_server
 
 Each runs standalone -- see its own `--help`/top comment (most also take
 `--conn-per-udp=N`/`--udp-socket=K` to vary the pool shape). The two
-`*_chaos_test.py` suites also take `--tuning=big`, which runs the endpoint
-under test with the large-BDP congestion/window flags (raised congestion
-window, multi-GB receive-window limit, always-on kNBHD) so the matrix
-exercises "does the large-window path crash under chaos". Shared helpers
+`*_chaos_test.py` suites also take `--tuning`, which appends a flag set to
+the endpoint under test so the matrix exercises "does this path crash under
+chaos": `big` for the large-BDP congestion/window flags (raised congestion
+window, multi-GB receive-window limit, always-on kNBHD), and, on the client
+only, `reorder0`/`reorder16`/`reorder0_small` for
+`--ack_reordering_threshold`, whose default leaves its code unreached.
+Shared helpers
 (imported/spawned, not run directly): `chaos_actor.py`, `chaos_monitor.py`,
 `chaos_target.py`, `netchaos_relay.py`.
 

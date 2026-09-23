@@ -105,6 +105,23 @@ for cond in clean quic_bad combo_all_bad; do
   echo "exit=$? for client_chaos_test.py --tuning=big --condition=$cond" | tee -a "$RESULTS"
 done
 
+# --ack_reordering_threshold, which nothing above reaches: its default of 1
+# is QUIC's own behaviour, so QuicConnection::SetFromConfig skips the whole
+# block. Three runs, one per distinct risk rather than one per combination.
+# reorder0 under the worst chaos is the setting an operator on a reordering
+# path actually runs; reorder0_small pairs it with the DEFAULT tiny windows,
+# the opposite flow-control regime, where a stream spends most of its life
+# blocked and window updates ride on the acks being thinned; reorder16 is the
+# in-between value, where gaps past the threshold still ack at once.
+for pair in "reorder0 combo_all_bad" "reorder0_small combo_all_bad" \
+            "reorder16 quic_bad"; do
+  tuning=${pair% *}
+  cond=${pair#* }
+  echo "=== client_chaos_test.py --tuning=$tuning --condition=$cond ===" | tee -a "$RESULTS"
+  python3 -u client_chaos_test.py --tuning="$tuning" --condition="$cond" >> "$RESULTS" 2>&1
+  echo "exit=$? for client_chaos_test.py --tuning=$tuning --condition=$cond" | tee -a "$RESULTS"
+done
+
 # Deterministic reentrancy regression, targeted (not incidental like the
 # chaos suites above) at the exact crashes fixed in 715a5f926: concurrent
 # TCP bursts through quictun_client while quictun_server gets killed mid-

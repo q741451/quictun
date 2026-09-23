@@ -30,17 +30,29 @@ TARGET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chaos_target.
 KEY = "chaostest-client-key"
 BASE_PORT = 28000
 
-# Large-BDP tuning appended to the observed quictun_client under test when
-# --tuning=big (raised congestion window, multi-GB receive-window limit,
-# auto-derived tracking limit, always-on kNBHD). See run_full_matrix.sh's
-# big-window pass -- "mainly test it doesn't crash".
+# Flag sets appended to the observed quictun_client under test, selected by
+# --tuning. "big" is the large-BDP pass (raised congestion window, multi-GB
+# receive-window limit, auto-derived tracking limit, always-on kNBHD); the
+# reorder* ones additionally exercise --ack_reordering_threshold, which the
+# default value of 1 leaves inert, so nothing else here reaches that code.
+# See run_full_matrix.sh -- "mainly test it doesn't crash".
+_BIG = ["--congestion_control=bbr",
+        "--max_congestion_window_kb=65536",
+        "--stream_flow_control_window_kb=65536",
+        "--session_flow_control_window_kb=98304",
+        "--udp_socket_buffer_kb=65536"]
+
 TUNING_FLAGS = {
     "default": [],
-    "big": ["--congestion_control=bbr",
-            "--max_congestion_window_kb=65536",
-            "--stream_flow_control_window_kb=65536",
-            "--session_flow_control_window_kb=98304",
-            "--udp_socket_buffer_kb=65536"],
+    "big": _BIG,
+    # Acks driven only by the ack timer and decimation, never by a gap.
+    "reorder0": _BIG + ["--ack_reordering_threshold=0"],
+    # The in-between setting, where gaps past the threshold still ack at once.
+    "reorder16": _BIG + ["--ack_reordering_threshold=16"],
+    # Thinned acks against the *default* tiny windows rather than big ones:
+    # a stream that is flow-control blocked most of the time is the opposite
+    # regime from the large-BDP one, and shares none of its code paths.
+    "reorder0_small": ["--ack_reordering_threshold=0"],
 }
 
 
@@ -91,8 +103,8 @@ def main():
     ap.add_argument("--conn-per-udp", type=int, default=1)
     ap.add_argument("--udp-socket", type=int, default=1)
     ap.add_argument("--tuning", choices=list(TUNING_FLAGS), default="default",
-                    help="'big' appends the large-BDP congestion/window flags "
-                         "to the observed client under test (see TUNING_FLAGS).")
+                    help="which extra flag set to append to the observed "
+                         "client under test (see TUNING_FLAGS).")
     args = ap.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
