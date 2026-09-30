@@ -151,11 +151,19 @@ bool QuictunClientDriver::UdpSocketIsIdle(size_t socket_index) const {
 absl::Status QuictunClientDriver::Start() {
   // One socket per --udp_socket, each on its own ephemeral source port
   // (bind is implicit in connect()) -- see --udp_socket's own comment.
+  //
+  // A socket that cannot open yet is not fatal: at boot --remote may have
+  // no route (connect() fails with ENETUNREACH until the WAN, or its IPv6,
+  // comes up). The slot is left empty and CreateNewConnection() reopens it
+  // the first time a tunnel needs it -- the same path that already heals a
+  // socket after a WAN redial -- so the process stays up unattended.
   for (size_t i = 0; i < udp_socket_count_; ++i) {
     auto entry = std::make_unique<UdpSocket>();
     absl::Status os = OpenUdpSocket(*entry);
     if (!os.ok()) {
-      return os;
+      std::cerr << "quictun_client: UDP socket to " << remote_address_
+                << " not ready yet (" << os
+                << "); will retry when a tunnel needs it" << std::endl;
     }
     udp_sockets_.push_back(std::move(entry));
   }
