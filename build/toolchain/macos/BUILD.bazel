@@ -136,8 +136,10 @@ _OPT_LINK_FLAGS = [
             toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
         ),
     )
-    # The same three-names-per-line convention as build/toolchain/BUILD.bazel.
-    # Both are built on an arm64 Mac (exec_compatible_with above).
+    # One line per architecture, as in build/toolchain/BUILD.bazel: this
+    # repo's name, cc_toolchain_config's cpu, the @platforms//cpu constraint,
+    # and clang's --target. Both are built on an arm64 Mac
+    # (exec_compatible_with above).
     for (arch, cpu, bazel_cpu, target) in [
         ("arm64", "darwin_arm64", "aarch64", "arm64-apple-macos" + MACOS_MIN_VERSION),
         ("x64", "darwin_x86_64", "x86_64", "x86_64-apple-macos" + MACOS_MIN_VERSION),

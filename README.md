@@ -2,8 +2,8 @@
 
 `quictun` tunnels raw TCP over QUIC transport -- no HTTP/3, no MASQUE, no
 framing of its own. Two small binaries, `quictun_server` and
-`quictun_client`, built on Google's [QUICHE](#quiche) -- static on Linux,
-and for macOS too (see [macOS](#macos)).
+`quictun_client`, built on Google's [QUICHE](#quiche): fully static on
+Linux, and also built for [macOS](#macos).
 
 ```
 quictun_server --listen=[::]:4433 --target=127.0.0.1:12948 --key='a real shared secret'
@@ -61,11 +61,12 @@ The session-ticket key that 0-RTT resumption relies on is derived from
 `quictun_server` instances share one `--listen` port (on Linux the listen
 socket is always bound with `SO_REUSEPORT`, so the kernel can spread
 connections across them for multi-core scaling -- run the client with
-`--udp_socket=2` or more so its connections actually spread) while a client's 0-RTT ticket
-still resumes on whichever instance the next connection lands on, and across
-a server restart. The trade-off is weaker forward secrecy for that 0-RTT
-data -- the key lives as long as `--key` instead of rotating -- which is the
-same shared-secret exposure `--key` already carries.
+`--udp_socket=2` or more so its connections actually spread) while a
+client's 0-RTT ticket still resumes on whichever instance the next
+connection lands on, and across a server restart. The trade-off is weaker
+forward secrecy for that 0-RTT data -- the key lives as long as `--key`
+instead of rotating -- which is the same shared-secret exposure `--key`
+already carries.
 
 ## Startup banner
 
