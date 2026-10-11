@@ -8,10 +8,9 @@ name: Release
 #    from in that same dropdown (defaults to quictun).
 #
 # Either way this runs all of build.yml (see its workflow_call trigger) --
-# every Linux architecture, and macOS arm64/x86_64 built and then tested on
-# a Mac of each -- and publishes a GitHub Release with a quictun_client and
-# a quictun_server for each of them attached. Nothing is published unless
-# every job there passed.
+# every Linux architecture, and macOS arm64/x86_64 -- and publishes a GitHub
+# Release with a quictun_client and a quictun_server for each of them
+# attached. Nothing is published unless every job there passed.
 on:
   push:
     tags:

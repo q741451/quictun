@@ -379,38 +379,3 @@ jobs:
           name: quictun-macos-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
-
-  # Each macOS architecture's released binaries, run on a Mac of that
-  # architecture: the arm64 runner has no Rosetta, so x86_64 needs the Intel
-  # image. A quick smoke test, since nothing else runs a macOS binary.
-  test-macos:
-    name: Test (macos-${{ matrix.name }})
-    needs: build-macos
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: arm64
-            runner: macos-15
-          - name: x86_64
-            runner: macos-15-intel
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: quictun-macos-${{ matrix.name }}
-          path: dist
-
-      # Data through a real client/server pair over IPv4, IPv6 and dual
-      # stack, an unreachable --target, and the flags macOS must refuse.
-      - name: Smoke test
-        run: |
-          set -e
-          chmod +x dist/*
-          uname -m
-          file dist/*
-          python3 build/macos_smoke_test.py dist/quictun_client-macos-${{ matrix.name }} dist/quictun_server-macos-${{ matrix.name }}

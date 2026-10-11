@@ -158,10 +158,9 @@ pinned, from-scratch toolchain (Chromium's pinned clang, plus a musl libc,
 a compiler-rt, and a libc++/libc++abi/libunwind all built from source by
 that same clang) so builds don't depend on the Ubuntu version running the
 build -- or on its libc at all. The same run builds macOS `arm64` and
-`x86_64` binaries (see [macOS](#macos)) and tests each on a Mac of that
-architecture. Grab them from the *Artifacts* section of the corresponding
-run under the [Actions tab](../../actions); tagged versions are also
-published on the Releases page.
+`x86_64` binaries (see [macOS](#macos)). Grab them from the *Artifacts*
+section of the corresponding run under the [Actions tab](../../actions);
+tagged versions are also published on the Releases page.
 
 ## macOS
 
