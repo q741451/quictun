@@ -1,7 +1,8 @@
 # The macOS counterpart of build/toolchain/BUILD.bazel: Chromium's pinned
 # clang (its Mac_arm64 package, same version as Linux) and a from-source
 # static libc++, with Apple's SDK in place of the musl sysroot. See
-# setup_toolchain_macos.sh for what is pinned to what.
+# setup_toolchain_macos.sh for what is pinned to what, and toolchain_def.bzl
+# here for the toolchain itself.
 #
 # A separate package rather than more entries in build/toolchain/BUILD.bazel,
 # because each package loads a toolchain_paths.bzl that only its own setup
@@ -9,139 +10,24 @@
 # .bazelrc per host OS (build:linux / build:macos) instead of MODULE.bazel,
 # so a build never loads the other OS's package and its missing paths file.
 
-load(
-    "@bazel_tools//tools/cpp:unix_cc_toolchain_config.bzl",
-    "cc_toolchain_config",
-)
-load(
-    ":toolchain_paths.bzl",
-    "CLANG_RESOURCE_DIR",
-    "MACOS_MIN_VERSION",
-    "SDK_PATH",
-    "TOOLCHAIN_PREFIX",
-)
+load(":toolchain_def.bzl", "macos_cc_toolchain")
 
 package(default_visibility = ["//visibility:public"])
 
 filegroup(name = "empty")
 
-CLANG_DIR = TOOLCHAIN_PREFIX + "/chromium-clang-mac"
-
-# The Mac clang package has no llvm-nm or llvm-objdump; nothing in a normal
-# build runs either, so they point at a tool that fails loudly if one ever is.
-LLVM_TOOL_PATHS = {
-    "gcc": CLANG_DIR + "/bin/clang",
-    "ld": CLANG_DIR + "/bin/ld64.lld",
-    "ar": CLANG_DIR + "/bin/llvm-ar",
-    "cpp": CLANG_DIR + "/bin/clang",
-    "gcov": "/usr/bin/false",
-    "nm": "/usr/bin/false",
-    "objdump": "/usr/bin/false",
-    "strip": CLANG_DIR + "/bin/llvm-strip",
-}
-
-# Same opt set as Linux, minus what is ELF-only. Mach-O has no
-# -ffunction-sections; the linker's -dead_strip works on atoms instead.
-_OPT_COMPILE_FLAGS = [
-    "-g0",
-    "-O2",
-    "-D_FORTIFY_SOURCE=1",
-    "-DNDEBUG",
-]
-
-_OPT_LINK_FLAGS = [
-    "-Wl,-dead_strip",
-]
-
+# One line per architecture, as in build/toolchain/BUILD.bazel: this repo's
+# name for it (which keys MACOS_TARGETS, the --target table that
+# setup_toolchain_macos.sh writes), cc_toolchain_config's `cpu`, and the
+# @platforms//cpu: constraint.
 [
-    (
-        platform(
-            name = "macos_" + arch,
-            constraint_values = [
-                "@platforms//os:osx",
-                "@platforms//cpu:" + bazel_cpu,
-            ],
-        ),
-        cc_toolchain_config(
-            name = arch + "_config",
-            toolchain_identifier = "chromium-clang-macos-" + arch,
-            host_system_name = "arm64-apple-macos",
-            target_system_name = target,
-            cpu = cpu,
-            target_libc = "macosx",
-            compiler = "clang",
-            abi_version = "clang",
-            abi_libc_version = "macosx",
-            tool_paths = LLVM_TOOL_PATHS,
-            compile_flags = [
-                "--target=" + target,
-                "-isysroot",
-                SDK_PATH,
-                "-nostdinc++",
-                "-isystem",
-                "%s/libcxx-macos-%s/include/c++/v1" % (TOOLCHAIN_PREFIX, arch),
-            ],
-            link_flags = [
-                "--target=" + target,
-                "-isysroot",
-                SDK_PATH,
-                "-fuse-ld=lld",
-                "-nostdlib++",
-            ],
-            # By full path, so the linker cannot resolve -lc++ to the SDK's
-            # libc++.tbd instead.
-            link_libs = [
-                "%s/libcxx-macos-%s/lib/libc++.a" % (TOOLCHAIN_PREFIX, arch),
-                "%s/libcxx-macos-%s/lib/libc++abi.a" % (TOOLCHAIN_PREFIX, arch),
-            ],
-            archive_flags = [],
-            unfiltered_compile_flags = ["-no-canonical-prefixes"],
-            opt_compile_flags = _OPT_COMPILE_FLAGS,
-            opt_link_flags = _OPT_LINK_FLAGS,
-            dbg_compile_flags = ["-g"],
-            # The whole SDK, not just usr/include and Frameworks: clang reads
-            # SDKSettings.json at the SDK root on every compile and lists it
-            # in the .d file, and Bazel rejects any dependency outside these.
-            cxx_builtin_include_directories = [
-                CLANG_RESOURCE_DIR + "/include",
-                "%s/libcxx-macos-%s/include/c++/v1" % (TOOLCHAIN_PREFIX, arch),
-                SDK_PATH,
-            ],
-        ),
-        cc_toolchain(
-            name = arch + "_toolchain",
-            toolchain_identifier = "chromium-clang-macos-" + arch,
-            toolchain_config = ":" + arch + "_config",
-            all_files = ":empty",
-            ar_files = ":empty",
-            as_files = ":empty",
-            compiler_files = ":empty",
-            dwp_files = ":empty",
-            linker_files = ":empty",
-            objcopy_files = ":empty",
-            strip_files = ":empty",
-            supports_param_files = 0,
-        ),
-        toolchain(
-            name = arch + "_cc_toolchain",
-            exec_compatible_with = [
-                "@platforms//os:osx",
-                "@platforms//cpu:aarch64",
-            ],
-            target_compatible_with = [
-                "@platforms//os:osx",
-                "@platforms//cpu:" + bazel_cpu,
-            ],
-            toolchain = ":" + arch + "_toolchain",
-            toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
-        ),
+    macos_cc_toolchain(
+        arch = arch,
+        cpu = cpu,
+        bazel_cpu = bazel_cpu,
     )
-    # One line per architecture, as in build/toolchain/BUILD.bazel: this
-    # repo's name, cc_toolchain_config's cpu, the @platforms//cpu constraint,
-    # and clang's --target. Both are built on an arm64 Mac
-    # (exec_compatible_with above).
-    for (arch, cpu, bazel_cpu, target) in [
-        ("arm64", "darwin_arm64", "aarch64", "arm64-apple-macos" + MACOS_MIN_VERSION),
-        ("x64", "darwin_x86_64", "x86_64", "x86_64-apple-macos" + MACOS_MIN_VERSION),
+    for (arch, cpu, bazel_cpu) in [
+        ("arm64", "darwin_arm64", "aarch64"),
+        ("x64", "darwin_x86_64", "x86_64"),
     ]
 ]

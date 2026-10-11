@@ -75,6 +75,12 @@ FILE_PREFIX_MAP="-ffile-prefix-map=$BUILD_ROOT/="
 # (CLANG_REVISION/CLANG_SUB_REVISION) as of 2026-06-16.
 CLANG_PACKAGE_VERSION=llvmorg-23-init-19482-g53d18800-2
 LLVM_COMMIT=53d18800eda3b7407e53366f27ca78e922c6e0db
+# Checksums of the clang package (Linux_x64) and of GitHub's source archive
+# of LLVM_COMMIT, both from repeated downloads that matched; they change
+# together with the two lines above. setup_toolchain_macos.sh reads
+# LLVM_SRC_SHA256 from here too.
+CLANG_PACKAGE_SHA256=94940b8da1c3e7fec9020a75cfc4e852922a4d163dab8957e691a36ae5d49f0b
+LLVM_SRC_SHA256=c8cab6605e82e2024c78a5c868032a68e18a00c54fe9fd9b94a00497bd2ea0e9
 # musl release. The checksum is the one computed from the tarball actually
 # downloaded here and cross-checked against a second, independent mirror --
 # not copied from upstream's site, which isn't reachable from here at all
@@ -367,8 +373,12 @@ abi_stamp_check
 if [ ! -e "$CLANG" ]; then
   echo "== Downloading Chromium's pinned clang ($CLANG_PACKAGE_VERSION) =="
   mkdir -p "$CLANG_DIR"
-  curl -fsSL "https://commondatastorage.googleapis.com/chromium-browser-clang/Linux_x64/clang-${CLANG_PACKAGE_VERSION}.tar.xz" \
-    | tar -xJ -C "$CLANG_DIR"
+  TARBALL="$BUILD_ROOT/clang-$CLANG_PACKAGE_VERSION.tar.xz"
+  curl -fsSL --retry 3 -o "$TARBALL" \
+    "https://commondatastorage.googleapis.com/chromium-browser-clang/Linux_x64/clang-${CLANG_PACKAGE_VERSION}.tar.xz"
+  echo "$CLANG_PACKAGE_SHA256  $TARBALL" | sha256sum -c -
+  tar -xJf "$TARBALL" -C "$CLANG_DIR"
+  rm -f "$TARBALL"
   # llvm-ar acts as ranlib/nm/etc when invoked under those names; the
   # package only ships the canonical binary.
   ln -sf llvm-ar "$CLANG_DIR/bin/llvm-ranlib"
@@ -471,8 +481,11 @@ SRC_ROOT=$BUILD_ROOT/llvm-src
 SRC="$SRC_ROOT/llvm-project-$LLVM_COMMIT"
 if [ ! -d "$SRC" ]; then
   mkdir -p "$SRC_ROOT"
-  curl -fsSL "https://github.com/llvm/llvm-project/archive/${LLVM_COMMIT}.tar.gz" \
-    | tar -xz -C "$SRC_ROOT" \
+  TARBALL="$SRC_ROOT/llvm-$LLVM_COMMIT.tar.gz"
+  curl -fsSL --retry 3 -o "$TARBALL" \
+    "https://github.com/llvm/llvm-project/archive/${LLVM_COMMIT}.tar.gz"
+  echo "$LLVM_SRC_SHA256  $TARBALL" | sha256sum -c -
+  tar -xzf "$TARBALL" -C "$SRC_ROOT" \
       "llvm-project-$LLVM_COMMIT/compiler-rt" \
       "llvm-project-$LLVM_COMMIT/libcxx" \
       "llvm-project-$LLVM_COMMIT/libcxxabi" \
@@ -489,6 +502,7 @@ if [ ! -d "$SRC" ]; then
       "llvm-project-$LLVM_COMMIT/llvm/include/llvm/Demangle" \
       "llvm-project-$LLVM_COMMIT/llvm/include/llvm/TargetParser" \
       "llvm-project-$LLVM_COMMIT/libc"
+  rm -f "$TARBALL"
 fi
 
 # --- 4. compiler-rt (builtins + crtbegin/crtend) ---

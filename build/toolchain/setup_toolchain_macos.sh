@@ -8,8 +8,9 @@
 # The SDK is pinned by version below and refused if it is anything else.
 #
 # What is shared with setup_toolchain.sh is read out of it rather than
-# repeated: CLANG_PACKAGE_VERSION and LLVM_COMMIT exist in exactly one place,
-# so the Linux and macOS binaries cannot drift onto different compilers.
+# repeated: CLANG_PACKAGE_VERSION, LLVM_COMMIT and LLVM_SRC_SHA256 exist in
+# exactly one place, so the Linux and macOS binaries cannot drift onto
+# different compilers.
 #
 # Usage: setup_toolchain_macos.sh <arm64|x64>
 #
@@ -23,7 +24,8 @@
 # that cannot collide with it:
 #   $PREFIX/chromium-clang-mac/     (Chromium's Mac_arm64 clang package)
 #   $PREFIX/libcxx-macos-<arch>/    (static libc++/libc++abi)
-# and writes the resolved paths to build/toolchain/macos/toolchain_paths.bzl.
+# and writes the resolved paths, and the --target of every architecture, to
+# build/toolchain/macos/toolchain_paths.bzl.
 set -euo pipefail
 
 ARCH=${1:-}
@@ -35,16 +37,17 @@ FILE_PREFIX_MAP="-ffile-prefix-map=$BUILD_ROOT/="
 
 # --- Pins ---
 # Shared with Linux, read from setup_toolchain.sh's own assignments.
-eval "$(grep -E '^(CLANG_PACKAGE_VERSION|LLVM_COMMIT)=' "$REPO_ROOT/build/toolchain/setup_toolchain.sh")"
-if [ -z "${CLANG_PACKAGE_VERSION:-}" ] || [ -z "${LLVM_COMMIT:-}" ]; then
-  echo "Could not read CLANG_PACKAGE_VERSION/LLVM_COMMIT from setup_toolchain.sh" >&2
+eval "$(grep -E '^(CLANG_PACKAGE_VERSION|LLVM_COMMIT|LLVM_SRC_SHA256)=' \
+  "$REPO_ROOT/build/toolchain/setup_toolchain.sh")"
+if [ -z "${CLANG_PACKAGE_VERSION:-}" ] || [ -z "${LLVM_COMMIT:-}" ] ||
+   [ -z "${LLVM_SRC_SHA256:-}" ]; then
+  echo "Could not read the clang/LLVM pins from setup_toolchain.sh" >&2
   exit 1
 fi
-# The two checksums belong to that CLANG_PACKAGE_VERSION and LLVM_COMMIT. When
-# setup_toolchain.sh moves to a new clang, these stop matching and the setup
+# The checksum of the Mac_arm64 build of that CLANG_PACKAGE_VERSION. When
+# setup_toolchain.sh moves to a new clang this stops matching and the setup
 # fails here, instead of quietly building macOS with an unverified download.
 MAC_CLANG_SHA256=a9c5ab02bfdc07a6ad6c6711d884dccab1fdf52e05e71aa9328039cddaff3664
-LLVM_SRC_SHA256=c8cab6605e82e2024c78a5c868032a68e18a00c54fe9fd9b94a00497bd2ea0e9
 # The SDK that comes with the Xcode the workflow selects (Xcode 16.4).
 MACOS_SDK_VERSION=15.5
 # Oldest macOS the binaries run on, both architectures. 11.0 is the first
@@ -52,19 +55,26 @@ MACOS_SDK_VERSION=15.5
 MACOS_MIN_VERSION=11.0
 
 # This repo's arch name -> Apple's (CMAKE_OSX_ARCHITECTURES, the triple).
+# The single source of the triples: BUILD.bazel reads them through the
+# generated toolchain_paths.bzl, as the Linux toolchain does.
 arch_apple_arch() {
   case "$1" in
     arm64) echo arm64 ;;
     x64)   echo x86_64 ;;
   esac
 }
+arch_apple_target() {
+  echo "$(arch_apple_arch "$1")-apple-macos$MACOS_MIN_VERSION"
+}
+
+ALL_ARCHES="arm64 x64"
 
 APPLE_ARCH=$(arch_apple_arch "$ARCH")
 if [ -z "$APPLE_ARCH" ]; then
-  echo "Usage: $0 <arm64|x64>" >&2
+  echo "Usage: $0 <$(echo "$ALL_ARCHES" | tr ' ' '|')>" >&2
   exit 1
 fi
-APPLE_TARGET="$APPLE_ARCH-apple-macos$MACOS_MIN_VERSION"
+APPLE_TARGET=$(arch_apple_target "$ARCH")
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "This script runs on macOS only: Apple's SDK may not be used elsewhere." >&2
@@ -83,6 +93,18 @@ CLANG_DIR="$PREFIX/chromium-clang-mac"
 CLANG="$CLANG_DIR/bin/clang"
 LIBCXX_DIR="$PREFIX/libcxx-macos-$ARCH"
 mkdir -p "$PREFIX" "$BUILD_ROOT"
+
+# As abi_stamp_check in setup_toolchain.sh: each stage below rebuilds only
+# if its output is missing, so a libc++ built for an older triple (say, a
+# different MACOS_MIN_VERSION) would otherwise be reused. Discard it when
+# the triple changes. CI never needs this, since its cache key hashes this
+# script; it is for incremental local builds.
+STAMP="$PREFIX/.abi-stamp-macos-$ARCH"
+if [ -e "$STAMP" ] && [ "$(cat "$STAMP")" != "$APPLE_TARGET" ]; then
+  echo "== Target changed for $ARCH ($(cat "$STAMP") -> $APPLE_TARGET): discarding its libc++ =="
+  rm -rf "$LIBCXX_DIR" "$BUILD_ROOT/libcxx-macos-$ARCH"
+fi
+printf '%s' "$APPLE_TARGET" > "$STAMP"
 
 # --- 1. Chromium's pinned clang, Mac_arm64 build of the same version ---
 # Unlike the Linux package, this one already carries compiler-rt for macOS
@@ -177,7 +199,11 @@ cat > "$REPO_ROOT/build/toolchain/macos/toolchain_paths.bzl" <<EOF
 TOOLCHAIN_PREFIX = "$PREFIX"
 CLANG_RESOURCE_DIR = "$CLANG_RESOURCE_DIR"
 SDK_PATH = "$SDK_PATH"
-MACOS_MIN_VERSION = "$MACOS_MIN_VERSION"
+
+# Every architecture's clang --target, not just the one just set up.
+MACOS_TARGETS = {
+$(for a in $ALL_ARCHES; do printf '    "%s": "%s",\n' "$a" "$(arch_apple_target "$a")"; done)
+}
 EOF
 
 echo "== Done: macOS $ARCH toolchain ready =="

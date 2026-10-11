@@ -20,9 +20,16 @@ env:
   TARGETS: >-
     //quiche:quictun_client
     //quiche:quictun_server
+  # Bazelisk, which fetches the Bazel that .bazelversion pins. Downloaded at a
+  # fixed version and checked, the same way on Linux and macOS, rather than
+  # whatever `latest` or the runner image happens to carry. Its download of
+  # Bazel itself goes under BAZELISK_HOME, which the Bazel cache saves.
+  BAZELISK_VERSION: v1.29.0
+  BAZELISK_LINUX_AMD64_SHA256: 5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992
+  BAZELISK_DARWIN_ARM64_SHA256: cee851f726789227d5561004e9904a52be45c3efb56f8b38b6993d6adbaa0409
 
 jobs:
-  build:
+  build-linux:
     name: Build (${{ matrix.name }})
     runs-on: ubuntu-latest
     # Every architecture (including x86_64) uses the same from-scratch,
@@ -85,8 +92,13 @@ jobs:
       # "cstdint file not found" while compiling absl "[for tool]" targets
       # against the x64 libc++ include path, because that directory simply
       # didn't exist yet on those runners).
-      - name: Cache toolchain (${{ matrix.name }})
-        uses: actions/cache@v4
+      #
+      # Restored and saved as separate steps, each save right after the step
+      # that fills it: the all-in-one actions/cache only saves when the whole
+      # job succeeds.
+      - name: Restore toolchain (${{ matrix.name }})
+        id: toolchain-cache
+        uses: actions/cache/restore@v4
         with:
           path: build/toolchain/out
           # uapi/** is in the key as well as the script: setup_toolchain.sh
@@ -106,30 +118,45 @@ jobs:
             bash build/toolchain/setup_toolchain.sh "$ARCH"
           fi
 
+      - name: Save toolchain (${{ matrix.name }})
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/toolchain/out
+          key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
+
       # BoringSSL/abseil/protobuf/googleurl are all built from source via
       # quiche's own Bazel setup -- that's the single biggest cost in this
-      # job besides the toolchain itself, so cache Bazel's repository +
-      # build output caches keyed on the lockfile, .bazelrc, and the
-      # toolchain BUILD file.
-      - name: Cache Bazel (${{ matrix.name }})
-        uses: actions/cache@v4
+      # job besides the toolchain itself, so cache Bazel's repository + build
+      # output caches. The key ends in the run id so that every run saves its
+      # own copy (a cache entry can never be overwritten), and restore takes
+      # the newest by prefix. Bazel's disk cache is content-addressed, so a
+      # copy saved from a failed build still holds only correct outputs.
+      - name: Restore Bazel (${{ matrix.name }})
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/bazel-${{ matrix.name }}
             ~/.cache/bazelisk
-          key: bazel-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel', 'build/toolchain/toolchain_flags.bzl', '.github/workflows/build.yml') }}
+          key: bazel-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel', 'build/toolchain/toolchain_def.bzl', 'build/toolchain/toolchain_flags.bzl') }}-${{ github.run_id }}
           restore-keys: |
+            bazel-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel', 'build/toolchain/toolchain_def.bzl', 'build/toolchain/toolchain_flags.bzl') }}-
             bazel-${{ matrix.name }}-
 
       - name: Install bazelisk
         run: |
-          curl -fsSL -o /tmp/bazelisk \
-            https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
-          chmod +x /tmp/bazelisk
-          sudo mv /tmp/bazelisk /usr/local/bin/bazelisk
-          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+          set -e
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bin/bazelisk" \
+            "https://github.com/bazelbuild/bazelisk/releases/download/$BAZELISK_VERSION/bazelisk-linux-amd64"
+          echo "$BAZELISK_LINUX_AMD64_SHA256  $RUNNER_TEMP/bin/bazelisk" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/bazelisk"
+          ln -sf bazelisk "$RUNNER_TEMP/bin/bazel"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "BAZELISK_HOME=$HOME/.cache/bazelisk" >> "$GITHUB_ENV"
 
       - name: Build
+        id: build
         run: |
           set -e
           nproc
@@ -151,7 +178,7 @@ jobs:
           # artifacts, so this is deliberately set here rather than in
           # .bazelrc: local builds keep full unwind info for debugging.
           #
-          # --disk_cache / --repository_cache: the "Cache Bazel" step above
+          # --disk_cache / --repository_cache: the "Restore Bazel" step above
           # only restores ~/.cache/bazel-${{ matrix.name }} as a plain
           # tarball -- it doesn't make Bazel actually *use* that directory
           # for anything. Without these two flags, Bazel's real action
@@ -170,6 +197,15 @@ jobs:
             --copt=-fno-asynchronous-unwind-tables \
             --linkopt=-s \
             $TARGETS
+
+      - name: Save Bazel (${{ matrix.name }})
+        if: always() && steps.build.outcome != 'skipped'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cache/bazel-${{ matrix.name }}
+            ~/.cache/bazelisk
+          key: bazel-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel', 'build/toolchain/toolchain_def.bzl', 'build/toolchain/toolchain_flags.bzl') }}-${{ github.run_id }}
 
       - name: Stage artifacts
         run: |
@@ -262,30 +298,55 @@ jobs:
       - name: Restore Bazel (macos-${{ matrix.name }})
         uses: actions/cache/restore@v4
         with:
-          path: ~/.cache/bazel-macos-${{ matrix.name }}
-          key: bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/macos/BUILD.bazel') }}-${{ github.run_id }}
+          path: |
+            ~/.cache/bazel-macos-${{ matrix.name }}
+            ~/.cache/bazelisk
+          key: bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/macos/BUILD.bazel', 'build/toolchain/macos/toolchain_def.bzl') }}-${{ github.run_id }}
           restore-keys: |
-            bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/macos/BUILD.bazel') }}-
+            bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/macos/BUILD.bazel', 'build/toolchain/macos/toolchain_def.bzl') }}-
             bazel-macos-${{ matrix.name }}-
 
+      - name: Install bazelisk
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bin/bazelisk" \
+            "https://github.com/bazelbuild/bazelisk/releases/download/$BAZELISK_VERSION/bazelisk-darwin-arm64"
+          echo "$BAZELISK_DARWIN_ARM64_SHA256  $RUNNER_TEMP/bin/bazelisk" | shasum -a 256 -c -
+          chmod +x "$RUNNER_TEMP/bin/bazelisk"
+          ln -sf bazelisk "$RUNNER_TEMP/bin/bazel"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "BAZELISK_HOME=$HOME/.cache/bazelisk" >> "$GITHUB_ENV"
+
+      # The same flags as the Linux build, for the same reasons (see there),
+      # except -s: ld64 treats it as obsolete and strips nothing, so the
+      # binaries are stripped with the pinned llvm-strip when staged.
+      # Mach-O also carries two tables that only debuggers and profilers
+      # read and that ELF has no counterpart of, LC_FUNCTION_STARTS and
+      # LC_DATA_IN_CODE; they are left out as Chromium's official macOS
+      # builds leave them out (build/config/compiler/BUILD.gn).
       - name: Build
         id: build
         run: |
           set -e
           ./build/regen_quictun_build_timestamp.sh
-          # bazelisk is preinstalled on the image; .bazelversion pins Bazel.
-          bazelisk build -c opt \
+          bazel build -c opt \
             --disk_cache=$HOME/.cache/bazel-macos-${{ matrix.name }}/disk \
             --repository_cache=$HOME/.cache/bazel-macos-${{ matrix.name }}/repo \
             --platforms=//build/toolchain/macos:${{ matrix.platform }} \
+            --copt=-fno-asynchronous-unwind-tables \
+            --linkopt=-Wl,-no_function_starts \
+            --linkopt=-Wl,-no_data_in_code_info \
             $TARGETS
 
       - name: Save Bazel (macos-${{ matrix.name }})
         if: always() && steps.build.outcome != 'skipped'
         uses: actions/cache/save@v4
         with:
-          path: ~/.cache/bazel-macos-${{ matrix.name }}
-          key: bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/macos/BUILD.bazel') }}-${{ github.run_id }}
+          path: |
+            ~/.cache/bazel-macos-${{ matrix.name }}
+            ~/.cache/bazelisk
+          key: bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/macos/BUILD.bazel', 'build/toolchain/macos/toolchain_def.bzl') }}-${{ github.run_id }}
 
       - name: Stage artifacts
         run: |
