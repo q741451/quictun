@@ -7,9 +7,11 @@ name: Release
 #    workflow" -> type a version -> Run. Pick which branch/ref to build
 #    from in that same dropdown (defaults to quictun).
 #
-# Either way this builds all 4 architectures via build.yml's own build job
-# (see its workflow_call trigger) and publishes them as a GitHub Release
-# with all 8 binaries (quictun_client/quictun_server x 4 archs) attached.
+# Either way this runs all of build.yml (see its workflow_call trigger) --
+# every Linux architecture, and macOS arm64/x86_64 built and then tested on
+# a Mac of each -- and publishes a GitHub Release with a quictun_client and
+# a quictun_server for each of them attached. Nothing is published unless
+# every job there passed.
 on:
   push:
     tags:
@@ -49,15 +51,14 @@ jobs:
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
 
-      # build.yml's own "Upload artifacts" step names each matrix leg's
-      # artifact quictun-linux-${{ matrix.name }} (x86_64/arm64/armv7/
-      # mipsel), each containing that arch's quictun_client-linux-*/
-      # quictun_server-linux-* pair -- merge all four into one directory,
-      # no name collisions since the arch is baked into every filename.
+      # build.yml names each artifact quictun-<os>-<arch>, each holding that
+      # platform's quictun_client-<os>-<arch>/quictun_server-<os>-<arch>
+      # pair -- merge them all into one directory, no name collisions since
+      # the OS and arch are in every filename.
       - name: Download all built binaries
         uses: actions/download-artifact@v4
         with:
-          pattern: quictun-linux-*
+          pattern: quictun-*
           path: dist
           merge-multiple: true
 

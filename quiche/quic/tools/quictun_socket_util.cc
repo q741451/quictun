@@ -42,7 +42,16 @@ absl::Status SetReuseAddrAndPort(SocketFd fd) {
   if (!status.ok()) {
     return status;
   }
+#if defined(__linux__)
   return SetSockOpt(fd, SOL_SOCKET, SO_REUSEPORT, /*value=*/1);
+#else
+  // Elsewhere SO_REUSEPORT does not spread load across processes, so a
+  // second quictun_server would bind the same port and silently share or
+  // steal its traffic. Without it a second bind fails, loudly. (A Windows
+  // port must also replace SO_REUSEADDR above with SO_EXCLUSIVEADDRUSE:
+  // there SO_REUSEADDR is what lets another process take the port.)
+  return absl::OkStatus();
+#endif
 }
 
 absl::StatusOr<OwnedSocketFd> CreateQuicUdpSocket(

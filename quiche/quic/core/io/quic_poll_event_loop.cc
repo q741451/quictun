@@ -237,6 +237,19 @@ void QuicPollEventLoop::DispatchIoEvent(std::vector<ReadyListEntry>& ready_list,
   Registration& registration = *it->second;
 
   mask |= GetPollMask(registration.artificially_notify_at_next_iteration);
+#if !defined(__linux__)
+  // A hang-up wakes everything that is waiting on the socket, as libevent's
+  // poll backend (poll.c) and Chromium's epoll pump do: each callback then
+  // reads, writes or collects its connect result and gets the real error.
+  // macOS reports a refused non-blocking connect() as POLLHUP alone, which
+  // GetEventMask() does not map and the masking below would drop; poll()
+  // would then return at once forever and the loop spin, with the waiter
+  // never learning the connect failed. Linux always reports POLLERR (and
+  // POLLOUT) with it, so it does not need this.
+  if (mask & POLLHUP) {
+    mask |= GetPollMask(registration.events);
+  }
+#endif
   // poll() always returns certain classes of events even if not requested.
   mask &= GetPollMask(registration.events |
                       registration.artificially_notify_at_next_iteration);

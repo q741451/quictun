@@ -134,7 +134,8 @@ absl::Status QuictunServerDriver::Start() {
   // connection so its GSO batch buffer (64 KiB) and the socket's own
   // kernel buffers exist once per process instead of once per peer.
   shared_writer_ = MakeQuictunPacketWriter(*listen_fd_, options_.udp_gso,
-                                           event_loop_);
+                                           event_loop_,
+                                           /*connected_peer=*/std::nullopt);
 
   bool registered = event_loop_->RegisterSocket(
       *listen_fd_,

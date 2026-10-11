@@ -39,7 +39,8 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     bool, udp_gso, false,
     "Send through UDP GSO: consecutive packets to the same peer leave in "
-    "one sendmsg instead of one each. Needs Linux 4.18+.");
+    "one sendmsg instead of one each. Needs Linux 4.18+; refused at startup "
+    "on any other OS.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     bool, so_txtime, false,
@@ -50,10 +51,11 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     bool, transparent, false,
-    "Transparent-proxy mode (Linux only). quictun_client captures each "
-    "accepted TCP connection's original destination via SO_ORIGINAL_DST "
-    "(populated by an external iptables/nftables REDIRECT rule the "
-    "operator sets up separately -- quictun itself never touches "
+    "Transparent-proxy mode. The client side is Linux only (refused at "
+    "startup elsewhere); the server side works on any OS. quictun_client "
+    "captures each accepted TCP connection's original destination via "
+    "SO_ORIGINAL_DST (populated by an external iptables/nftables REDIRECT "
+    "rule the operator sets up separately -- quictun itself never touches "
     "netfilter config) instead of always tunneling to one fixed address; "
     "quictun_server connects out to that per-stream destination instead "
     "of --target. Mutually exclusive with --target -- setting both is a "

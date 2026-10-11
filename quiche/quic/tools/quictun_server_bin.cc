@@ -124,6 +124,14 @@ int main(int argc, char* argv[]) {
     std::cerr << "--so_txtime requires --udp_gso" << std::endl;
     return 1;
   }
+#if !defined(__linux__)
+  // GSO is a Linux socket option with no writer here. --transparent is fine:
+  // the server only connects out to the address the client sent.
+  if (options.udp_gso) {
+    std::cerr << "--udp_gso is only available on Linux" << std::endl;
+    return 1;
+  }
+#endif
   quic::ApplyQuictunCongestionTuning(options);
 
   std::string target_flag = quiche::GetQuicheCommandLineFlag(FLAGS_target);

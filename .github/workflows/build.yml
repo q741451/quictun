@@ -192,3 +192,164 @@ jobs:
           name: quictun-linux-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
+
+  # macOS, both architectures, built on an Apple silicon runner with the same
+  # pinned clang as Linux (its Mac package) and a from-source static libc++;
+  # x86_64 is a cross build. Apple's SDK may only be used on a Mac, so this
+  # cannot run on the Linux runners. See build/toolchain/setup_toolchain_macos.sh.
+  build-macos:
+    name: Build (macos-${{ matrix.name }})
+    # A fixed image, not macos-latest: the Xcode below has to exist on it.
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: arm64
+            arch: arm64
+            platform: macos_arm64
+            file_match: "arm64"
+          - name: x86_64
+            arch: x64
+            platform: macos_x64
+            file_match: "x86_64"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The SDK is part of Xcode, so pinning the SDK means pinning Xcode.
+      # setup_toolchain_macos.sh refuses any SDK but the one it expects, so a
+      # runner image that drops this Xcode fails here, not with a different
+      # SDK.
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcrun --sdk macosx --show-sdk-path
+          xcrun --sdk macosx --show-sdk-version
+
+      # Caches are restored and saved as separate steps, each save right
+      # after the step that fills it: the all-in-one actions/cache only
+      # saves when the whole job succeeds.
+      - name: Restore toolchain (macos-${{ matrix.name }})
+        id: toolchain-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/toolchain/out
+          # setup_toolchain.sh is in the key too: the clang version and LLVM
+          # commit are read from it.
+          key: toolchain-macos-${{ matrix.name }}-${{ hashFiles('build/toolchain/setup_toolchain_macos.sh', 'build/toolchain/setup_toolchain.sh') }}
+
+      # arm64 every time: it is also the host Bazel builds its tools for.
+      - name: Set up pinned toolchain (macos-${{ matrix.name }})
+        run: |
+          set -e
+          bash build/toolchain/setup_toolchain_macos.sh arm64
+          if [ "${{ matrix.arch }}" != "arm64" ]; then
+            bash build/toolchain/setup_toolchain_macos.sh ${{ matrix.arch }}
+          fi
+
+      - name: Save toolchain (macos-${{ matrix.name }})
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/toolchain/out
+          key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
+
+      # The key ends in the run id so that every run saves its own copy (a
+      # cache entry can never be overwritten), and restore takes the newest
+      # by prefix. Bazel's disk cache is content-addressed, so a copy saved
+      # from a failed build still holds only correct outputs.
+      - name: Restore Bazel (macos-${{ matrix.name }})
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/bazel-macos-${{ matrix.name }}
+          key: bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/macos/BUILD.bazel') }}-${{ github.run_id }}
+          restore-keys: |
+            bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/macos/BUILD.bazel') }}-
+            bazel-macos-${{ matrix.name }}-
+
+      - name: Build
+        id: build
+        run: |
+          set -e
+          ./build/regen_quictun_build_timestamp.sh
+          # bazelisk is preinstalled on the image; .bazelversion pins Bazel.
+          bazelisk build -c opt \
+            --disk_cache=$HOME/.cache/bazel-macos-${{ matrix.name }}/disk \
+            --repository_cache=$HOME/.cache/bazel-macos-${{ matrix.name }}/repo \
+            --platforms=//build/toolchain/macos:${{ matrix.platform }} \
+            $TARGETS
+
+      - name: Save Bazel (macos-${{ matrix.name }})
+        if: always() && steps.build.outcome != 'skipped'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/bazel-macos-${{ matrix.name }}
+          key: bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/macos/BUILD.bazel') }}-${{ github.run_id }}
+
+      - name: Stage artifacts
+        run: |
+          set -e
+          mkdir -p dist
+          for t in $TARGETS; do
+            name=${t#//quiche:}
+            cp "bazel-bin/quiche/$name" "dist/${name}-macos-${{ matrix.name }}"
+          done
+          chmod u+w,+x dist/*
+          build/toolchain/out/chromium-clang-mac/bin/llvm-strip dist/*
+          for f in dist/*; do
+            file "$f"
+            file "$f" | grep -q '${{ matrix.file_match }}' || { echo "::error::$f is not a ${{ matrix.name }} binary"; exit 1; }
+            otool -L "$f"
+            # Only system libraries: libc++ is linked in statically.
+            if otool -L "$f" | tail -n +2 | grep -vE '^\s+/(usr/lib|System/Library)/'; then
+              echo "::error::$f links a non-system library"; exit 1
+            fi
+            if otool -L "$f" | grep -q 'libc++'; then
+              echo "::error::$f links the system libc++ instead of the static one"; exit 1
+            fi
+            vtool -show-build "$f"
+            ls -l "$f"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quictun-macos-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Each macOS architecture's released binaries, run on a Mac of that
+  # architecture: the arm64 runner has no Rosetta, so x86_64 needs the Intel
+  # image. A quick smoke test, since nothing else runs a macOS binary.
+  test-macos:
+    name: Test (macos-${{ matrix.name }})
+    needs: build-macos
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: arm64
+            runner: macos-15
+          - name: x86_64
+            runner: macos-15-intel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: quictun-macos-${{ matrix.name }}
+          path: dist
+
+      # Data through a real client/server pair over IPv4, IPv6 and dual
+      # stack, an unreachable --target, and the flags macOS must refuse.
+      - name: Smoke test
+        run: |
+          set -e
+          chmod +x dist/*
+          uname -m
+          file dist/*
+          python3 build/macos_smoke_test.py dist/quictun_client-macos-${{ matrix.name }} dist/quictun_server-macos-${{ matrix.name }}

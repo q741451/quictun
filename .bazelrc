@@ -29,15 +29,16 @@ build --cxxopt=-fno-exceptions
 # check this macro, so it's inert everywhere else.
 build --copt=-DOPENSSL_SMALL
 
-# The rest are is_posix / is_linux defaults from default_compiler_configs;
-# this project only targets Linux (x86_64 and arm64), so apply unconditionally.
+# The rest are is_posix defaults from default_compiler_configs, which covers
+# both Linux and macOS; the one GNU-linker-only flag is under build:linux.
 
 # crbug.com/32204
 build --copt=-fno-strict-aliasing
 
 # Position-independent code (is_linux/is_chromeos/is_android/is_fuchsia).
+# The --linkopt half is in the per-OS sections below, where on Linux it sits
+# just ahead of --gc-sections.
 build --copt=-fPIC
-build --linkopt=-fPIC
 
 # Hidden visibility by default (build/config/gcc:symbol_visibility_hidden),
 # applied to all is_posix targets.
@@ -45,13 +46,45 @@ build --copt=-fvisibility=hidden
 build --cxxopt=-fvisibility-inlines-hidden
 
 # Put each function/global in its own section so unused ones can be
-# dropped at link time (common_optimize_on_cflags + --gc-sections).
+# dropped at link time (common_optimize_on_cflags + --gc-sections). Only ELF
+# uses them, and clang ignores them for Mach-O; they stay in this common
+# section because a build:linux config is expanded ahead of these lines, so
+# moving them there would reorder every Linux compile command line (and
+# invalidate every cached action) for no change in output.
 build --copt=-ffunction-sections
 build --copt=-fdata-sections
 build --copt=-fno-unique-section-names
-build --linkopt=-Wl,--gc-sections
 
 # Chromium never uses the host's system ICU -- it always bundles its own,
 # on every platform, not just macOS. Match that instead of depending on
 # libicu-dev being installed on the build host.
 build --@com_google_googleurl//build_config:system_icu=0
+
+# --- Per host OS (--enable_platform_specific_config, line 2) ---
+# Linux artifacts are only ever built on Linux and macOS ones only on macOS
+# (Apple's SDK may not be used elsewhere), so the host OS is also the target
+# OS here.
+#
+# The toolchains are registered here rather than in MODULE.bazel so that a
+# Linux build never loads build/toolchain/macos and a macOS build never loads
+# build/toolchain: each loads a toolchain_paths.bzl that only exists after
+# that OS's setup script has run.
+
+# The linker half of the -ffunction-sections/-fdata-sections above. GNU-style
+# linkers only; ld64's equivalent, -dead_strip, is in
+# build/toolchain/macos/BUILD.bazel.
+build:linux --linkopt=-fPIC
+build:linux --linkopt=-Wl,--gc-sections
+build:linux --extra_toolchains=//build/toolchain:x64_cc_toolchain,//build/toolchain:x86_cc_toolchain,//build/toolchain:arm64_cc_toolchain,//build/toolchain:armv7_cc_toolchain,//build/toolchain:mipsel_cc_toolchain,//build/toolchain:riscv64_cc_toolchain
+
+build:macos --extra_toolchains=//build/toolchain/macos:arm64_cc_toolchain,//build/toolchain/macos:x64_cc_toolchain
+build:macos --linkopt=-fPIC
+# Bazel's macOS toolchain config defaults to archiving with Apple's libtool;
+# this one archives with the pinned llvm-ar instead.
+build:macos --features=-libtool
+build:macos --host_features=-libtool
+# The minimum macOS is already in the toolchain's --target triple, from
+# MACOS_MIN_VERSION in setup_toolchain_macos.sh; this feature would add a
+# second -mmacosx-version-min from Xcode's defaults that could disagree.
+build:macos --features=-macos_minimum_os
+build:macos --host_features=-macos_minimum_os

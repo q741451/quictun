@@ -40,7 +40,10 @@
 #define IP6T_SO_ORIGINAL_DST 80
 #endif
 
+#include "absl/status/statusor.h"
+#if defined(__linux__)
 #include "quiche/quic/core/batch_writer/quic_gso_batch_writer.h"
+#endif
 #include "quiche/quic/core/congestion_control/send_algorithm_interface.h"
 #include "quiche/quic/core/io/quic_event_loop.h"
 #include "quiche/quic/core/io/socket.h"
@@ -63,6 +66,97 @@ namespace {
 // Matches QUICHE's own real quic_max_congestion_window default (2000
 // packets, ~2.9 MB at the default 1460-byte MSS).
 constexpr int32_t kStartupBandwidthHintMaxCongestionWindowPackets = 2000;
+
+#if !defined(__linux__)
+// The two writers below are what macOS needs, and what Windows will: both
+// follow msquic, whose kqueue (macOS) and winuser (Windows) datapaths do
+// exactly this -- no destination on a connected socket, an IPv4 peer of a
+// dual-stack socket addressed as ::ffff:a.b.c.d with its IPv4 source left
+// as is. Linux accepts the plain forms, so it keeps QuicDefaultPacketWriter.
+
+// For a UDP socket that has been connect()ed: sends with send(), no
+// destination. BSD kernels (macOS) fail sendmsg() with a msg_name on a
+// connected socket with EISCONN, even when it names the connected peer.
+// Chromium's own UDP client sends on its connected sockets without an
+// address too (net/socket/udp_socket_posix.cc, InternalSendTo(nullptr)).
+//
+// Nothing else is dropped that this path uses: the kernel picks the source
+// address of a connected socket itself, and no ECN marking is sent unless
+// the congestion controller asks for it, which none quictun offers does. A
+// write to any address other than the connected one fails loudly rather
+// than silently going to the connected one.
+class ConnectedUdpPacketWriter : public QuicDefaultPacketWriter {
+ public:
+  ConnectedUdpPacketWriter(SocketFd fd, const QuicSocketAddress& peer)
+      : QuicDefaultPacketWriter(fd), peer_(peer) {}
+
+  WriteResult WritePacket(const char* buffer, size_t buf_len,
+                          const QuicIpAddress& /*self_address*/,
+                          const QuicSocketAddress& peer_address,
+                          PerPacketOptions* /*options*/,
+                          const QuicPacketWriterParams& /*params*/) override {
+    QUICHE_DCHECK(!IsWriteBlocked());
+    // Normalized on both sides: QuicPacketReader hands the connection an
+    // IPv4-mapped peer as plain IPv4, while --remote may spell it either way.
+    if (peer_address.Normalized() != peer_.Normalized()) {
+      QUIC_LOG_FIRST_N(ERROR, 10)
+          << "Write to " << peer_address << " on a UDP socket connected to "
+          << peer_;
+      return WriteResult(WRITE_STATUS_ERROR, EISCONN);
+    }
+#if defined(_WIN32)
+    int rc = ::send(fd(), buffer, static_cast<int>(buf_len), 0);
+    int error = rc < 0 ? WSAGetLastError() : 0;
+    bool blocked = error == WSAEWOULDBLOCK;
+#else
+    ssize_t rc;
+    do {
+      rc = ::send(fd(), buffer, buf_len, 0);
+    } while (rc < 0 && errno == EINTR);
+    int error = rc < 0 ? errno : 0;
+    bool blocked = error == EAGAIN || error == EWOULDBLOCK;
+#endif
+    if (rc >= 0) {
+      return WriteResult(WRITE_STATUS_OK, static_cast<int>(rc));
+    }
+    if (blocked) {
+      set_write_blocked(true);
+      return WriteResult(WRITE_STATUS_BLOCKED, error);
+    }
+    // Including the platform's message-too-big code, which
+    // MessageTooBigErrorCode() (inherited) reports for MTU discovery.
+    return WriteResult(WRITE_STATUS_ERROR, error);
+  }
+
+ private:
+  const QuicSocketAddress peer_;
+};
+
+// For an unconnected IPv6 socket, i.e. the server on --listen=[::]. An IPv4
+// peer reaches it as ::ffff:a.b.c.d, which QuicPacketReader normalises to
+// plain a.b.c.d, so replies would go out to a sockaddr_in on an AF_INET6
+// socket. Linux accepts that; macOS fails it with EINVAL, and Windows
+// requires the mapped form on a dual-stack socket as well. Only the
+// destination is mapped: the source stays IPv4 and goes out as IP_PKTINFO,
+// which is what msquic sends on both macOS and Windows. IPv6 peers are
+// untouched.
+class DualStackPacketWriter : public QuicDefaultPacketWriter {
+ public:
+  using QuicDefaultPacketWriter::QuicDefaultPacketWriter;
+
+  WriteResult WritePacket(const char* buffer, size_t buf_len,
+                          const QuicIpAddress& self_address,
+                          const QuicSocketAddress& peer_address,
+                          PerPacketOptions* options,
+                          const QuicPacketWriterParams& params) override {
+    return QuicDefaultPacketWriter::WritePacket(
+        buffer, buf_len, self_address,
+        QuicSocketAddress(peer_address.host().DualStacked(),
+                          peer_address.port()),
+        options, params);
+  }
+};
+#endif  // !defined(__linux__)
 
 // See MakeQuictunPacketWriter()'s comment for why this exists. Generalizes
 // quic_client_default_network_helper.h's QuicLevelTriggeredPacketWriter
@@ -262,12 +356,35 @@ void EnableQuictunSoTxTime() {
 }
 
 std::unique_ptr<QuicPacketWriter> MakeQuictunPacketWriter(
-    SocketFd fd, bool udp_gso, QuicEventLoop* event_loop) {
+    SocketFd fd, bool udp_gso, QuicEventLoop* event_loop,
+    std::optional<QuicSocketAddress> connected_peer) {
   std::unique_ptr<QuicPacketWriter> writer;
   if (udp_gso) {
+#if defined(__linux__)
     writer = std::make_unique<QuicGsoBatchWriter>(fd, CLOCK_MONOTONIC);
+#else
+    // Both binaries refuse --udp_gso at startup off Linux.
+    QUIC_LOG(FATAL) << "--udp_gso is only available on Linux";
+#endif
   } else {
+#if defined(__linux__)
+    (void)connected_peer;
     writer = std::make_unique<QuicDefaultPacketWriter>(fd);
+#else
+    absl::StatusOr<QuicSocketAddress> bound = socket_api::GetSocketAddress(fd);
+    if (!bound.ok()) {
+      // Every caller binds or connects before making its writer.
+      QUIC_LOG(FATAL) << "Cannot read the address of UDP socket " << fd << ": "
+                      << bound.status();
+    }
+    if (connected_peer.has_value()) {
+      writer = std::make_unique<ConnectedUdpPacketWriter>(fd, *connected_peer);
+    } else if (bound->host().IsIPv6()) {
+      writer = std::make_unique<DualStackPacketWriter>(fd);
+    } else {
+      writer = std::make_unique<QuicDefaultPacketWriter>(fd);
+    }
+#endif
   }
 #ifdef QUICTUN_TEST_BUILD
   // Test-only, see FaultInjectingPacketWriter's own comment -- normal
@@ -340,6 +457,12 @@ void SetQuictunStartupBandwidthHint(QuicConnection* connection,
 
 std::optional<QuicSocketAddress> CaptureQuictunOriginalDestination(
     SocketFd fd) {
+#if !defined(__linux__)
+  // quictun_client refuses --transparent at startup off Linux.
+  QUIC_LOG(FATAL) << "SO_ORIGINAL_DST is only available on Linux (fd " << fd
+                  << ")";
+  return std::nullopt;
+#else
   struct sockaddr_storage dest_storage;
   socklen_t dest_len = sizeof(dest_storage);
   memset(&dest_storage, 0, sizeof(dest_storage));
@@ -362,6 +485,7 @@ std::optional<QuicSocketAddress> CaptureQuictunOriginalDestination(
   }
   return QuicSocketAddress(reinterpret_cast<const sockaddr*>(&dest_storage),
                            dest_len);
+#endif
 }
 
 }  // namespace quic

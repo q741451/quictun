@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
-// Low-level Linux socket helpers not exposed by quiche/quic/core/io/socket.h.
+// Low-level socket helpers not exposed by quiche/quic/core/io/socket.h.
 
 #ifndef QUICHE_QUIC_TOOLS_QUICTUN_SOCKET_UTIL_H_
 #define QUICHE_QUIC_TOOLS_QUICTUN_SOCKET_UTIL_H_
@@ -24,7 +24,7 @@ absl::Status SetIpv6OnlyDisabled(SocketFd fd);
 
 // Sets SO_REUSEADDR and SO_REUSEPORT on `fd`. Used on the client's --local
 // TCP listener so a restart can rebind while its previous connections are
-// still in TIME_WAIT.
+// still in TIME_WAIT. Off Linux, SO_REUSEADDR only: see the .cc file.
 absl::Status SetReuseAddrAndPort(SocketFd fd);
 
 // Creates a non-blocking UDP socket for `address_for_family`'s address
