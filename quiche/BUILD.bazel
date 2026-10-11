@@ -130,10 +130,20 @@ cc_library(
     # promoted here and filtered out of io_tool_support below to avoid
     # compiling it into two separate cc_library archives (duplicate-symbol
     # link errors for binaries that depend on both).
-    srcs = quiche_core_srcs + default_platform_impl_srcs + linux_only_srcs + [
+    #
+    # linux_only_* (the GSO/sendmmsg batch writers and the socket utils they
+    # sit on) only compile against Linux headers, so other OSes leave them
+    # out; quictun refuses the flags that would need them there.
+    srcs = quiche_core_srcs + default_platform_impl_srcs + select({
+        "@platforms//os:linux": linux_only_srcs,
+        "//conditions:default": [],
+    }) + [
         "quic/core/quic_syscall_wrapper.cc",
     ],
-    hdrs = quiche_core_hdrs + default_platform_impl_hdrs + linux_only_hdrs + [
+    hdrs = quiche_core_hdrs + default_platform_impl_hdrs + select({
+        "@platforms//os:linux": linux_only_hdrs,
+        "//conditions:default": [],
+    }) + [
         "quic/core/quic_syscall_wrapper.h",
     ],
     includes = ["common/platform/default"],

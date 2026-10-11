@@ -63,8 +63,18 @@ void EnableQuictunSoTxTime();
 // in the .cc -- when QUICTUN_INJECT_WRITE_BLOCK_AFTER is set in the
 // environment. Without that macro, none of this code exists in the binary
 // at all, not just at runtime.
+//
+// `connected_peer` is the address `fd` has been connect()ed to, if any (the
+// client's sockets; the server's listen socket is not). Linux ignores it.
+// Elsewhere a connected socket gets a writer that sends without a
+// destination address, since BSD kernels reject one there with EISCONN, and
+// an unconnected IPv6 one gets a writer that addresses IPv4 peers in their
+// ::ffff: form, since macOS rejects a plain IPv4 address there with EINVAL
+// (and Windows needs the same). See the .cc for both.
+// `fd` must already be bound or connected.
 std::unique_ptr<QuicPacketWriter> MakeQuictunPacketWriter(
-    SocketFd fd, bool udp_gso, QuicEventLoop* event_loop);
+    SocketFd fd, bool udp_gso, QuicEventLoop* event_loop,
+    std::optional<QuicSocketAddress> connected_peer);
 
 // Parses "cubic" | "bbr" | "bbr2" | "bbr3" into a CongestionControlType.
 // Returns kCubicBytes (quictun's default) and logs a warning for any other

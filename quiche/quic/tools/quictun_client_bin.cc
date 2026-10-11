@@ -154,6 +154,19 @@ int main(int argc, char* argv[]) {
     std::cerr << "--so_txtime requires --udp_gso" << std::endl;
     return 1;
   }
+#if !defined(__linux__)
+  // Both need Linux: GSO is a Linux socket option with no writer here, and
+  // the original destination comes from netfilter's SO_ORIGINAL_DST.
+  if (options.udp_gso) {
+    std::cerr << "--udp_gso is only available on Linux" << std::endl;
+    return 1;
+  }
+  if (options.transparent) {
+    std::cerr << "--transparent is only available on a Linux client"
+              << std::endl;
+    return 1;
+  }
+#endif
   quic::ApplyQuictunCongestionTuning(options);
   options.zero_rtt = quiche::GetQuicheCommandLineFlag(FLAGS_zero_rtt);
   options.udp_socket = quiche::GetQuicheCommandLineFlag(FLAGS_udp_socket);

@@ -1,8 +1,9 @@
 # quictun: TCP-over-raw-QUIC tunnel
 
 `quictun` tunnels raw TCP over QUIC transport -- no HTTP/3, no MASQUE, no
-framing of its own. Two small static binaries, `quictun_server` and
-`quictun_client`, built on Google's [QUICHE](#quiche).
+framing of its own. Two small binaries, `quictun_server` and
+`quictun_client`, built on Google's [QUICHE](#quiche) -- static on Linux,
+and for macOS too (see [macOS](#macos)).
 
 ```
 quictun_server --listen=[::]:4433 --target=127.0.0.1:12948 --key='a real shared secret'
@@ -57,10 +58,10 @@ with `--zero_rtt=false` if that matters for your deployment.
 
 The session-ticket key that 0-RTT resumption relies on is derived from
 `--key` rather than randomly per process. This is what lets several
-`quictun_server` instances share one `--listen` port (the listen socket is
-always bound with `SO_REUSEPORT`, so the kernel can spread connections
-across them for multi-core scaling -- run the client with `--udp_socket=2`
-or more so its connections actually spread) while a client's 0-RTT ticket
+`quictun_server` instances share one `--listen` port (on Linux the listen
+socket is always bound with `SO_REUSEPORT`, so the kernel can spread
+connections across them for multi-core scaling -- run the client with
+`--udp_socket=2` or more so its connections actually spread) while a client's 0-RTT ticket
 still resumes on whichever instance the next connection lands on, and across
 a server restart. The trade-off is weaker forward secrecy for that 0-RTT
 data -- the key lives as long as `--key` instead of rotating -- which is the
@@ -110,9 +111,9 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | `--key` | *(required)* | Shared secret checked as an application-layer preamble at the start of every tunnel. The two endpoints must be configured with the identical value. |
 | `--congestion_control` | `cubic` | `cubic`, `bbr`, `bbr2`, or `bbr3`. Applies independently to *this endpoint's own send direction* -- client and server each pick their own, and the two need not match. An unrecognized value falls back to `cubic` with a logged warning rather than failing to start. |
 | `--max_congestion_window_kb` | `2851` | Upper bound on this endpoint's send-direction congestion window, in KiB. BBR sizes the window to the path but never above this, so raise it on high-bandwidth-delay paths where the default (QUICHE's 2000-packet cap) limits throughput when there is no loss; under loss the receive-window flags are the separate lever. The sent-packet tracking limit is scaled to match automatically. |
-| `--udp_gso` | `false` | Send through UDP GSO: consecutive packets to the same peer leave in one `sendmsg` instead of one each. Needs Linux 4.18+. |
+| `--udp_gso` | `false` | Send through UDP GSO: consecutive packets to the same peer leave in one `sendmsg` instead of one each. Needs Linux 4.18+; refused at startup on any other OS. |
 | `--so_txtime` | `false` | Hand packet pacing to the kernel via `SO_TXTIME`. Requires `--udp_gso`. Only the `fq` qdisc on Linux 4.20+ honors it; under any other qdisc (`fq_codel`, `pfifo_fast`, ...) packets leave up to 10ms early, in bursts. |
-| `--transparent` | `false` | Transparent-proxy mode (Linux only). `quictun_client` captures each accepted TCP connection's original destination via `SO_ORIGINAL_DST` (populated by an external iptables/nftables `REDIRECT` rule the operator sets up separately -- quictun itself never touches netfilter config) instead of always tunneling to one fixed address; `quictun_server` connects out to that per-stream destination instead of `--target`. Mutually exclusive with `--target` on the server -- setting both is a startup error, since the two modes speak incompatible wire formats (`--target`'s existing mode has zero framing after the `--key` preamble; transparent mode prepends an address header, IPv4/IPv6 only, no domain names). Both `quictun_client` and `quictun_server` must be started with the same value, the same as `--key`. |
+| `--transparent` | `false` | Transparent-proxy mode. The client side is Linux only (refused at startup elsewhere); the server side works on any OS. `quictun_client` captures each accepted TCP connection's original destination via `SO_ORIGINAL_DST` (populated by an external iptables/nftables `REDIRECT` rule the operator sets up separately -- quictun itself never touches netfilter config) instead of always tunneling to one fixed address; `quictun_server` connects out to that per-stream destination instead of `--target`. Mutually exclusive with `--target` on the server -- setting both is a startup error, since the two modes speak incompatible wire formats (`--target`'s existing mode has zero framing after the `--key` preamble; transparent mode prepends an address header, IPv4/IPv6 only, no domain names). Both `quictun_client` and `quictun_server` must be started with the same value, the same as `--key`. |
 | `--idle_timeout_seconds` | `60` | QUIC connection idle timeout, in seconds: how long a connection may go without receiving anything from the peer before it is torn down. Keepalive PINGs keep resetting it while the peer is alive, so in practice it only fires once the peer really is gone -- it bounds how long a vanished peer's connection (its UDP socket, its session state, and every tunnel's target-side TCP socket) is held before being reclaimed, so keep it short. quictun disables QUIC's own network-blackhole detection (which would otherwise close a connection after ~5 consecutive retransmission timeouts) because it false-positives on a lossy-but-alive tunnel, so this idle timeout is the sole reaper of a genuinely dead connection. Does not govern how long a quiet tunnel stays open -- that is `--tcp_idle_timeout_seconds`. |
 | `--tcp_idle_timeout_seconds` | `86400` | Per-tunnel idle timeout, in seconds: one tunnel with no real data in either direction for this long is closed, leaving the QUIC connection carrying it -- and every other tunnel on it -- untouched. Independent of `--idle_timeout_seconds`, which reclaims connections whose peer has vanished; this is policy for a tunnel that is merely quiet, so the default (24h) is deliberately lax enough never to cut a connection that is simply idle rather than dead. Set it the same on both ends. |
 | `--tcp_stalled_timeout_seconds` | `180` | The same, for a tunnel that is *stalled* rather than merely quiet: one holding buffered data it cannot hand on, because the peer stopped reading the QUIC stream or the target TCP socket stopped draining. That costs flow-control credit and memory the whole QUIC connection shares, so enough such tunnels wedge every other tunnel on it -- hence a much shorter default than a quiet tunnel gets. Any progress in either direction restarts the clock, so this cuts a stalled transfer, never a slow one. Capped at `--tcp_idle_timeout_seconds`. Set it the same on both ends. |
@@ -155,9 +156,32 @@ binaries for `x86_64`, `x86`, `arm64`, `armv7`, `mipsel`, and `riscv64` via
 pinned, from-scratch toolchain (Chromium's pinned clang, plus a musl libc,
 a compiler-rt, and a libc++/libc++abi/libunwind all built from source by
 that same clang) so builds don't depend on the Ubuntu version running the
-build -- or on its libc at all. Grab them from the *Artifacts* section of the
-corresponding run under the [Actions tab](../../actions) -- there is no
-separate GitHub Releases page.
+build -- or on its libc at all. The same run builds macOS `arm64` and
+`x86_64` binaries (see [macOS](#macos)) and tests each on a Mac of that
+architecture. Grab them from the *Artifacts* section of the corresponding
+run under the [Actions tab](../../actions); tagged versions are also
+published on the Releases page.
+
+## macOS
+
+`quictun_client-macos-*` and `quictun_server-macos-*` run on macOS 11 or
+later, Apple silicon (`arm64`) or Intel (`x86_64`). They are built with the
+same pinned clang as Linux and link libc++ statically; the only libraries
+they load are macOS's own (libSystem and a few system frameworks), since
+macOS allows nothing to be fully static.
+
+Differences from Linux:
+
+- `--udp_gso` (and so `--so_txtime`) and the client's `--transparent` need
+  Linux; on macOS they are refused at startup rather than ignored. The
+  server's `--transparent` works.
+- No `SO_REUSEPORT` on the server: macOS would let a second instance bind
+  the same port without spreading load across them, so a second
+  `quictun_server` on the same `--listen` port fails instead. Run one.
+- Binaries downloaded with a browser are quarantined by Gatekeeper; clear
+  that once with `xattr -d com.apple.quarantine quictun_*-macos-*`.
+- To keep one running, use a launchd agent; a laptop that sleeps drops its
+  tunnels like any other network connection.
 
 ## Building from source
 
@@ -204,6 +228,26 @@ No `--linkopt` is needed for a fully static binary: musl is configured
 with `--disable-shared`, so `-static-pie` is part of the toolchain itself
 (`build/toolchain/toolchain_flags.bzl`) on every architecture rather than
 something the command line adds.
+
+### On macOS
+
+This has to run on a Mac (Apple's SDK may not be used anywhere else), an
+Apple silicon one, with Xcode 16.4 -- `setup_toolchain_macos.sh` refuses any
+macOS SDK but 15.5:
+
+```
+brew install cmake ninja bazelisk
+sudo xcode-select -s /Applications/Xcode_16.4.app
+bash build/toolchain/setup_toolchain_macos.sh arm64
+./build/regen_quictun_build_timestamp.sh
+bazel build -c opt --platforms=//build/toolchain/macos:macos_arm64 //quiche:quictun_client //quiche:quictun_server
+```
+
+It downloads the Mac build of the same pinned clang and builds libc++ from
+the same LLVM commit as Linux, into the same `build/toolchain/out/`. For an
+Intel binary, also run `setup_toolchain_macos.sh x64` and build with
+`--platforms=//build/toolchain/macos:macos_x64`; arm64 stays set up either
+way, since it is what Bazel builds its host-side tools with.
 
 ---
 

@@ -11,7 +11,8 @@ and six copies is a poor way to make a mistake visible.
 
 Adding an architecture is now: build/toolchain/uapi/asm-<kernel arch>, an
 entry in setup_toolchain.sh's arch_musl_target/arch_kernel_arch, one
-musl_cc_toolchain() call, and one register_toolchains() line.
+musl_cc_toolchain() call, and one more name in .bazelrc's build:linux
+--extra_toolchains (registered there, not in MODULE.bazel -- see .bazelrc).
 """
 
 load(
