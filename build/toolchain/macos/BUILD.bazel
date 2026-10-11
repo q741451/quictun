@@ -1,8 +1,8 @@
 # The macOS counterpart of build/toolchain/BUILD.bazel: Chromium's pinned
 # clang (its Mac_arm64 package, same version as Linux) and a from-source
 # static libc++, with Apple's SDK in place of the musl sysroot. See
-# setup_toolchain_macos.sh for what is pinned to what, and toolchain_def.bzl
-# here for the toolchain itself.
+# setup_toolchain_macos.sh for what is pinned to what, toolchain_def.bzl for
+# the toolchain and toolchain_flags.bzl for its flags.
 #
 # A separate package rather than more entries in build/toolchain/BUILD.bazel,
 # because each package loads a toolchain_paths.bzl that only its own setup
@@ -11,10 +11,32 @@
 # so a build never loads the other OS's package and its missing paths file.
 
 load(":toolchain_def.bzl", "macos_cc_toolchain")
+load(":toolchain_paths.bzl", "CLANG_RESOURCE_DIR", "TOOLCHAIN_PREFIX")
 
 package(default_visibility = ["//visibility:public"])
 
 filegroup(name = "empty")
+
+CLANG = TOOLCHAIN_PREFIX + "/chromium-clang-mac/bin/clang"
+
+# The Mac clang package has no llvm-nm or llvm-objdump; nothing in a normal
+# build runs either, so they point at a tool that fails loudly if one ever is.
+LLVM_TOOL_PATHS = {
+    "gcc": CLANG,
+    "ld": TOOLCHAIN_PREFIX + "/chromium-clang-mac/bin/ld64.lld",
+    "ar": TOOLCHAIN_PREFIX + "/chromium-clang-mac/bin/llvm-ar",
+    "cpp": CLANG,
+    "gcov": "/usr/bin/false",
+    "nm": "/usr/bin/false",
+    "objdump": "/usr/bin/false",
+    "strip": TOOLCHAIN_PREFIX + "/chromium-clang-mac/bin/llvm-strip",
+}
+
+# clang's own resource-dir headers -- identical for every target, since it's
+# one clang binary for all of them.
+CLANG_BUILTIN_INCLUDES = [
+    CLANG_RESOURCE_DIR + "/include",
+]
 
 # One line per architecture, as in build/toolchain/BUILD.bazel: this repo's
 # name for it (which keys MACOS_TARGETS, the --target table that
@@ -25,6 +47,8 @@ filegroup(name = "empty")
         arch = arch,
         cpu = cpu,
         bazel_cpu = bazel_cpu,
+        clang_builtin_includes = CLANG_BUILTIN_INCLUDES,
+        tool_paths = LLVM_TOOL_PATHS,
     )
     for (arch, cpu, bazel_cpu) in [
         ("arm64", "darwin_arm64", "aarch64"),

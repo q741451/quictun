@@ -56,21 +56,27 @@ jobs:
           # configuration too, which a CI --linkopt does not (host tools would
           # come out linked against a musl loader the runner doesn't have).
           - name: x86_64
+            arch: x64
             platform: linux_x64
             file_match: "x86-64"
           - name: x86
+            arch: x86
             platform: linux_x86
             file_match: "Intel 80386"
           - name: arm64
+            arch: arm64
             platform: linux_arm64
             file_match: "ARM aarch64"
           - name: armv7
+            arch: armv7
             platform: linux_armv7
             file_match: "ARM,"
           - name: mipsel
+            arch: mipsel
             platform: linux_mipsel
             file_match: "MIPS,"
           - name: riscv64
+            arch: riscv64
             platform: linux_riscv64
             file_match: "UCB RISC-V"
     steps:
@@ -113,9 +119,8 @@ jobs:
         run: |
           set -e
           bash build/toolchain/setup_toolchain.sh x64
-          ARCH=${{ matrix.name == 'x86_64' && 'x64' || matrix.name }}
-          if [ "$ARCH" != "x64" ]; then
-            bash build/toolchain/setup_toolchain.sh "$ARCH"
+          if [ "${{ matrix.arch }}" != "x64" ]; then
+            bash build/toolchain/setup_toolchain.sh ${{ matrix.arch }}
           fi
 
       - name: Save toolchain (${{ matrix.name }})
