@@ -37,6 +37,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import smoke_test as s  # noqa: E402
 
 IDLE = "--idle_timeout_seconds=10"
+# INFO and up to the log, for the reason each connection and tunnel closed.
+VERBOSE = "--stderrthreshold=0"
 UDP_BASE, LOCAL_BASE = 24300, 24400
 
 
@@ -195,12 +197,14 @@ def describe(result):
 class Pair:
     def __init__(self, h, n):
         self.udp, self.local = UDP_BASE + n, LOCAL_BASE + n
+        self.logs = [os.path.join(h.log_dir, f"clock-{side}{n}.log")
+                     for side in ("server", "client")]
         self.server = h.start([h.bin.server, f"--listen=127.0.0.1:{self.udp}",
-                               f"--target=127.0.0.1:{s.ECHO_PORT}", s.KEY, IDLE],
-                              f"clock-server{n}.log")
+                               f"--target=127.0.0.1:{s.ECHO_PORT}", s.KEY, IDLE,
+                               VERBOSE], f"clock-server{n}.log")
         self.client = h.start([h.bin.client, f"--local=127.0.0.1:{self.local}",
-                               f"--remote=127.0.0.1:{self.udp}", s.KEY, IDLE],
-                              f"clock-client{n}.log")
+                               f"--remote=127.0.0.1:{self.udp}", s.KEY, IDLE,
+                               VERBOSE], f"clock-client{n}.log")
         time.sleep(2)
         s.check(s.roundtrip(self.local, b"warm up" * 100), f"pair {n} tunnels")
         self.tunnel = Tunnel(self.local)
@@ -209,6 +213,15 @@ class Pair:
 
     def stop(self):
         s.Harness.stop(self.server, self.client)
+        # Why things closed: the connection's QUIC error, the tunnel's reason.
+        for log in self.logs:
+            lines = [line for line in open(log, errors="replace").read().splitlines()
+                     if "closed:" in line or "Closing quictun tunnel" in line
+                     or line[:1] in ("E", "F")]
+            print(f"--- {os.path.basename(log)}: {len(lines)} close/error lines",
+                  flush=True)
+            for line in lines[:8]:
+                print("   " + line[-220:], flush=True)
 
 
 def case_client_asleep(h):
