@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Coverage-gap test: quictun_server's --target refusing the TCP connect
-(ECONNREFUSED), exercising QuictunServerConnection::ConnectComplete()'s
-failure branch -- confirmed via llvm-cov to have zero coverage from the
-rest of the suite, since every existing test's --target is a real,
-already-listening chaos_target.py. A real deployment hits this whenever
+"""quictun_server's --target refusing the TCP connect (ECONNREFUSED),
+exercising QuictunServerConnection::ConnectComplete()'s failure branch,
+which no other test in the suite reaches: every other test's --target is a
+real, already-listening chaos_target.py. A real deployment hits this whenever
 the backend service quictun_server tunnels to is down, restarting, or
 simply hasn't started listening yet -- a completely ordinary operational
 condition, not an edge case.

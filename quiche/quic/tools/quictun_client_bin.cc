@@ -8,7 +8,6 @@
 //
 // Usage: quictun_client --local=[::]:12948 --remote=<server-ip>:4433 --key='shared secret'
 
-#include <csignal>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -90,28 +89,11 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "sender does not declare loss under that much reordering anyway. Takes "
     "effect on the receiving end only, so this is a client-side setting.");
 
-#ifdef QUICTUN_COVERAGE_BUILD
-// See quictun_server_bin.cc's identical block for why this exists --
-// coverage-instrumented builds only, absent from every normal build.
-extern "C" int __llvm_profile_write_file(void);
-void FlushCoverageAndExit(int /*signum*/) {
-  __llvm_profile_write_file();
-  std::_Exit(0);
-}
-#endif
-
 int main(int argc, char* argv[]) {
   if (absl::Status status = quic::InitQuictunPlatform(); !status.ok()) {
     std::cerr << status << std::endl;
     return 1;
   }
-#ifdef QUICTUN_COVERAGE_BUILD
-  signal(SIGTERM, FlushCoverageAndExit);
-#if defined(_WIN32)
-  // Windows has no SIGTERM to send; testing/smoke sends CTRL_BREAK_EVENT.
-  signal(SIGBREAK, FlushCoverageAndExit);
-#endif
-#endif
   // Before anything else, including flag parsing: --help/--helpfull exit
   // from inside QuicheParseCommandLineFlags() below without ever reaching
   // PrintQuictunStartupBanner() (which needs parsed flags anyway), and

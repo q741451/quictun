@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage-gap test: connection pool slot lifecycle -- removal
+"""Connection pool slot lifecycle -- removal
 (auto-rebuild after a pooled connection's path silently dies),
 allocation (round-robin is genuinely deterministic-fair across slots),
 and the "dry queue" consequence of that same determinism (a new TCP can

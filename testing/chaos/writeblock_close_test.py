@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage-gap test: a connection that closes while it is still write
+"""A connection that closes while it is still write
 blocked.
 
 The driver's blocked-writer list holds a raw QuicBlockedWriterInterface*

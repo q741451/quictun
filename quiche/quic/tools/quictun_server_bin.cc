@@ -8,7 +8,6 @@
 //
 // Usage: quictun_server --listen=[::]:4433 --target=127.0.0.1:12948 --key='shared secret'
 
-#include <csignal>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -62,37 +61,11 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "of forged connection attempts. Default (5000) is meant to be generous "
     "relative to any realistic legitimate load.");
 
-#ifdef QUICTUN_COVERAGE_BUILD
-// Coverage-instrumented builds only (-DQUICTUN_COVERAGE_BUILD, alongside
-// -fprofile-instr-generate) -- absent, and this whole block does not exist,
-// in every normal build. The profile runtime writes its counts at exit(),
-// which quictun_server never reaches: its event loop below runs until
-// something stops it, and a test harness stops it with SIGTERM (or
-// CTRL_BREAK_EVENT on Windows), which would end it with no profile written.
-// -fprofile-continuous does not help: it works by adding %c to the default
-// file name, and the harness's LLVM_PROFILE_FILE replaces that name.
-// __llvm_profile_write_file() is compiler-rt's profiling runtime, only
-// linked in when built with -fprofile-instr-generate, hence this being
-// gated on the same macro rather than always declared.
-extern "C" int __llvm_profile_write_file(void);
-void FlushCoverageAndExit(int /*signum*/) {
-  __llvm_profile_write_file();
-  std::_Exit(0);
-}
-#endif
-
 int main(int argc, char* argv[]) {
   if (absl::Status status = quic::InitQuictunPlatform(); !status.ok()) {
     std::cerr << status << std::endl;
     return 1;
   }
-#ifdef QUICTUN_COVERAGE_BUILD
-  signal(SIGTERM, FlushCoverageAndExit);
-#if defined(_WIN32)
-  // Windows has no SIGTERM to send; testing/smoke sends CTRL_BREAK_EVENT.
-  signal(SIGBREAK, FlushCoverageAndExit);
-#endif
-#endif
   // See quictun_client_bin.cc's identical call for why this comes before
   // everything else, including flag parsing.
   quic::PrintQuictunVersionLine("quictun_server");

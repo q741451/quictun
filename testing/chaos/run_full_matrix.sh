@@ -10,22 +10,8 @@
 # var it reads) doesn't exist at all in a plain build, so those runs would
 # silently PASS without ever actually injecting a block. The other tests
 # (server_chaos_test.py, client_chaos_test.py) work fine against either.
-#
-# If COVERAGE_DIR is set in the environment, every quictun_client/
-# quictun_server subprocess spawned by these scripts inherits
-# LLVM_PROFILE_FILE (Python's subprocess.Popen inherits the parent's full
-# environment when its own `env=` isn't overridden, which none of these
-# scripts' start_proc() helpers do) -- requires bazel-bin's quictun_client/
-# quictun_server to already be built with -fprofile-instr-generate
-# -fcoverage-mapping -fprofile-continuous -DQUICTUN_COVERAGE_BUILD (see
-# this directory's README.md).
 set -u
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -n "${COVERAGE_DIR:-}" ]; then
-  mkdir -p "$COVERAGE_DIR"
-  export LLVM_PROFILE_FILE="$COVERAGE_DIR/coverage-%p.profraw"
-  echo "COVERAGE_DIR set -- LLVM_PROFILE_FILE=$LLVM_PROFILE_FILE"
-fi
 CONDITIONS="clean quic_bad client_tcp_bad server_tcp_bad combo_all_bad"
 RESULTS="${MATRIX_RESULTS:-/tmp/quictun_matrix_results.txt}"
 > "$RESULTS"
@@ -189,10 +175,9 @@ for side in client server both; do
   echo "exit=$? for writeblock_fault_test.py --side=$side" | tee -a "$RESULTS"
 done
 
-# Same, but with --udp_gso (QuicGsoBatchWriter) -- coverage showed this
-# whole path, including RearmOnBlockPacketWriter's Flush()-based block
-# detection, was never exercised by anything above. Then with --so_txtime
-# on top, which batches differently.
+# Same, but with --udp_gso (QuicGsoBatchWriter), whose path, including
+# RearmOnBlockPacketWriter's Flush()-based block detection, nothing above
+# exercises. Then with --so_txtime on top, which batches differently.
 for gso in "--udp-gso" "--udp-gso --so-txtime"; do
   echo "=== writeblock_fault_test.py --side=both $gso ===" | tee -a "$RESULTS"
   python3 -u writeblock_fault_test.py --side=both $gso >> "$RESULTS" 2>&1
@@ -221,9 +206,9 @@ echo "=== stalled_timeout_test.py ===" | tee -a "$RESULTS"
 python3 -u stalled_timeout_test.py >> "$RESULTS" 2>&1
 echo "exit=$? for stalled_timeout_test.py" | tee -a "$RESULTS"
 
-# --target refusing the TCP connect (ECONNREFUSED) -- another coverage gap
-# (QuictunServerConnection::ConnectComplete()'s failure branch), matching
-# the ordinary operational case of the backend service being down.
+# --target refusing the TCP connect (ECONNREFUSED): ConnectComplete()'s
+# failure branch, which nothing above reaches, and the ordinary operational
+# case of the backend service being down.
 echo "=== target_unreachable_test.py ===" | tee -a "$RESULTS"
 python3 -u target_unreachable_test.py >> "$RESULTS" 2>&1
 echo "exit=$? for target_unreachable_test.py" | tee -a "$RESULTS"

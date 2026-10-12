@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage-gap test: does connection pooling actually pool?
+"""Does connection pooling actually pool?
 
 Every other chaos test that exercises pooling checks that things
 still *work* under pooling (echo correctness, no crash, fd/rss stay

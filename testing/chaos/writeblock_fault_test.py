@@ -154,10 +154,9 @@ def main():
     ap.add_argument("--timeout-s", type=float, default=20.0)
     ap.add_argument("--log-dir", default="/tmp/quictun_chaos_logs")
     # --udp-gso switches the writer under test from QuicDefaultPacketWriter
-    # to QuicGsoBatchWriter -- coverage showed the whole GSO/batch path,
-    # including RearmOnBlockPacketWriter's Flush()-based block detection
-    # (as opposed to WritePacket()-based), was never exercised by any
-    # existing test. FaultInjectingPacketWriter's shared WritePacket()/
+    # to QuicGsoBatchWriter, whose GSO/batch path, including
+    # RearmOnBlockPacketWriter's Flush()-based block detection (as opposed
+    # to WritePacket()-based), no other test exercises. FaultInjectingPacketWriter's shared WritePacket()/
     # Flush() counter (see quictun_connection_factory.cc) is what lets the
     # same --trigger-after budget land on whichever of the two actually
     # reaches the wire Nth, which in batch mode is usually Flush().

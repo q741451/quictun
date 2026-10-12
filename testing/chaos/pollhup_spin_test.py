@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage-gap test: a TCP socket that is registered with the event loop
+"""A TCP socket that is registered with the event loop
 but has nothing armed, whose peer then sends a RST.
 
 poll(2) reports POLLHUP, POLLERR and POLLNVAL whether or not they were

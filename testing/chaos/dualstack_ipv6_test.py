@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Coverage-gap test: quictun_server --listen on an IPv6 dual-stack
-wildcard ([::]) receiving connections from an IPv4 peer -- exercises
-AdaptPeerAddressForListenSocket() in quictun_server_driver.cc, confirmed
-via llvm-cov to have zero coverage from the rest of the suite (every
-other test's --listen is a plain IPv4 127.0.0.1 address).
+"""quictun_server --listen on an IPv6 dual-stack wildcard ([::])
+receiving connections from an IPv4 peer -- exercises
+AdaptPeerAddressForListenSocket() in quictun_server_driver.cc, which no
+other test in the suite reaches (every other test's --listen is a plain
+IPv4 127.0.0.1 address).
 
 Why this path exists at all (see the function's own comment):
 QuicPacketReader normalizes v4-mapped IPv6 peer addresses (e.g.

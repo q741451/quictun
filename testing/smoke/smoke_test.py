@@ -50,7 +50,6 @@ import glob
 import os
 import random
 import re
-import signal
 import socket
 import struct
 import subprocess
@@ -180,12 +179,8 @@ class Harness:
             def preexec():
                 resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
         log = os.path.join(self.log_dir, log_name)
-        # Its own process group on Windows, so stop() can send it
-        # CTRL_BREAK_EVENT without hitting this script too.
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0
         proc = subprocess.Popen(args, stdout=open(log, "w"),
-                                stderr=subprocess.STDOUT, preexec_fn=preexec,
-                                creationflags=flags)
+                                stderr=subprocess.STDOUT, preexec_fn=preexec)
         self.procs.append((proc, log))
         return proc
 
@@ -211,25 +206,10 @@ class Harness:
 
     @staticmethod
     def stop(*procs):
-        """Asks each process to exit (SIGTERM, or CTRL_BREAK_EVENT on
-        Windows), then kills whatever is still running 3s later. A normal
-        build just dies of either; a coverage build (QUICTUN_COVERAGE_BUILD)
-        writes its profile first, which a kill would lose."""
         for proc in procs:
             if proc.poll() is None:
-                try:
-                    if WINDOWS:
-                        proc.send_signal(signal.CTRL_BREAK_EVENT)
-                    else:
-                        proc.terminate()
-                except OSError:
-                    pass
-        for proc in procs:
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+            proc.wait()
 
     def report_logs(self):
         for proc, log in self.procs:

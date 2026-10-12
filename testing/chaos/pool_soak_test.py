@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage-gap test: a slow, sustained leak in the connection-pooling
+"""A slow, sustained leak in the connection-pooling
 machinery (a StreamTcp/StreamTarget entry, a stream_delegates_ entry, an
 alarm never cancelled -- anything that leaks a small, fixed amount per
 stream open/close cycle rather than per test run) wouldn't show up in any

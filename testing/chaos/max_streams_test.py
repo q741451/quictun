@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage-gap test: connection pooling against QUIC's own real,
+"""Connection pooling against QUIC's own real,
 protocol-level max_streams-per-connection ceiling (--max_streams_per_connection,
 quictun_flags.h -- see its own comment).
 

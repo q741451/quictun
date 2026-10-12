@@ -58,25 +58,6 @@ bazel build -c opt --copt=-DQUICTUN_TEST_BUILD \
 
 Not set by CI or any other normal build.
 
-## Coverage
-
-```
-bazel build -c fastbuild \
-    --copt=-fprofile-instr-generate --copt=-fcoverage-mapping --copt=-fprofile-continuous \
-    --copt=-DQUICTUN_COVERAGE_BUILD --copt=-DQUICTUN_TEST_BUILD \
-    --linkopt=-fprofile-instr-generate --linkopt=-fprofile-continuous \
-    //quiche:quictun_client //quiche:quictun_server
-COVERAGE_DIR=/tmp/quictun_coverage ./run_full_matrix.sh
-llvm-profdata merge -sparse /tmp/quictun_coverage/*.profraw -o merged.profdata
-llvm-cov report bazel-bin/quiche/quictun_client -object=bazel-bin/quiche/quictun_server -instr-profile=merged.profdata
-```
-
-`-c fastbuild`, not `-c opt`: `-c opt` defines `NDEBUG`, which
-downgrades `QUIC_BUG`/`QUICHE_BUG` checks to non-fatal logs, masking
-real invariant violations. This can occasionally hit an unrelated
-pre-existing upstream QUICHE assertion under `-c fastbuild` -- not a
-quictun regression, and not something the shipped `-c opt` build hits.
-
 ## Before pushing
 
 Run the full matrix, confirm everything passes.
