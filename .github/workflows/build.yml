@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ quictun ]
   workflow_dispatch:
+    inputs:
+      smoke:
+        description: Also run testing/smoke on Windows, macOS and Linux runners
+        type: boolean
+        default: false
   # Lets release.yml call this workflow's own build job directly (same
   # matrix, same toolchain, same artifacts) instead of duplicating it --
   # a release is built exactly the same way as every regular CI run.
@@ -504,3 +509,51 @@ jobs:
           name: quictun-windows-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
+
+  # Off unless asked for: run Build by hand with "smoke" ticked. Runs the
+  # binaries this run just built on the systems they are for -- the build
+  # jobs above can only check how they are linked -- with Linux as the
+  # reference for what QuicPollEventLoop expects from poll(). See
+  # testing/smoke/README.md. Both macOS architectures, and Windows twice:
+  # Server 2022 is the closest image to the oldest Windows quictun runs on
+  # (10 2004), Server 2025 the newest.
+  smoke:
+    name: Smoke (${{ matrix.runner }})
+    if: ${{ inputs.smoke }}
+    needs: [build-linux, build-macos, build-windows]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            artifact: quictun-linux-x86_64
+          - runner: macos-15
+            artifact: quictun-macos-arm64
+          - runner: macos-15-intel
+            artifact: quictun-macos-x86_64
+          - runner: windows-2022
+            artifact: quictun-windows-x86_64
+          - runner: windows-2025
+            artifact: quictun-windows-x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download ${{ matrix.artifact }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: bin
+
+      - name: Probe poll() and select()
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" testing/smoke/poll_probe.py
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" testing/smoke/smoke_test.py bin
