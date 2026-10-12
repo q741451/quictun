@@ -4,7 +4,8 @@
 # The compilers are not in it: build/toolchain/setup_toolchain*.sh download
 # Chromium's pinned clang and build musl and libc++ with it. What this image
 # fixes is everything around them that the build still takes from the
-# system -- make for musl; cmake, ninja and python3 for the LLVM runtimes;
+# system -- make for musl; cmake, ninja and python3 for the LLVM runtimes,
+# and binutils' objdump for compiler-rt's configuration of crtbegin.o;
 # file, xz and curl in the scripts and CI steps; bash and coreutils under
 # Bazel's genrules -- which used to come from GitHub's runner image and
 # change whenever it did. The base is pinned by digest and the packages by
@@ -42,5 +43,5 @@ RUN set -eux; \
 		> /etc/apt/apt.conf.d/99snapshot-tls; \
 	apt-get update; \
 	apt-get install -y --no-install-recommends \
-		ca-certificates curl xz-utils file make cmake ninja-build python3; \
+		ca-certificates curl xz-utils file make cmake ninja-build python3 binutils; \
 	rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99snapshot-tls

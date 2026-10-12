@@ -279,6 +279,18 @@ build_compiler_rt() {
   [ -e "$out/libclang_rt.builtins.a" ] && return 0
 
   echo "== Building compiler-rt builtins for $MUSL_TARGET =="
+  # COMPILER_RT_BUILD_CRT decides between .init_array and the legacy
+  # .ctors/.dtors for crtbegin.o by running `objdump -h` on a test object
+  # (compiler-rt/cmake/Modules/CheckSectionExists.cmake), and with no objdump
+  # the check fails silently and picks .ctors. Chromium's clang package ships
+  # no llvm-objdump, so it is the host's, named here rather than left to
+  # CMake's PATH search; crtbegin.o is checked after the build as well.
+  local objdump
+  objdump=$(command -v objdump) || {
+    echo "objdump not found: install binutils (compiler-rt's crtbegin.o" >&2
+    echo "configuration needs it, see the comment above)." >&2
+    exit 1
+  }
   local build_dir="$BUILD_ROOT/compiler-rt-$ARCH"
   # cmake -B would create this itself, but the log redirections below are
   # opened by the shell before cmake ever runs.
@@ -290,6 +302,7 @@ build_compiler_rt() {
     -DCMAKE_ASM_COMPILER="$CLANG" \
     -DCMAKE_AR="$CLANG_DIR/bin/llvm-ar" \
     -DCMAKE_RANLIB="$CLANG_DIR/bin/llvm-ranlib" \
+    -DCMAKE_OBJDUMP="$objdump" \
     -DCMAKE_C_COMPILER_TARGET="$MUSL_TARGET" \
     -DCMAKE_CXX_COMPILER_TARGET="$MUSL_TARGET" \
     -DCMAKE_ASM_COMPILER_TARGET="$MUSL_TARGET" \
@@ -322,6 +335,13 @@ build_compiler_rt() {
     echo "Its arch is most likely not in compiler-rt's supported list --" >&2
     echo "check the first triple component against ALL_BUILTIN_SUPPORTED_ARCH" >&2
     echo "in compiler-rt/cmake/builtin-config-ix.cmake." >&2
+    exit 1
+  fi
+
+  if ! "$CLANG_DIR/bin/llvm-readelf" -S -W "$build_dir"/lib/linux/clang_rt.crtbegin-*.o |
+       grep -q '\.init_array'; then
+    echo "compiler-rt built a crtbegin.o for $MUSL_TARGET without .init_array" >&2
+    echo "(COMPILER_RT_HAS_INITFINI_ARRAY came out false; see $build_dir/cmake.log)." >&2
     exit 1
   fi
 
