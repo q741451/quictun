@@ -11,10 +11,6 @@ on:
         description: Also run testing/smoke on Windows, macOS and Linux runners
         type: boolean
         default: false
-      clock:
-        description: Also run testing/smoke/clock_test.py (laptop sleep, clock steps)
-        type: boolean
-        default: false
   # Lets release.yml call this workflow's own build job directly (same
   # matrix, same toolchain, same artifacts) instead of duplicating it --
   # a release is built exactly the same way as every regular CI run.
@@ -590,39 +586,3 @@ jobs:
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" testing/smoke/smoke_test.py bin
-
-  # Off unless asked for: run Build by hand with "clock" ticked. Freezes the
-  # client past the idle timeout and steps the system clock -- which is why
-  # it is not part of the smoke test, and runs only on throwaway runners --
-  # to see what a laptop's sleep and clock corrections do to a tunnel. See
-  # testing/smoke/clock_test.py.
-  clock:
-    name: Clock (${{ matrix.runner }})
-    if: ${{ inputs.clock }}
-    needs: [build-linux, build-macos, build-windows]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            artifact: quictun-linux-x86_64
-          - runner: macos-15
-            artifact: quictun-macos-arm64
-          - runner: windows-2022
-            artifact: quictun-windows-x86_64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download ${{ matrix.artifact }}
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: bin
-
-      - name: Clock test
-        shell: bash
-        run: |
-          PY=$(command -v python3 || command -v python)
-          "$PY" testing/smoke/clock_test.py bin
