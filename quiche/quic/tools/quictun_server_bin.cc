@@ -25,6 +25,7 @@
 #include "quiche/quic/platform/api/quic_socket_address.h"
 #include "quiche/quic/tools/quictun_connection_factory.h"
 #include "quiche/quic/tools/quictun_flags.h"
+#include "quiche/quic/tools/quictun_platform.h"
 #include "quiche/quic/tools/quictun_server_driver.h"
 #include "quiche/common/platform/api/quiche_command_line_flags.h"
 #include "quiche/common/platform/api/quiche_system_event_loop.h"
@@ -80,16 +81,10 @@ void FlushCoverageAndExit(int /*signum*/) {
 #endif
 
 int main(int argc, char* argv[]) {
-  // quic::socket_api::Send() (quic/core/io/socket.cc) is a bare ::send()
-  // with no MSG_NOSIGNAL, so writing to the local --target TCP socket
-  // after its peer already reset the connection -- routine whenever a
-  // download being tunneled gets cancelled -- delivers SIGPIPE. Left at
-  // its default disposition, that kills the whole process instantly with
-  // no log line and no crash report, instead of the EPIPE status that
-  // should have just closed that one tunnel (QuictunTunnel::SendComplete()
-  // already handles a failed send correctly -- this is the only piece
-  // that was missing).
-  signal(SIGPIPE, SIG_IGN);
+  if (absl::Status status = quic::InitQuictunPlatform(); !status.ok()) {
+    std::cerr << status << std::endl;
+    return 1;
+  }
 #ifdef QUICTUN_COVERAGE_BUILD
   signal(SIGTERM, FlushCoverageAndExit);
 #endif

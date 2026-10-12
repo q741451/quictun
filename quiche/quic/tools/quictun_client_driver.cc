@@ -24,6 +24,31 @@
 
 namespace quic {
 
+namespace {
+
+// How long AcceptLoop() stops accepting after running out of file
+// descriptors; nginx's accept_mutex_delay defaults to the same.
+constexpr QuicTime::Delta kAcceptRetryDelay =
+    QuicTime::Delta::FromMilliseconds(500);
+
+class AcceptRetryAlarmDelegate : public QuicAlarm::DelegateWithoutContext {
+ public:
+  AcceptRetryAlarmDelegate(QuicEventLoop* event_loop, SocketFd listen_fd)
+      : event_loop_(event_loop), listen_fd_(listen_fd) {}
+  // Delivers a readable event to the listener whether or not the loop is
+  // edge-triggered; OnSocketEvent() then accepts and rearms as usual.
+  void OnAlarm() override {
+    (void)event_loop_->ArtificiallyNotifyEvent(listen_fd_,
+                                               kSocketEventReadable);
+  }
+
+ private:
+  QuicEventLoop* const event_loop_;
+  const SocketFd listen_fd_;
+};
+
+}  // namespace
+
 QuictunClientDriver::QuictunClientDriver(QuicEventLoop* event_loop,
                                          const QuicSocketAddress& local_address,
                                          const QuicSocketAddress& remote_address,
@@ -269,8 +294,7 @@ void QuictunClientDriver::OnSocketEvent(QuicEventLoop* /*event_loop*/,
     return;
   }
   if (events & kSocketEventReadable) {
-    AcceptLoop();
-    if (!event_loop_->SupportsEdgeTriggered()) {
+    if (AcceptLoop() && !event_loop_->SupportsEdgeTriggered()) {
       event_loop_->RearmSocket(*listen_fd_, kSocketEventReadable);
     }
   }
@@ -334,15 +358,36 @@ QuictunClientDriver::CreateNewConnection(size_t socket_index) {
   return shared;
 }
 
-void QuictunClientDriver::AcceptLoop() {
+bool QuictunClientDriver::AcceptLoop() {
   while (true) {
     absl::StatusOr<socket_api::AcceptResult> accepted =
         socket_api::Accept(*listen_fd_, /*blocking=*/false);
     if (!accepted.ok()) {
+      if (absl::IsResourceExhausted(accepted.status())) {
+        // Out of file descriptors (EMFILE/ENFILE) or socket buffers. The
+        // connection stays in the listen queue, so the listener stays
+        // readable: polling it again now would fail the same way at once,
+        // and again, forever. Stop accepting for kAcceptRetryDelay instead,
+        // as nginx does (ngx_event_accept.c, ngx_disable_accept_events()).
+        // Meanwhile new connections wait in the queue, the kernel refuses
+        // them once it is full, and every existing tunnel carries on.
+        QUIC_LOG_EVERY_N_SEC(ERROR, 10)
+            << "Accept() failed: " << accepted.status()
+            << "; not accepting new connections for "
+            << kAcceptRetryDelay.ToMilliseconds()
+            << "ms. Raise the open file limit if this persists.";
+        if (accept_retry_alarm_ == nullptr) {
+          accept_retry_alarm_.reset(alarm_factory_->CreateAlarm(
+              new AcceptRetryAlarmDelegate(event_loop_, *listen_fd_)));
+        }
+        accept_retry_alarm_->Set(event_loop_->GetClock()->ApproximateNow() +
+                                 kAcceptRetryDelay);
+        return false;
+      }
       if (!absl::IsUnavailable(accepted.status())) {
         QUIC_LOG(WARNING) << "Accept() failed: " << accepted.status();
       }
-      return;
+      return true;
     }
 
     // --transparent: capture the destination an external iptables/nftables

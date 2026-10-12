@@ -15,6 +15,7 @@
 #include "quiche/quic/core/deterministic_connection_id_generator.h"
 #include "quiche/quic/core/io/quic_event_loop.h"
 #include "quiche/quic/core/io/socket.h"
+#include "quiche/quic/core/quic_alarm.h"
 #include "quiche/quic/core/quic_alarm_factory.h"
 #include "quiche/quic/core/quic_config.h"
 #include "quiche/quic/core/quic_default_connection_helper.h"
@@ -91,7 +92,10 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener,
 
 
  private:
-  void AcceptLoop();
+  // Accepts every connection waiting on listen_fd_. Returns false when it
+  // stopped because the process is out of file descriptors, having armed
+  // accept_retry_alarm_ to try again; the listener must not be rearmed then.
+  bool AcceptLoop();
   void RemoveConnection(QuictunClientConnection* connection,
                         size_t socket_index);
 
@@ -168,6 +172,10 @@ class QUICHE_EXPORT QuictunClientDriver : public QuicSocketEventListener,
 
   QuicDefaultConnectionHelper helper_;
   std::unique_ptr<QuicAlarmFactory> alarm_factory_;
+  // Resumes accepting after AcceptLoop() ran out of file descriptors.
+  // Created on first use; declared after alarm_factory_ so it is destroyed
+  // first.
+  std::unique_ptr<QuicAlarm> accept_retry_alarm_;
   DeterministicConnectionIdGenerator connection_id_generator_;
   QuicConfig config_template_;
   QuicServerId server_id_;

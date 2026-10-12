@@ -182,6 +182,8 @@ Differences from Linux:
   that once with `xattr -d com.apple.quarantine quictun_*-macos-*`.
 - To keep one running, use a launchd agent; a laptop that sleeps drops its
   tunnels like any other network connection.
+- macOS starts processes with a limit of 256 open files; both binaries raise
+  it to the most the system allows at startup, since every tunnel holds one.
 
 ## Building from source
 

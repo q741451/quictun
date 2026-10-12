@@ -273,6 +273,14 @@ void QuictunTunnel::ConnectComplete(absl::Status status) {
     // returns; masque_tcp_client_bin just logs and stops), which isn't an
     // option here -- everything else Close() does is still needed.
     socket_disconnected_ = true;
+    if (absl::IsResourceExhausted(status)) {
+      // Out of file descriptors (EMFILE/ENFILE): every tunnel fails like
+      // this until one is free, which "target connect failed" alone would
+      // not tell apart from a target that is down.
+      QUICHE_LOG_EVERY_N_SEC(ERROR, 10)
+          << "Connecting to the target failed: " << status
+          << ". Raise the open file limit if this persists.";
+    }
     Close("target connect failed", /*reset_stream=*/true);
     return;
   }

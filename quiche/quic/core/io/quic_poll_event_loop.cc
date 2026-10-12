@@ -8,12 +8,15 @@
 #include <cerrno>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 
 #include "absl/base/no_destructor.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "quiche/quic/core/io/quic_event_loop.h"
 #include "quiche/quic/core/io/socket.h"
@@ -161,6 +164,15 @@ int QuicPollEventLoop::PollWithRetries(absl::Span<pollfd> fds,
     poll_result =
         PollSyscall(fds.data(), fds.size(), static_cast<int>(timeout_ms));
 
+    // Nothing is dispatched after a failed poll(), and nothing about the next
+    // call would differ, so the loop would spin without a trace. The ways it
+    // can fail besides EINTR (EFAULT, EINVAL, ENOMEM) are a bug or a system
+    // out of memory; neither is something to carry on through.
+    if (poll_result < 0 && errno != EINTR) {
+      const int error = errno;
+      QUICHE_LOG(FATAL) << "poll() failed on " << fds.size()
+                        << " sockets: " << strerror(error);
+    }
     // Stop if there are events or a non-EINTR error.
     bool done = poll_result > 0 || (poll_result < 0 && errno != EINTR);
     if (done) {
@@ -222,6 +234,27 @@ void QuicPollEventLoop::ProcessIoEvents(QuicTime start_time,
     DispatchIoEvent(ready_list, pollfds[i].fd, pollfds[i].revents);
   }
   has_artificial_events_pending_ = false;
+
+  if (poll_result > 0 && ready_list.empty()) {
+    // poll() returned, but only with conditions nobody was waiting for, such
+    // as an unsubscribed POLLERR (6990cb05d's 100% CPU). Such a condition
+    // stays until something consumes it or the socket is closed, so the next
+    // poll() would return at once too and the loop spin. Wait 1ms first
+    // instead: whoever is waiting on the socket is still woken by its own
+    // event, at most 1ms late, and no core is pinned meanwhile. Logged at
+    // ERROR, the lowest level shown by default.
+    for (i = 0; i < polled_count; i++) {
+      if (pollfds[i].revents != 0) {
+        QUICHE_LOG_EVERY_N_SEC(ERROR, 60)
+            << "poll() reported only unrequested events (fd " << pollfds[i].fd
+            << ", events 0x" << std::hex << pollfds[i].events << ", revents 0x"
+            << pollfds[i].revents << std::dec << "); waiting 1ms before the "
+            << "next poll() so that this does not spin";
+        break;
+      }
+    }
+    absl::SleepFor(absl::Milliseconds(1));
+  }
 
   // Actually call all of the callbacks.
   RunReadyCallbacks(ready_list);
