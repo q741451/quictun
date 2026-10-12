@@ -35,7 +35,7 @@ env:
 
 jobs:
   build-linux:
-    name: Build (${{ matrix.name }})
+    name: Build (linux-${{ matrix.name }})
     runs-on: ubuntu-latest
     # Every architecture (including x86_64) uses the same from-scratch,
     # pinned toolchain -- Chromium's own pinned clang, a from-source musl,
@@ -107,7 +107,7 @@ jobs:
       # Restored and saved as separate steps, each save right after the step
       # that fills it: the all-in-one actions/cache only saves when the whole
       # job succeeds.
-      - name: Restore toolchain (${{ matrix.name }})
+      - name: Restore toolchain (linux-${{ matrix.name }})
         id: toolchain-cache
         uses: actions/cache/restore@v4
         with:
@@ -118,9 +118,9 @@ jobs:
           # entirely. Without the headers in the key, regenerating them (a
           # kernel bump via uapi/regenerate.sh) leaves every runner building
           # against the *old* UAPI, silently and with no version to notice.
-          key: toolchain-${{ matrix.name }}-${{ hashFiles('build/toolchain/setup_toolchain.sh', 'build/toolchain/uapi/**') }}
+          key: toolchain-linux-${{ matrix.name }}-${{ hashFiles('build/toolchain/setup_toolchain.sh', 'build/toolchain/uapi/**') }}
 
-      - name: Set up pinned toolchain (${{ matrix.name }})
+      - name: Set up pinned toolchain (linux-${{ matrix.name }})
         run: |
           set -e
           bash build/toolchain/setup_toolchain.sh x64
@@ -128,7 +128,7 @@ jobs:
             bash build/toolchain/setup_toolchain.sh ${{ matrix.arch }}
           fi
 
-      - name: Save toolchain (${{ matrix.name }})
+      - name: Save toolchain (linux-${{ matrix.name }})
         if: steps.toolchain-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
@@ -142,16 +142,16 @@ jobs:
       # own copy (a cache entry can never be overwritten), and restore takes
       # the newest by prefix. Bazel's disk cache is content-addressed, so a
       # copy saved from a failed build still holds only correct outputs.
-      - name: Restore Bazel (${{ matrix.name }})
+      - name: Restore Bazel (linux-${{ matrix.name }})
         uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cache/bazel-${{ matrix.name }}
+            ~/.cache/bazel-linux-${{ matrix.name }}
             ~/.cache/bazelisk
-          key: bazel-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel', 'build/toolchain/toolchain_def.bzl', 'build/toolchain/toolchain_flags.bzl') }}-${{ github.run_id }}
+          key: bazel-linux-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel') }}-${{ github.run_id }}
           restore-keys: |
-            bazel-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel', 'build/toolchain/toolchain_def.bzl', 'build/toolchain/toolchain_flags.bzl') }}-
-            bazel-${{ matrix.name }}-
+            bazel-linux-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel') }}-
+            bazel-linux-${{ matrix.name }}-
 
       - name: Install bazelisk
         run: |
@@ -169,27 +169,29 @@ jobs:
         id: build
         run: |
           set -e
-          nproc
           # See build/regen_quictun_build_timestamp.sh's own comment: this
           # is what makes quictun's startup banner show this actual build's
           # real time rather than a stale one frozen by Bazel's cache.
           ./build/regen_quictun_build_timestamp.sh
-          # .bazelrc already carries the Chromium-aligned default flags
-          # (OPENSSL_SMALL, fno-rtti/exceptions, hidden visibility,
-          # function/data sections, bundled ICU, etc). Only add what's
-          # specific to this CI artifact: static linking + stripped size.
-          # -fno-asynchronous-unwind-tables: .bazelrc already builds with
-          # -fno-exceptions, but the x86-64 psABI still emits .eh_frame for
-          # every function regardless, and nothing here unwinds through it
-          # (no exceptions, no pthread_cancel). Dropping it takes ~300KB off
-          # each binary -- ~7% raw, ~5% after the xz that OpenWrt's squashfs
-          # applies -- with .text byte-identical either way. The cost is that
-          # perf/gdb can no longer walk user-space stacks in release
-          # artifacts, so this is deliberately set here rather than in
-          # .bazelrc: local builds keep full unwind info for debugging.
+          # The toolchain already carries the Chromium-aligned default flags
+          # (build/toolchain/compiler_flags.bzl: no RTTI/exceptions, hidden
+          # visibility, function/data sections) and static linking
+          # (toolchain_flags.bzl), and .bazelrc the rest (OPENSSL_SMALL,
+          # bundled ICU). Only add what's specific to this CI artifact:
+          # stripped size.
+          # -fno-asynchronous-unwind-tables: the toolchain already builds
+          # with -fno-exceptions, but the x86-64 psABI still emits .eh_frame
+          # for every function regardless, and nothing here unwinds through
+          # it (no exceptions, no pthread_cancel). Dropping it takes ~300KB
+          # off each binary -- ~7% raw, ~5% after the xz that OpenWrt's
+          # squashfs applies -- with .text byte-identical either way. The
+          # cost is that perf/gdb can no longer walk user-space stacks in
+          # release artifacts, so this is deliberately set here rather than
+          # in the toolchain: local builds keep full unwind info for
+          # debugging.
           #
           # --disk_cache / --repository_cache: the "Restore Bazel" step above
-          # only restores ~/.cache/bazel-${{ matrix.name }} as a plain
+          # only restores ~/.cache/bazel-linux-${{ matrix.name }} as a plain
           # tarball -- it doesn't make Bazel actually *use* that directory
           # for anything. Without these two flags, Bazel's real action
           # cache lives in its default output_user_root instead (something
@@ -201,21 +203,21 @@ jobs:
           # zero disk-cache hits). Pointing both at the actually-cached
           # directory is what makes the restored tarball mean anything.
           bazel build -c opt \
-            --disk_cache=$HOME/.cache/bazel-${{ matrix.name }}/disk \
-            --repository_cache=$HOME/.cache/bazel-${{ matrix.name }}/repo \
+            --disk_cache=$HOME/.cache/bazel-linux-${{ matrix.name }}/disk \
+            --repository_cache=$HOME/.cache/bazel-linux-${{ matrix.name }}/repo \
             --platforms=//build/toolchain:${{ matrix.platform }} \
             --copt=-fno-asynchronous-unwind-tables \
             --linkopt=-s \
             $TARGETS
 
-      - name: Save Bazel (${{ matrix.name }})
+      - name: Save Bazel (linux-${{ matrix.name }})
         if: always() && steps.build.outcome != 'skipped'
         uses: actions/cache/save@v4
         with:
           path: |
-            ~/.cache/bazel-${{ matrix.name }}
+            ~/.cache/bazel-linux-${{ matrix.name }}
             ~/.cache/bazelisk
-          key: bazel-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/BUILD.bazel', 'build/toolchain/toolchain_def.bzl', 'build/toolchain/toolchain_flags.bzl') }}-${{ github.run_id }}
+          key: bazel-linux-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel') }}-${{ github.run_id }}
 
       - name: Stage artifacts
         run: |
@@ -230,6 +232,7 @@ jobs:
             file "$f"
             file "$f" | grep -q '${{ matrix.file_match }}' || { echo "::error::$f is not a ${{ matrix.name }} binary"; exit 1; }
             file "$f" | grep -qE "statically linked|static-pie linked" || { echo "::error::$f is not statically linked"; exit 1; }
+            ls -l "$f"
           done
 
       - name: Upload artifacts
@@ -311,9 +314,9 @@ jobs:
           path: |
             ~/.cache/bazel-macos-${{ matrix.name }}
             ~/.cache/bazelisk
-          key: bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/macos/BUILD.bazel', 'build/toolchain/macos/toolchain_def.bzl') }}-${{ github.run_id }}
+          key: bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/compiler_flags.bzl', 'build/toolchain/macos/*.bzl', 'build/toolchain/macos/BUILD.bazel') }}-${{ github.run_id }}
           restore-keys: |
-            bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/macos/BUILD.bazel', 'build/toolchain/macos/toolchain_def.bzl') }}-
+            bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/compiler_flags.bzl', 'build/toolchain/macos/*.bzl', 'build/toolchain/macos/BUILD.bazel') }}-
             bazel-macos-${{ matrix.name }}-
 
       - name: Install bazelisk
@@ -356,7 +359,7 @@ jobs:
           path: |
             ~/.cache/bazel-macos-${{ matrix.name }}
             ~/.cache/bazelisk
-          key: bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/macos/BUILD.bazel', 'build/toolchain/macos/toolchain_def.bzl') }}-${{ github.run_id }}
+          key: bazel-macos-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/compiler_flags.bzl', 'build/toolchain/macos/*.bzl', 'build/toolchain/macos/BUILD.bazel') }}-${{ github.run_id }}
 
       - name: Stage artifacts
         run: |
@@ -404,7 +407,7 @@ jobs:
           - name: x86_64
             arch: x64
             platform: windows_x64
-            machine: "x86-64"
+            file_match: "PE32+ executable (console) x86-64"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -494,7 +497,7 @@ jobs:
           done
           for f in dist/*; do
             file "$f"
-            file "$f" | grep -q 'PE32+ executable (console) ${{ matrix.machine }}' || { echo "::error::$f is not a ${{ matrix.name }} console executable"; exit 1; }
+            file "$f" | grep -q '${{ matrix.file_match }}' || { echo "::error::$f is not a ${{ matrix.name }} console executable"; exit 1; }
             dlls=$($READOBJ --coff-imports "$f" | awk '/Name:/{print toupper($2)}' | sort -u)
             echo "$dlls"
             if echo "$dlls" | grep -E '^(VCRUNTIME|MSVCP|UCRTBASE|API-MS-WIN-CRT-|LIBC\+\+)'; then
