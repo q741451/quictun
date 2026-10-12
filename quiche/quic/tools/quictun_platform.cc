@@ -10,6 +10,8 @@
 #include <shellapi.h>
 #include <timeapi.h>
 
+#include <cstdio>
+
 #include "absl/strings/str_cat.h"
 #else
 #include <cerrno>
@@ -133,6 +135,17 @@ absl::Status RaiseOpenFileLimit() {
 
 #if defined(_WIN32)
 absl::Status InitQuictunPlatform() {
+  // Unbuffered, as stderr is on Linux and macOS. C requires stderr not to be
+  // fully buffered (C99 7.19.3p7), but Microsoft's CRT fully buffers it once
+  // it is redirected to a file, flushing only when the buffer fills
+  // (docs.microsoft.com/cpp/c-runtime-library/stream-i-o). abseil flushes
+  // after WARNING and up only (absl/log/internal/globals.cc says the same),
+  // so INFO lines and the std::cerr startup banner reached a log file late,
+  // and the last of them never if the process was ended (CTRL_BREAK_EVENT
+  // and console close both end it in ExitProcess(), which does not flush).
+  if (setvbuf(stderr, nullptr, _IONBF, 0) != 0) {
+    return absl::InternalError("setvbuf(stderr) failed");
+  }
   // Winsock must be started before any socket call; QUICHE leaves that to
   // the program, as msquic does in its own datapath setup.
   WSADATA wsa_data;
