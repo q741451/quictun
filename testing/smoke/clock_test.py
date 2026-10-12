@@ -11,6 +11,7 @@ quictun's QUIC timers run on the wall clock (QuicDefaultClock). Cases:
 
   client asleep            the client frozen past both idle timeouts, the
                            server left running: the lid of a laptop closed
+  reader paused 5s         the control: a transfer whose reader stops for 5s
   clock +2h                the clock jumps ahead, as it does across a sleep
   clock -2s                a small step back, as a time sync after waking
   clock -10min             a large step back
@@ -124,54 +125,61 @@ class Tunnel:
 BULK = os.urandom(1 << 20)
 
 
-def bulk(local, megabytes, step=None, give_up_after=90):
+def bulk(local, megabytes, step=None, pause=0, give_up_after=90):
     """Echoes `megabytes` MiB through a new tunnel, sending and reading at
-    once; if `step` is given, calls it 0.5s in, mid-transfer. Returns
-    (seconds to finish, or None if it did not, longest gap between two
-    received chunks)."""
+    once. 0.5s in, mid-transfer, calls `step` on a thread of its own -- the
+    reading goes on meanwhile, so a slow step (a PowerShell start on Windows)
+    is not a pause in reading -- or, with `pause`, stops reading for that
+    many seconds instead. Returns (seconds to finish or None, longest gap
+    between two received chunks, how the read ended)."""
+    import threading
     conn = socket.create_connection(("127.0.0.1", local), timeout=give_up_after)
+    # A socket object of its own for the sender: a timeout is per object,
+    # and the sender must block for as long as the echo takes to drain.
+    sender = conn.dup()
+    sender.settimeout(None)
     total = megabytes << 20
 
     def send():
         try:
             for _ in range(megabytes):
-                conn.sendall(BULK)
+                sender.sendall(BULK)
         except OSError:
             pass
 
-    import threading
     threading.Thread(target=send, daemon=True).start()
+    stepper = threading.Timer(0.5, step) if step else None
+    if stepper:
+        stepper.start()
     start = last = time.monotonic()
-    got, gap, stepped = 0, 0.0, step is None
+    got, gap, paused, ended = 0, 0.0, not pause, "complete"
     try:
         while got < total:
-            if not stepped and time.monotonic() - start >= 0.5:
-                step()
-                stepped = True
-            conn.settimeout(0.2 if not stepped else give_up_after)
-            try:
-                data = conn.recv(1 << 20)
-            except socket.timeout:
-                continue
+            if not paused and time.monotonic() - start >= 0.5:
+                time.sleep(pause)
+                paused = True
+            data = conn.recv(1 << 20)
             if not data:
+                ended = "closed by the tunnel"
                 break
             now = time.monotonic()
             gap = max(gap, now - last)
             last = now
             got += len(data)
-    except OSError:
-        pass
+    except OSError as e:
+        ended = repr(e)
     finally:
-        if not stepped:
-            step()
+        if stepper:
+            stepper.join()
+        sender.close()
         conn.close()
-    return (time.monotonic() - start if got == total else None), gap
+    return (time.monotonic() - start if got == total else None), gap, ended
 
 
 def describe_bulk(result):
-    seconds, gap = result
+    seconds, gap, ended = result
     return (f"done in {seconds:.1f}s" if seconds is not None else
-            "did not finish") + f", longest stall {gap:.2f}s"
+            f"did not finish: {ended}") + f", longest stall {gap:.2f}s"
 
 
 def first_new_tunnel(local, give_up_after):
@@ -238,6 +246,18 @@ def case_client_asleep(h):
     p.stop()
 
 
+def case_reader_pause(h, n):
+    """The control for the clock cases: the same transfer, with reading
+    stopped for 5s instead of the clock moved."""
+    p = Pair(h, n)
+    during = bulk(p.local, 256, pause=5)
+    print(f"reader paused 5s: 256 MiB: {describe_bulk(during)}", flush=True)
+    s.check(during[0] is not None,
+            f"reader paused 5s: the transfer finishes ({describe_bulk(during)})")
+    s.check_no_spin("reader paused 5s", [p.server, p.client])
+    p.stop()
+
+
 def case_clock_step(h, n, seconds, label):
     p = Pair(h, n)
     print(f"{label}: 256 MiB before the step: {describe_bulk(bulk(p.local, 256))}",
@@ -266,6 +286,7 @@ def main():
     stop_time_sync()
     cases = [
         lambda: case_client_asleep(h),
+        lambda: case_reader_pause(h, 4),
         lambda: case_clock_step(h, 1, 2 * 3600, "clock +2h"),
         lambda: case_clock_step(h, 2, -2, "clock -2s"),
         lambda: case_clock_step(h, 3, -600, "clock -10min"),
