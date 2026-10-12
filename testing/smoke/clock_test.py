@@ -16,7 +16,10 @@ quictun's QUIC timers run on the wall clock (QuicDefaultClock). Cases:
   clock -10min             a large step back
 
 Each case reports what happens to a tunnel opened before the event (closed,
-or answering after how long) and how soon a new tunnel works; the CPU and
+or answering after how long) and how soon a new tunnel works; the clock
+cases also echo 256 MiB once before the step and once across it, the step
+taken 0.5s into the transfer, so that pacing and acknowledgement timers are
+running when the clock moves. The CPU and
 liveness checks are the ones smoke_test.py applies. The idle timeout is cut
 to 10s (default 60s) to keep the run short. Every case stops its processes
 before putting the clock back, since that is a jump of its own.
@@ -116,6 +119,59 @@ class Tunnel:
             return None
 
 
+BULK = os.urandom(1 << 20)
+
+
+def bulk(local, megabytes, step=None, give_up_after=90):
+    """Echoes `megabytes` MiB through a new tunnel, sending and reading at
+    once; if `step` is given, calls it 0.5s in, mid-transfer. Returns
+    (seconds to finish, or None if it did not, longest gap between two
+    received chunks)."""
+    conn = socket.create_connection(("127.0.0.1", local), timeout=give_up_after)
+    total = megabytes << 20
+
+    def send():
+        try:
+            for _ in range(megabytes):
+                conn.sendall(BULK)
+        except OSError:
+            pass
+
+    import threading
+    threading.Thread(target=send, daemon=True).start()
+    start = last = time.monotonic()
+    got, gap, stepped = 0, 0.0, step is None
+    try:
+        while got < total:
+            if not stepped and time.monotonic() - start >= 0.5:
+                step()
+                stepped = True
+            conn.settimeout(0.2 if not stepped else give_up_after)
+            try:
+                data = conn.recv(1 << 20)
+            except socket.timeout:
+                continue
+            if not data:
+                break
+            now = time.monotonic()
+            gap = max(gap, now - last)
+            last = now
+            got += len(data)
+    except OSError:
+        pass
+    finally:
+        if not stepped:
+            step()
+        conn.close()
+    return (time.monotonic() - start if got == total else None), gap
+
+
+def describe_bulk(result):
+    seconds, gap = result
+    return (f"done in {seconds:.1f}s" if seconds is not None else
+            "did not finish") + f", longest stall {gap:.2f}s"
+
+
 def first_new_tunnel(local, give_up_after):
     """Seconds until a newly opened tunnel echoed a payload, or None."""
     start = time.monotonic()
@@ -171,7 +227,12 @@ def case_client_asleep(h):
 
 def case_clock_step(h, n, seconds, label):
     p = Pair(h, n)
-    set_clock_by(seconds)
+    print(f"{label}: 256 MiB before the step: {describe_bulk(bulk(p.local, 256))}",
+          flush=True)
+    during = bulk(p.local, 256, step=lambda: set_clock_by(seconds))
+    print(f"{label}: 256 MiB across the step: {describe_bulk(during)}", flush=True)
+    s.check(during[0] is not None,
+            f"{label}: a transfer under way finishes ({describe_bulk(during)})")
     try:
         old = p.tunnel.ping(30)
         print(f"{label}: tunnel opened before: {describe(old)}", flush=True)
