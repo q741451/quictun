@@ -54,10 +54,6 @@ build:macos --features=-macos_minimum_os
 build:macos --host_features=-macos_minimum_os
 
 build:windows --extra_toolchains=//build/toolchain/windows:x64_cc_toolchain
-# The cpu rules_cc's Windows toolchain config is declared with. googleurl's
-# BUILD files tell Windows apart by it (config_setting on --cpu), and it
-# keeps Windows outputs in their own bazel-out directory.
-build:windows --cpu=x64_windows
 # Generating .def files to export a library's symbols is for building DLLs,
 # which this build never does, and the tool that does it runs only on a
 # Windows host. googletest asks for it on Windows.

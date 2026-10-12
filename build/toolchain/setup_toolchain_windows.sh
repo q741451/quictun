@@ -55,7 +55,8 @@ MSVC_MANIFEST_VERSION=17
 MSVC_CRT_VERSION=14.44.17.14
 WINDOWS_SDK_VERSION=10.0.26100
 # sha256 over the unpacked tree (every file's path and sha256, every
-# symlink's path and target, sorted); see tree_hash below.
+# symlink's path and target, sorted); see tree_hash below. The tree holds the
+# libraries of every architecture in ALL_ARCHES, so adding one changes it.
 WINSDK_TREE_SHA256=98e229f785c3745b0be0635d13072641ee597081de70224defffee420320c5e5
 # Oldest Windows the binaries run on: Windows 10 2004. WSAPoll does not
 # report a failed non-blocking connect() before it, which quictun_server's
@@ -86,7 +87,9 @@ if [ -z "$WINDOWS_TARGET" ]; then
   echo "Usage: $0 <$(echo "$ALL_ARCHES" | tr ' ' '|')>" >&2
   exit 1
 fi
-XWIN_ARCH=$(arch_xwin_arch "$ARCH")
+# The SDK and CRT are fetched once for every architecture, as one tree: the
+# headers are shared, and only lib/<arch> differs.
+WINSDK_XWIN_ARCHES=$(for a in $ALL_ARCHES; do arch_xwin_arch "$a"; done)
 
 CLANG_DIR="$PREFIX/chromium-clang"
 if [ ! -x "$CLANG_DIR/bin/clang-cl" ]; then
@@ -127,6 +130,13 @@ tree_hash() {
 }
 
 # --- 1. The MSVC CRT and Windows SDK, through a pinned xwin ---
+# Refetched when ALL_ARCHES changes, as abi_stamp_check does for libc++, or
+# a tree fetched for fewer architectures would be kept.
+WINSDK_STAMP="$PREFIX/.winsdk-arches"
+if [ -e "$WINSDK_STAMP" ] && [ "$(cat "$WINSDK_STAMP")" != "$WINSDK_XWIN_ARCHES" ]; then
+  echo "== Architectures changed ($(cat "$WINSDK_STAMP") -> $WINSDK_XWIN_ARCHES): refetching the SDK =="
+  rm -rf "$WINSDK_DIR"
+fi
 if [ ! -d "$WINSDK_DIR" ]; then
   echo "== Fetching MSVC CRT $MSVC_CRT_VERSION and Windows SDK $WINDOWS_SDK_VERSION =="
   XWIN_DIR="$BUILD_ROOT/xwin-$XWIN_VERSION"
@@ -147,7 +157,7 @@ if [ ! -d "$WINSDK_DIR" ]; then
     --manifest-version "$MSVC_MANIFEST_VERSION" \
     --crt-version "$MSVC_CRT_VERSION" \
     --sdk-version "$WINDOWS_SDK_VERSION" \
-    --arch "$XWIN_ARCH" \
+    --arch "$(echo $WINSDK_XWIN_ARCHES | tr ' ' ',')" \
     splat --output "$WINSDK_DIR.new"
   GOT=$(tree_hash "$WINSDK_DIR.new")
   if [ "$GOT" != "$WINSDK_TREE_SHA256" ]; then
@@ -156,6 +166,7 @@ if [ ! -d "$WINSDK_DIR" ]; then
   fi
   mv "$WINSDK_DIR.new" "$WINSDK_DIR"
 fi
+printf '%s' "$WINSDK_XWIN_ARCHES" > "$WINSDK_STAMP"
 
 # Library names that dependencies spell in a casing xwin's own symlinks do
 # not cover, linked the way xwin fixes casing (README: splat's symlinks), on
@@ -165,9 +176,10 @@ fi
 # being guessed at here.
 #   Ws2_32.lib   BoringSSL crypto/bio/socket.cc, #pragma comment(lib)
 #   Shell32.lib  protobuf build_defs/cpp_opts.bzl, linkopts
-SDK_UM_LIB_DIR="$WINSDK_DIR/sdk/lib/um/$XWIN_ARCH"
-ln -sfn ws2_32.lib "$SDK_UM_LIB_DIR/Ws2_32.lib"
-ln -sfn shell32.lib "$SDK_UM_LIB_DIR/Shell32.lib"
+for xwin_arch in $WINSDK_XWIN_ARCHES; do
+  ln -sfn ws2_32.lib "$WINSDK_DIR/sdk/lib/um/$xwin_arch/Ws2_32.lib"
+  ln -sfn shell32.lib "$WINSDK_DIR/sdk/lib/um/$xwin_arch/Shell32.lib"
+done
 
 # The SDK's include directories, for the libc++ build below. Bazel gets the
 # same list from windows/toolchain_flags.bzl, which derives it from

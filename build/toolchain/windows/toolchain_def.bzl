@@ -79,7 +79,7 @@ def windows_cc_toolchain(arch, cpu, bazel_cpu, machine, clang_builtin_includes, 
         script's arch_windows_target(). Also names every rule defined here.
       cpu: the value for cc_toolchain_config's `cpu` attribute, which
         rules_cc's Windows config requires to be one of its own
-        (x64_windows, arm64_windows).
+        (x64_windows, arm64_windows). Also the --cpu the platform sets.
       bazel_cpu: the @platforms//cpu: constraint this architecture selects on.
       machine: lld-link's /MACHINE: for this architecture.
       clang_builtin_includes: shared clang resource-dir include paths, to
@@ -106,12 +106,17 @@ def windows_cc_toolchain(arch, cpu, bazel_cpu, machine, clang_builtin_includes, 
         "/SUBSYSTEM:CONSOLE," + WINDOWS_MIN_VERSION,
     ]
 
+    # --cpu as well, which constraints do not set: rules_cc's Windows config
+    # and googleurl's BUILD files (a config_setting on cpu) tell Windows
+    # apart by it, and it keeps each architecture's outputs in their own
+    # bazel-out directory. Set here so that it follows --platforms.
     native.platform(
         name = "windows_" + arch,
         constraint_values = [
             "@platforms//os:windows",
             "@platforms//cpu:" + bazel_cpu,
         ],
+        flags = ["--cpu=" + cpu],
     )
 
     # rules_cc's Windows config takes no opt_compile_flags/opt_link_flags as
