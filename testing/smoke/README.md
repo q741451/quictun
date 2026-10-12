@@ -8,6 +8,7 @@ is where they differ from it.
 | Script | Does |
 | --- | --- |
 | `smoke_test.py <dir>` | Runs the `quictun_server-*`/`quictun_client-*` binaries in `<dir>` on loopback through the cases that differ between the three systems or once pinned a core (half-close, urgent data, resets, a response tail after the target closes, running out of file descriptors, a server that goes away). Fails on broken data, and on either process using more than 20% of a core after a case. |
+| `clock_test.py <dir>` | What a laptop's sleep and clock corrections do to a running tunnel: freezes the client past the idle timeout, then steps the system clock +2h, -2s and -10min, reporting what happens to a tunnel opened before and how soon a new one works. Changes the system clock, so it needs root and runs only from Build's **clock** checkbox, on Ubuntu 24.04, macOS 15 and Windows Server 2022. |
 | `poll_probe.py` | Prints what `poll()` (`WSAPoll()` on Windows) and `select()` report in those same cases, without quictun involved. Asserts nothing; compare it with Linux's output. |
 
 In CI they are off by default. To run them, start the *Build* workflow by
