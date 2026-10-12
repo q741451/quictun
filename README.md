@@ -219,7 +219,7 @@ Differences from Linux:
 ## Building from source
 
 ```
-sudo apt install cmake ninja-build
+sudo apt install cmake ninja-build python3
 git clone -b quictun https://github.com/q741451/quictun.git
 cd quictun
 bash build/toolchain/setup_toolchain.sh x64
@@ -229,8 +229,13 @@ bazel build -c opt --platforms=//build/toolchain:linux_x64 //quiche:quictun_clie
 ```
 
 No compiler is installed from the distro, and none is used: `cmake`,
-`ninja`, `curl`, `make` and `tar` are the only host tools involved, and
-they are only there to *drive* the build of the pinned toolchain.
+`ninja`, `python3` (LLVM's CMake requires it), `make`, `curl`, `tar` and
+`xz` are the only host tools involved, and they are only there to *drive*
+the build of the pinned toolchain. CI does not take even those from the
+runner: its Linux and Windows builds run in `.github/builder/Dockerfile`,
+Ubuntu 24.04 pinned by digest with its packages from a fixed archive
+snapshot (`scripts/in-builder.sh`), so a newer `ubuntu-latest` changes
+nothing they produce.
 
 `bash build/toolchain/setup_toolchain.sh x64` downloads Chromium's pinned
 clang and builds musl, compiler-rt and libc++ against it, into

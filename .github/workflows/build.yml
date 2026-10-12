@@ -49,7 +49,9 @@ jobs:
     # See that BUILD.bazel file's header comment for the full rationale:
     # in short, none of this depends on the runner image at all: no apt, no
     # sudo, no /usr/include, no system libc. Depending on the distro is what
-    # broke this project's mipsel build once already (see git history).
+    # broke this project's mipsel build once already (see git history). The
+    # tools the build still runs besides the toolchain -- make, cmake, ninja
+    # and the like -- come from the pinned builder image, not the runner.
     #
     # Plain big-endian mips is deliberately not in this matrix: quiche's
     # own README states it only supports little-endian platforms, and
@@ -92,6 +94,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Steps with `shell: in-builder.sh ...` run inside the pinned builder
+      # image (.github/builder/Dockerfile, scripts/in-builder.sh), not on the
+      # runner. Listing its packages builds it, and records in the log exactly
+      # which versions of make, cmake, ninja and the rest built this run.
+      - name: Builder image
+        run: |
+          echo "$GITHUB_WORKSPACE/scripts" >> "$GITHUB_PATH"
+          scripts/in-builder.sh dpkg-query -W
+
       # The toolchain itself (pinned clang download + from-source libc++
       # build) doesn't change unless the pins in setup_toolchain.sh do, so
       # it's cached separately from -- and is a much bigger win than --
@@ -122,9 +133,10 @@ jobs:
           # entirely. Without the headers in the key, regenerating them (a
           # kernel bump via uapi/regenerate.sh) leaves every runner building
           # against the *old* UAPI, silently and with no version to notice.
-          key: toolchain-linux-${{ matrix.name }}-${{ hashFiles('build/toolchain/setup_toolchain.sh', 'build/toolchain/uapi/**') }}
+          key: toolchain-linux-${{ matrix.name }}-${{ hashFiles('.github/builder/Dockerfile', 'build/toolchain/setup_toolchain.sh', 'build/toolchain/uapi/**') }}
 
       - name: Set up pinned toolchain (linux-${{ matrix.name }})
+        shell: in-builder.sh bash --noprofile --norc -eo pipefail {0}
         run: |
           set -e
           bash build/toolchain/setup_toolchain.sh x64
@@ -152,9 +164,9 @@ jobs:
           path: |
             ~/.cache/bazel-linux-${{ matrix.name }}
             ~/.cache/bazelisk
-          key: bazel-linux-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel') }}-${{ github.run_id }}
+          key: bazel-linux-${{ matrix.name }}-${{ hashFiles('.github/builder/Dockerfile', 'MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel') }}-${{ github.run_id }}
           restore-keys: |
-            bazel-linux-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel') }}-
+            bazel-linux-${{ matrix.name }}-${{ hashFiles('.github/builder/Dockerfile', 'MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel') }}-
             bazel-linux-${{ matrix.name }}-
 
       - name: Install bazelisk
@@ -171,6 +183,7 @@ jobs:
 
       - name: Build
         id: build
+        shell: in-builder.sh bash --noprofile --norc -eo pipefail {0}
         run: |
           set -e
           # See build/regen_quictun_build_timestamp.sh's own comment: this
@@ -221,9 +234,10 @@ jobs:
           path: |
             ~/.cache/bazel-linux-${{ matrix.name }}
             ~/.cache/bazelisk
-          key: bazel-linux-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel') }}-${{ github.run_id }}
+          key: bazel-linux-${{ matrix.name }}-${{ hashFiles('.github/builder/Dockerfile', 'MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel') }}-${{ github.run_id }}
 
       - name: Stage artifacts
+        shell: in-builder.sh bash --noprofile --norc -eo pipefail {0}
         run: |
           set -e
           mkdir -p dist
@@ -416,6 +430,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Steps with `shell: in-builder.sh ...` run inside the pinned builder
+      # image (.github/builder/Dockerfile, scripts/in-builder.sh), not on the
+      # runner. Listing its packages builds it, and records in the log exactly
+      # which versions of make, cmake, ninja and the rest built this run.
+      - name: Builder image
+        run: |
+          echo "$GITHUB_WORKSPACE/scripts" >> "$GITHUB_PATH"
+          scripts/in-builder.sh dpkg-query -W
+
       # The Linux x64 toolchain as well as the Windows one: it provides the
       # clang-cl and lld-link, and builds the tools Bazel runs on the host.
       - name: Restore toolchain (windows-${{ matrix.name }})
@@ -423,9 +446,10 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/toolchain/out
-          key: toolchain-windows-${{ matrix.name }}-${{ hashFiles('build/toolchain/setup_toolchain.sh', 'build/toolchain/setup_toolchain_windows.sh', 'build/toolchain/uapi/**') }}
+          key: toolchain-windows-${{ matrix.name }}-${{ hashFiles('.github/builder/Dockerfile', 'build/toolchain/setup_toolchain.sh', 'build/toolchain/setup_toolchain_windows.sh', 'build/toolchain/uapi/**') }}
 
       - name: Set up pinned toolchain (windows-${{ matrix.name }})
+        shell: in-builder.sh bash --noprofile --norc -eo pipefail {0}
         run: |
           set -e
           bash build/toolchain/setup_toolchain.sh x64
@@ -444,9 +468,9 @@ jobs:
           path: |
             ~/.cache/bazel-windows-${{ matrix.name }}
             ~/.cache/bazelisk
-          key: bazel-windows-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-${{ github.run_id }}
+          key: bazel-windows-${{ matrix.name }}-${{ hashFiles('.github/builder/Dockerfile', 'MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-${{ github.run_id }}
           restore-keys: |
-            bazel-windows-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-
+            bazel-windows-${{ matrix.name }}-${{ hashFiles('.github/builder/Dockerfile', 'MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-
             bazel-windows-${{ matrix.name }}-
 
       - name: Install bazelisk
@@ -468,6 +492,7 @@ jobs:
       # -s to strip.
       - name: Build
         id: build
+        shell: in-builder.sh bash --noprofile --norc -eo pipefail {0}
         run: |
           set -e
           ./build/regen_quictun_build_timestamp.sh
@@ -484,13 +509,14 @@ jobs:
           path: |
             ~/.cache/bazel-windows-${{ matrix.name }}
             ~/.cache/bazelisk
-          key: bazel-windows-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-${{ github.run_id }}
+          key: bazel-windows-${{ matrix.name }}-${{ hashFiles('.github/builder/Dockerfile', 'MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-${{ github.run_id }}
 
       # The counterpart of Linux's "statically linked" check: the images may
       # import only DLLs that ship with Windows itself, never a runtime one
       # (VCRUNTIME*, MSVCP*, ucrtbase, api-ms-win-crt-*), which would mean
       # /MT or the static libc++ did not take.
       - name: Stage artifacts
+        shell: in-builder.sh bash --noprofile --norc -eo pipefail {0}
         run: |
           set -e
           READOBJ=build/toolchain/out/chromium-clang/bin/llvm-readobj
@@ -662,13 +688,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Steps with `shell: in-builder.sh ...` run inside the pinned builder
+      # image (.github/builder/Dockerfile, scripts/in-builder.sh), not on the
+      # runner. Listing its packages builds it, and records in the log exactly
+      # which versions of make, cmake, ninja and the rest built this run.
+      - name: Builder image
+        run: |
+          echo "$GITHUB_WORKSPACE/scripts" >> "$GITHUB_PATH"
+          scripts/in-builder.sh dpkg-query -W
+
       - name: Restore toolchain (windows-x86_64)
         uses: actions/cache/restore@v4
         with:
           path: build/toolchain/out
-          key: toolchain-windows-x86_64-${{ hashFiles('build/toolchain/setup_toolchain.sh', 'build/toolchain/setup_toolchain_windows.sh', 'build/toolchain/uapi/**') }}
+          key: toolchain-windows-x86_64-${{ hashFiles('.github/builder/Dockerfile', 'build/toolchain/setup_toolchain.sh', 'build/toolchain/setup_toolchain_windows.sh', 'build/toolchain/uapi/**') }}
 
       - name: Set up pinned toolchain (windows-x86_64)
+        shell: in-builder.sh bash --noprofile --norc -eo pipefail {0}
         run: |
           set -e
           bash build/toolchain/setup_toolchain.sh x64
@@ -680,9 +716,9 @@ jobs:
           path: |
             ~/.cache/bazel-windows-x86_64
             ~/.cache/bazelisk
-          key: bazel-windows-x86_64-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-${{ github.run_id }}
+          key: bazel-windows-x86_64-${{ hashFiles('.github/builder/Dockerfile', 'MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-${{ github.run_id }}
           restore-keys: |
-            bazel-windows-x86_64-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-
+            bazel-windows-x86_64-${{ hashFiles('.github/builder/Dockerfile', 'MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-
             bazel-windows-x86_64-
 
       - name: Install bazelisk
@@ -701,9 +737,11 @@ jobs:
       # (/DEFAULTLIB:clang_rt.profile.lib); /LIBPATH below is where lld-link
       # finds it.
       - name: Build profile runtime
+        shell: in-builder.sh bash --noprofile --norc -eo pipefail {0}
         run: testing/coverage/windows_profile_runtime.sh "$RUNNER_TEMP/profrt"
 
       - name: Build
+        shell: in-builder.sh bash --noprofile --norc -eo pipefail {0}
         run: |
           set -e
           ./build/regen_quictun_build_timestamp.sh
