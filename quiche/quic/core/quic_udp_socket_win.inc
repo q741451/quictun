@@ -74,7 +74,7 @@ bool NextCmsg(WSAMSG* hdr, char* control_buffer, size_t control_buffer_len,
 
 bool QuicUdpSocketApi::SetupSocket(QuicUdpSocketFd fd, int address_family,
                                    int receive_buffer_size,
-                                   int send_buffer_size, bool /*ipv6_only*/) {
+                                   int send_buffer_size, bool ipv6_only) {
   // Receive buffer size.
   if (absl::Status status =
           socket_api::SetReceiveBufferSize(fd, receive_buffer_size);
@@ -105,6 +105,27 @@ bool QuicUdpSocketApi::SetupSocket(QuicUdpSocketFd fd, int address_family,
       QUIC_LOG_FIRST_N(ERROR, 100)
           << "Failed to enable receiving of self v6 ip";
       return false;
+    }
+    // A dual-stack socket, as on Linux. Windows makes IPv6 sockets IPv6-only
+    // by default, where Linux does not, and reports an IPv4 packet's
+    // destination only as IP_PKTINFO: without it QuicPacketReader drops
+    // every packet from an IPv4 peer ("Unable to get self IP address").
+    // msquic sets up its dual-mode sockets the same way (IPV6_V6ONLY off,
+    // then both IPV6_PKTINFO and IP_PKTINFO; datapath_winuser.c).
+    if (!ipv6_only) {
+      int v6_only = 0;
+      if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY,
+                     reinterpret_cast<char*>(&v6_only),
+                     sizeof(v6_only)) != 0) {
+        QUIC_LOG_FIRST_N(ERROR, 100)
+            << "Failed to make an IPv6 socket dual-stack";
+        return false;
+      }
+      if (!EnableReceiveSelfIpAddressForV4(fd)) {
+        QUIC_LOG_FIRST_N(ERROR, 100)
+            << "Failed to enable receiving of self v4 ip on dual-stack socket";
+        return false;
+      }
     }
   }
 
