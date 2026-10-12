@@ -26,6 +26,7 @@ mkdir -p /tmp/qt && cp bazel-bin/quiche/quictun_client /tmp/qt/quictun_client-li
 python3 testing/smoke/smoke_test.py /tmp/qt
 ```
 
-It listens on 127.0.0.1 ports 39000-39002, 39100-39110 (UDP) and
-39200-39210, and keeps the server and client logs in a temporary directory
+It listens on ports 24000-24002, 24100-24120 (UDP) and 24200-24270 on
+loopback -- below every OS's ephemeral range, which its own connections
+draw from -- and keeps the server and client logs in a temporary directory
 it prints at the end.

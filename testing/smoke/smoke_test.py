@@ -29,6 +29,14 @@ once pinned a core:
   out of descriptors       (not Windows) client limited to 64 descriptors and
                            offered 100 connections: accept() keeps failing
                            with EMFILE, which must neither spin nor go unlogged
+  dual stack               a [::] server reached over IPv4 and IPv6, and a
+                           [::] --local: Windows reports an IPv4 packet's
+                           destination only when asked for IPv4 packet info
+  many UDP sockets         --udp_socket=3 --conn_per_udp=2
+  non-ASCII key            --key reaches quictun as its UTF-8 bytes, which
+                           Windows' main() argv does not deliver
+  large socket buffer      --udp_socket_buffer_kb past the system's limit
+                           runs or fails at startup, never half works
   server gone / restarted  ICMP port unreachable on the client's UDP socket,
                            then recovery
   client restarted         rebinding --local while old connections linger
@@ -41,6 +49,8 @@ import ctypes
 import glob
 import os
 import random
+import re
+import signal
 import socket
 import struct
 import subprocess
@@ -51,8 +61,11 @@ import time
 
 WINDOWS = sys.platform == "win32"
 KEY = "--key=smoke test key"
-ECHO_PORT, REFUSED_PORT, TAIL_PORT = 39000, 39001, 39002
-UDP_BASE, LOCAL_BASE = 39100, 39200
+# Below 32768 on purpose: Linux hands out ephemeral ports from 32768-60999
+# (macOS and Windows from 49152), and this script's own hundreds of
+# connections would otherwise sometimes hold a port a later case binds.
+ECHO_PORT, REFUSED_PORT, TAIL_PORT = 24000, 24001, 24002
+UDP_BASE, LOCAL_BASE = 24100, 24200
 CPU_LIMIT_PERCENT = 20
 
 failures = []
@@ -167,8 +180,12 @@ class Harness:
             def preexec():
                 resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
         log = os.path.join(self.log_dir, log_name)
+        # Its own process group on Windows, so stop() can send it
+        # CTRL_BREAK_EVENT without hitting this script too.
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0
         proc = subprocess.Popen(args, stdout=open(log, "w"),
-                                stderr=subprocess.STDOUT, preexec_fn=preexec)
+                                stderr=subprocess.STDOUT, preexec_fn=preexec,
+                                creationflags=flags)
         self.procs.append((proc, log))
         return proc
 
@@ -194,10 +211,25 @@ class Harness:
 
     @staticmethod
     def stop(*procs):
+        """Asks each process to exit (SIGTERM, or CTRL_BREAK_EVENT on
+        Windows), then kills whatever is still running 3s later. A normal
+        build just dies of either; a coverage build (QUICTUN_COVERAGE_BUILD)
+        writes its profile first, which a kill would lose."""
         for proc in procs:
             if proc.poll() is None:
+                try:
+                    if WINDOWS:
+                        proc.send_signal(signal.CTRL_BREAK_EVENT)
+                    else:
+                        proc.terminate()
+                except OSError:
+                    pass
+        for proc in procs:
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
                 proc.kill()
-            proc.wait()
+                proc.wait()
 
     def report_logs(self):
         for proc, log in self.procs:
@@ -460,6 +492,123 @@ def case_out_of_descriptors(h):
           "client logged running out of descriptors")
 
 
+def case_dual_stack(h):
+    # --listen=[::] is README's own example: an IPv6 socket that IPv4 clients
+    # reach as ::ffff:a.b.c.d, which macOS and Windows hand over with their
+    # own packet-info and address-family rules. A client on IPv4 and one on
+    # IPv6 against the one server, and a client whose --local is [::] too,
+    # reached over both families.
+    n = h.pairs
+    h.pairs += 1
+    udp, local4, local6 = UDP_BASE + n, LOCAL_BASE + n, LOCAL_BASE + 50 + n
+    server = h.start([h.bin.server, f"--listen=[::]:{udp}",
+                      f"--target=127.0.0.1:{ECHO_PORT}", KEY], f"server{n}.log")
+    client4 = h.start([h.bin.client, f"--local=127.0.0.1:{local4}",
+                       f"--remote=127.0.0.1:{udp}", KEY], f"client{n}_v4.log")
+    client6 = h.start([h.bin.client, f"--local=[::]:{local6}",
+                       f"--remote=[::1]:{udp}", KEY], f"client{n}_v6.log")
+    time.sleep(2)
+    check(roundtrip(local4, os.urandom(1 << 20)),
+          "IPv4 client through a dual-stack [::] server")
+    check(roundtrip(local6, os.urandom(1 << 20)),
+          "IPv6 client through a dual-stack [::] server, app over IPv4")
+    try:
+        conn = socket.create_connection(("::1", local6), timeout=20)
+        payload = os.urandom(1 << 20)
+        conn.sendall(payload)
+        got = b""
+        while len(got) < len(payload) and (data := conn.recv(65536)):
+            got += data
+        conn.close()
+        check(got == payload, "IPv6 client, app over IPv6 to a [::] --local")
+    except OSError as e:
+        check(False, f"app over IPv6 to a [::] --local: {e!r}")
+    check_no_spin("dual-stack server, IPv4 and IPv6 clients",
+                  [server, client4, client6])
+    h.stop(server, client4, client6)
+
+
+def case_many_udp_sockets(h):
+    # --udp_socket x --conn_per_udp: several connected UDP sockets, each
+    # carrying several QUIC connections, round-robin.
+    n = h.pairs
+    h.pairs += 1
+    udp, local = UDP_BASE + n, LOCAL_BASE + n
+    server = h.start_server(udp, ECHO_PORT, f"server{n}.log")
+    client = h.start([h.bin.client, f"--local=127.0.0.1:{local}",
+                      f"--remote=127.0.0.1:{udp}", "--udp_socket=3",
+                      "--conn_per_udp=2", KEY], f"client{n}.log")
+    time.sleep(2)
+    results = []
+
+    def one():
+        results.append(roundtrip(local, os.urandom(256 << 10)))
+
+    threads = [threading.Thread(target=one) for _ in range(24)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(90)
+    check(len(results) == 24 and all(results),
+          f"24 connections over 3 UDP sockets x 2 connections ({sum(results)} ok)")
+    check_no_spin("3 UDP sockets x 2 connections", [server, client])
+    h.stop(server, client)
+
+
+def case_non_ascii_key(h):
+    # --key's bytes are what both ends derive their keys from, so a client
+    # and a server on different systems agree only if each reads the same
+    # bytes from the same characters: UTF-8. Linux and macOS hand main() the
+    # bytes as given; Windows converts the command line to its ANSI code
+    # page first. The banner reports the key's length in bytes.
+    key = "quictun 共享密钥 ✓"
+    want = len(key.encode("utf-8"))
+    n = h.pairs
+    h.pairs += 1
+    server = h.start([h.bin.server, f"--listen=127.0.0.1:{UDP_BASE + n}",
+                      f"--target=127.0.0.1:{ECHO_PORT}", f"--key={key}"],
+                     f"server{n}.log")
+    time.sleep(2)
+    h.stop(server)
+    banner = open(os.path.join(h.log_dir, f"server{n}.log"), "rb").read()
+    m = re.search(rb"key\s*=\s*<redacted, (\d+) bytes>", banner)
+    got = int(m.group(1)) if m else None
+    check(got == want, f"a non-ASCII --key reaches quictun as its UTF-8 bytes "
+                       f"({got} bytes, UTF-8 is {want})")
+
+
+def case_large_socket_buffer(h):
+    # --udp_socket_buffer_kb past what the system allows: Linux clamps it
+    # silently (README), macOS caps SO_RCVBUF at kern.ipc.maxsockbuf. Either
+    # the binaries run, or they stop at startup saying why -- never a socket
+    # that half works.
+    n = h.pairs
+    h.pairs += 1
+    server = h.start([h.bin.server, f"--listen=127.0.0.1:{UDP_BASE + n}",
+                      f"--target=127.0.0.1:{ECHO_PORT}",
+                      "--udp_socket_buffer_kb=65536", KEY], f"server{n}.log")
+    client = h.start([h.bin.client, f"--local=127.0.0.1:{LOCAL_BASE + n}",
+                      f"--remote=127.0.0.1:{UDP_BASE + n}",
+                      "--udp_socket_buffer_kb=65536", KEY], f"client{n}.log")
+    time.sleep(2)
+    outcome = []
+    for proc, name in ((server, "server"), (client, "client")):
+        if proc.poll() is None:
+            outcome.append(f"{name} running")
+        else:
+            log = open(os.path.join(h.log_dir, f"{name}{n}.log"),
+                       errors="replace").read().splitlines()
+            reason = [l for l in log if "size" in l or "Failed" in l][:1]
+            outcome.append(f"{name} exited {proc.returncode}: {reason}")
+    if server.poll() is None and client.poll() is None:
+        ok = roundtrip(LOCAL_BASE + n, b"big buffers")
+    else:
+        ok = all(p.poll() is None or p.returncode != 0 for p in (server, client))
+    check(ok, f"a socket buffer past the system's limit runs or fails "
+              f"loudly ({outcome})")
+    h.stop(server, client)
+
+
 def case_server_gone_then_client_restarted(h):
     server, client, local, udp, _ = h.pair(ECHO_PORT)
     h.stop(server)
@@ -531,6 +680,10 @@ def main():
         case_local_reset,
         case_response_tail,
         case_many_connections,
+        case_dual_stack,
+        case_many_udp_sockets,
+        case_non_ascii_key,
+        case_large_socket_buffer,
     ]
     if not WINDOWS:  # Windows has no per-process descriptor limit to lower
         cases.append(case_out_of_descriptors)
