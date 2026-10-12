@@ -47,6 +47,8 @@
 #include "absl/status/statusor.h"
 #if defined(__linux__)
 #include "quiche/quic/core/batch_writer/quic_gso_batch_writer.h"
+#else
+#include "quiche/quic/core/quic_packet_writer_wrapper.h"
 #endif
 #include "quiche/quic/core/congestion_control/send_algorithm_interface.h"
 #include "quiche/quic/core/io/quic_event_loop.h"
@@ -158,6 +160,45 @@ class DualStackPacketWriter : public QuicDefaultPacketWriter {
         QuicSocketAddress(peer_address.host().DualStacked(),
                           peer_address.port()),
         options, params);
+  }
+};
+
+// Wraps every writer above. A UDP send that finds the network interface's
+// queue full fails here with ENOBUFS -- on macOS whenever a connected
+// socket is flow controlled (bsd/netinet/udp_usrreq.c), on Windows as
+// WSAENOBUFS -- and QuicConnection closes the connection over a write error,
+// and with it every tunnel it carries. Linux never reports it: its
+// udp_send_skb() (net/ipv4/udp.c) counts the drop and returns success unless
+// IP_RECVERR is set, which quictun never sets, so the packet is simply lost
+// and loss recovery and congestion control take it from there. This does
+// the same, logging what Linux would only count.
+class NoBufferSpaceAsLossWriter : public QuicPacketWriterWrapper {
+ public:
+  explicit NoBufferSpaceAsLossWriter(std::unique_ptr<QuicPacketWriter> writer) {
+    set_writer(writer.release());
+  }
+
+  WriteResult WritePacket(const char* buffer, size_t buf_len,
+                          const QuicIpAddress& self_address,
+                          const QuicSocketAddress& peer_address,
+                          PerPacketOptions* options,
+                          const QuicPacketWriterParams& params) override {
+    WriteResult result = QuicPacketWriterWrapper::WritePacket(
+        buffer, buf_len, self_address, peer_address, options, params);
+#if defined(_WIN32)
+    constexpr int kNoBufferSpace = WSAENOBUFS;
+#else
+    constexpr int kNoBufferSpace = ENOBUFS;
+#endif
+    if (result.status == WRITE_STATUS_ERROR &&
+        result.error_code == kNoBufferSpace) {
+      QUIC_LOG_EVERY_N_SEC(ERROR, 60)
+          << "UDP send to " << peer_address << " found no buffer space (the "
+          << "network interface's queue is full); the packet is counted as "
+          << "lost";
+      return WriteResult(WRITE_STATUS_OK, static_cast<int>(buf_len));
+    }
+    return result;
   }
 };
 #endif  // !defined(__linux__)
@@ -388,6 +429,7 @@ std::unique_ptr<QuicPacketWriter> MakeQuictunPacketWriter(
     } else {
       writer = std::make_unique<QuicDefaultPacketWriter>(fd);
     }
+    writer = std::make_unique<NoBufferSpaceAsLossWriter>(std::move(writer));
 #endif
   }
 #ifdef QUICTUN_TEST_BUILD
