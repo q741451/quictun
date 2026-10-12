@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "quiche/quic/core/io/quic_default_event_loop.h"
 #include "quiche/quic/core/io/quic_event_loop.h"
@@ -118,8 +119,19 @@ int main(int argc, char* argv[]) {
   const char* usage =
       "Usage: quictun_client --local=[::]:12948 --remote=<server-ip>:4433 "
       "--key='shared secret'";
+  absl::StatusOr<std::vector<std::string>> args =
+      quic::QuictunCommandLine(argc, argv);
+  if (!args.ok()) {
+    std::cerr << args.status() << std::endl;
+    return 1;
+  }
+  std::vector<char*> arg_ptrs;
+  for (std::string& arg : *args) {
+    arg_ptrs.push_back(arg.data());
+  }
   std::vector<std::string> non_option_args =
-      quiche::QuicheParseCommandLineFlags(usage, argc, argv);
+      quiche::QuicheParseCommandLineFlags(
+          usage, static_cast<int>(arg_ptrs.size()), arg_ptrs.data());
   if (!non_option_args.empty()) {
     quiche::QuichePrintCommandLineFlagHelp(usage);
     return 1;

@@ -7,6 +7,7 @@
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <windows.h>
+#include <shellapi.h>
 #include <timeapi.h>
 
 #include "absl/strings/str_cat.h"
@@ -19,7 +20,12 @@
 #include <sys/sysctl.h>
 #endif
 
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 
 namespace quic {
 
@@ -140,6 +146,34 @@ absl::Status InitQuictunPlatform() {
   }
   return absl::OkStatus();
 }
+
+absl::StatusOr<std::vector<std::string>> QuictunCommandLine(
+    int /*argc*/, char* /*argv*/[]) {
+  int count = 0;
+  LPWSTR* wide = CommandLineToArgvW(GetCommandLineW(), &count);
+  if (wide == nullptr) {
+    return absl::InternalError(
+        absl::StrCat("CommandLineToArgvW() failed: ", GetLastError()));
+  }
+  std::vector<std::string> args;
+  for (int i = 0; i < count; ++i) {
+    // The size includes the terminating NUL, which std::string keeps itself.
+    int size = WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, nullptr, 0,
+                                   nullptr, nullptr);
+    if (size <= 0) {
+      DWORD error = GetLastError();
+      LocalFree(wide);
+      return absl::InternalError(
+          absl::StrCat("WideCharToMultiByte() failed: ", error));
+    }
+    std::string arg(size - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, arg.data(), size, nullptr,
+                        nullptr);
+    args.push_back(std::move(arg));
+  }
+  LocalFree(wide);
+  return args;
+}
 #elif defined(__APPLE__)
 absl::Status InitQuictunPlatform() {
   if (absl::Status status = IgnoreSigpipe(); !status.ok()) {
@@ -149,6 +183,13 @@ absl::Status InitQuictunPlatform() {
 }
 #else
 absl::Status InitQuictunPlatform() { return IgnoreSigpipe(); }
+#endif
+
+#if !defined(_WIN32)
+absl::StatusOr<std::vector<std::string>> QuictunCommandLine(int argc,
+                                                            char* argv[]) {
+  return std::vector<std::string>(argv, argv + argc);
+}
 #endif
 
 }  // namespace quic

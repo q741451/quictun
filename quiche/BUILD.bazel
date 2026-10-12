@@ -718,13 +718,15 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
     ],
-    # Winsock, and the multimedia timer API InitQuictunPlatform() raises the
-    # timer period with (quictun_platform.cc), named the way abseil's own
+    # Winsock, the multimedia timer API InitQuictunPlatform() raises the
+    # timer period with, and the shell API QuictunCommandLine() splits the
+    # command line with (quictun_platform.cc), named the way abseil's own
     # BUILD files add their Windows libraries.
     linkopts = select({
         "@platforms//os:windows": [
             "-DEFAULTLIB:ws2_32.lib",
             "-DEFAULTLIB:winmm.lib",
+            "-DEFAULTLIB:shell32.lib",
         ],
         "//conditions:default": [],
     }),
