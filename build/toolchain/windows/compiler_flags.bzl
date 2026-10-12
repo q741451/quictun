@@ -36,12 +36,17 @@ Constants only, like that file: it loads nothing.
 # QUICHE's QUICHE_LOG(ERROR) into an undefined QUICHE_LOG_IMPL_0. Chromium
 # avoids it with its own logging; protobuf (port_def.inc) and abseil
 # (mutex.cc) each #undef ERROR in their own files. NOGDI keeps wingdi.h out
-# for every file, and nothing here draws anything.
+# for every file, and nothing here draws anything. WIN32 too, which
+# Chromium's runtime_library config defines (build/config/win/BUILD.gn):
+# googleurl tests WIN32, not _WIN32, for its Windows file-URL handling, so
+# without it googleurl would build its POSIX variant. Of everything linked,
+# only googleurl and zlib test it, and zlib defines it from _WIN32 itself.
 COMPILE_FLAGS = [
     "/clang:-fno-strict-aliasing",
     "/Gy",
     "/Gw",
     "/GS-",
+    "/DWIN32",
     "/DWIN32_LEAN_AND_MEAN",
     "/DWINCRYPT_USE_SYMBOL_PREFIX",
     "/DUNICODE",
