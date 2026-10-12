@@ -107,6 +107,10 @@ int main(int argc, char* argv[]) {
   }
 #ifdef QUICTUN_COVERAGE_BUILD
   signal(SIGTERM, FlushCoverageAndExit);
+#if defined(_WIN32)
+  // Windows has no SIGTERM to send; testing/smoke sends CTRL_BREAK_EVENT.
+  signal(SIGBREAK, FlushCoverageAndExit);
+#endif
 #endif
   // Before anything else, including flag parsing: --help/--helpfull exit
   // from inside QuicheParseCommandLineFlags() below without ever reaching

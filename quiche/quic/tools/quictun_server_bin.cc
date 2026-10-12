@@ -63,17 +63,17 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "relative to any realistic legitimate load.");
 
 #ifdef QUICTUN_COVERAGE_BUILD
-// Coverage-instrumented builds only (--copt=-DQUICTUN_COVERAGE_BUILD,
-// alongside -fprofile-instr-generate) -- absent, and this whole block does
-// not exist, in every normal build. quictun_server has no natural
-// clean-exit path (its event loop below runs forever) and installs no
-// SIGTERM handler, so a coverage test harness's terminate()/kill() calls --
-// the only way anything ever stops a quictun process -- leave zero durable
-// profile data on disk: confirmed empirically (0-byte .profraw even with
-// -fprofile-continuous, which doesn't appear to actually engage in this
-// clang snapshot). __llvm_profile_write_file() is compiler-rt's profiling
-// runtime, only linked in when built with -fprofile-instr-generate, hence
-// this being gated on the same macro rather than always declared.
+// Coverage-instrumented builds only (-DQUICTUN_COVERAGE_BUILD, alongside
+// -fprofile-instr-generate) -- absent, and this whole block does not exist,
+// in every normal build. The profile runtime writes its counts at exit(),
+// which quictun_server never reaches: its event loop below runs until
+// something stops it, and a test harness stops it with SIGTERM (or
+// CTRL_BREAK_EVENT on Windows), which would end it with no profile written.
+// -fprofile-continuous does not help: it works by adding %c to the default
+// file name, and the harness's LLVM_PROFILE_FILE replaces that name.
+// __llvm_profile_write_file() is compiler-rt's profiling runtime, only
+// linked in when built with -fprofile-instr-generate, hence this being
+// gated on the same macro rather than always declared.
 extern "C" int __llvm_profile_write_file(void);
 void FlushCoverageAndExit(int /*signum*/) {
   __llvm_profile_write_file();
@@ -88,6 +88,10 @@ int main(int argc, char* argv[]) {
   }
 #ifdef QUICTUN_COVERAGE_BUILD
   signal(SIGTERM, FlushCoverageAndExit);
+#if defined(_WIN32)
+  // Windows has no SIGTERM to send; testing/smoke sends CTRL_BREAK_EVENT.
+  signal(SIGBREAK, FlushCoverageAndExit);
+#endif
 #endif
   // See quictun_client_bin.cc's identical call for why this comes before
   // everything else, including flag parsing.

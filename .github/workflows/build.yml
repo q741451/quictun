@@ -11,6 +11,10 @@ on:
         description: Also run testing/smoke on Windows, macOS and Linux runners
         type: boolean
         default: false
+      coverage:
+        description: Also measure testing/smoke's coverage on Windows and macOS
+        type: boolean
+        default: false
   # Lets release.yml call this workflow's own build job directly (same
   # matrix, same toolchain, same artifacts) instead of duplicating it --
   # a release is built exactly the same way as every regular CI run.
@@ -560,3 +564,227 @@ jobs:
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" testing/smoke/smoke_test.py bin
+
+  # Off unless asked for: run Build by hand with "coverage" ticked. Builds
+  # quictun as the jobs above do, plus clang's source-based coverage of
+  # quiche/, runs testing/smoke on macOS and Windows, and reports which lines
+  # of the files that differ by platform ran. It only reads the caches the
+  # jobs above fill. See testing/coverage/README.md.
+  coverage-macos:
+    name: Coverage (macos-arm64)
+    if: ${{ inputs.coverage }}
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcrun --sdk macosx --show-sdk-path
+          xcrun --sdk macosx --show-sdk-version
+
+      - name: Restore toolchain (macos-arm64)
+        uses: actions/cache/restore@v4
+        with:
+          path: build/toolchain/out
+          key: toolchain-macos-arm64-${{ hashFiles('build/toolchain/setup_toolchain_macos.sh', 'build/toolchain/setup_toolchain.sh') }}
+
+      - name: Set up pinned toolchain (macos-arm64)
+        run: bash build/toolchain/setup_toolchain_macos.sh arm64
+
+      - name: Restore Bazel (macos-arm64)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/bazel-macos-arm64
+            ~/.cache/bazelisk
+          key: bazel-macos-arm64-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/compiler_flags.bzl', 'build/toolchain/macos/*.bzl', 'build/toolchain/macos/BUILD.bazel') }}-${{ github.run_id }}
+          restore-keys: |
+            bazel-macos-arm64-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/compiler_flags.bzl', 'build/toolchain/macos/*.bzl', 'build/toolchain/macos/BUILD.bazel') }}-
+            bazel-macos-arm64-
+
+      - name: Install bazelisk
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bin/bazelisk" \
+            "https://github.com/bazelbuild/bazelisk/releases/download/$BAZELISK_VERSION/bazelisk-darwin-arm64"
+          echo "$BAZELISK_DARWIN_ARM64_SHA256  $RUNNER_TEMP/bin/bazelisk" | shasum -a 256 -c -
+          chmod +x "$RUNNER_TEMP/bin/bazelisk"
+          ln -sf bazelisk "$RUNNER_TEMP/bin/bazel"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "BAZELISK_HOME=$HOME/.cache/bazelisk" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          set -e
+          ./build/regen_quictun_build_timestamp.sh
+          bazel build -c opt \
+            --disk_cache=$HOME/.cache/bazel-macos-arm64/disk \
+            --repository_cache=$HOME/.cache/bazel-macos-arm64/repo \
+            --platforms=//build/toolchain/macos:macos_arm64 \
+            --copt=-fno-asynchronous-unwind-tables \
+            --linkopt=-Wl,-no_function_starts \
+            --linkopt=-Wl,-no_data_in_code_info \
+            '--per_file_copt=quiche/.*@-fprofile-instr-generate,-fcoverage-mapping,-DQUICTUN_COVERAGE_BUILD' \
+            --linkopt=-fprofile-instr-generate \
+            $TARGETS
+          mkdir -p bin
+          for t in $TARGETS; do
+            name=${t#//quiche:}
+            cp "bazel-bin/quiche/$name" "bin/${name}-macos-arm64"
+          done
+
+      - name: Smoke test
+        id: smoke
+        run: |
+          mkdir -p prof
+          LLVM_PROFILE_FILE="$PWD/prof/%p.profraw" python3 testing/smoke/smoke_test.py bin
+
+      - name: Report
+        if: always() && steps.smoke.outcome != 'skipped'
+        run: testing/coverage/report.sh prof report bin/*
+
+      - name: Upload report
+        if: always() && steps.smoke.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-macos-arm64
+          path: report/*
+          if-no-files-found: error
+
+  coverage-windows-build:
+    name: Coverage build (windows-x86_64)
+    if: ${{ inputs.coverage }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore toolchain (windows-x86_64)
+        uses: actions/cache/restore@v4
+        with:
+          path: build/toolchain/out
+          key: toolchain-windows-x86_64-${{ hashFiles('build/toolchain/setup_toolchain.sh', 'build/toolchain/setup_toolchain_windows.sh', 'build/toolchain/uapi/**') }}
+
+      - name: Set up pinned toolchain (windows-x86_64)
+        run: |
+          set -e
+          bash build/toolchain/setup_toolchain.sh x64
+          bash build/toolchain/setup_toolchain_windows.sh x64
+
+      - name: Restore Bazel (windows-x86_64)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/bazel-windows-x86_64
+            ~/.cache/bazelisk
+          key: bazel-windows-x86_64-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-${{ github.run_id }}
+          restore-keys: |
+            bazel-windows-x86_64-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-
+            bazel-windows-x86_64-
+
+      - name: Install bazelisk
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bin/bazelisk" \
+            "https://github.com/bazelbuild/bazelisk/releases/download/$BAZELISK_VERSION/bazelisk-linux-amd64"
+          echo "$BAZELISK_LINUX_AMD64_SHA256  $RUNNER_TEMP/bin/bazelisk" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/bazelisk"
+          ln -sf bazelisk "$RUNNER_TEMP/bin/bazel"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "BAZELISK_HOME=$HOME/.cache/bazelisk" >> "$GITHUB_ENV"
+
+      # clang-cl's objects name the profile runtime themselves
+      # (/DEFAULTLIB:clang_rt.profile.lib); /LIBPATH below is where lld-link
+      # finds it.
+      - name: Build profile runtime
+        run: testing/coverage/windows_profile_runtime.sh "$RUNNER_TEMP/profrt"
+
+      - name: Build
+        run: |
+          set -e
+          ./build/regen_quictun_build_timestamp.sh
+          bazel build -c opt --config=windows \
+            --disk_cache=$HOME/.cache/bazel-windows-x86_64/disk \
+            --repository_cache=$HOME/.cache/bazel-windows-x86_64/repo \
+            --platforms=//build/toolchain/windows:windows_x64 \
+            '--per_file_copt=quiche/.*@/clang:-fprofile-instr-generate,/clang:-fcoverage-mapping,/DQUICTUN_COVERAGE_BUILD' \
+            "--linkopt=/LIBPATH:$RUNNER_TEMP/profrt" \
+            $TARGETS
+          mkdir -p bin
+          for t in $TARGETS; do
+            name=${t#//quiche:}
+            cp "bazel-bin/quiche/$name.exe" "bin/${name}-windows-x86_64.exe"
+          done
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-windows-x86_64-bin
+          path: bin/*
+          if-no-files-found: error
+
+  coverage-windows-run:
+    name: Coverage run (windows-x86_64)
+    needs: coverage-windows-build
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-windows-x86_64-bin
+          path: bin
+
+      - name: Smoke test
+        id: smoke
+        shell: bash
+        run: |
+          mkdir -p prof
+          LLVM_PROFILE_FILE="$PWD/prof/%p.profraw" python testing/smoke/smoke_test.py bin
+
+      - name: Upload profiles
+        if: always() && steps.smoke.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-windows-x86_64-prof
+          path: prof/*
+          if-no-files-found: error
+
+  # The report is made on Linux: the coverage tools are pinned for Linux and
+  # macOS hosts only, and read Windows images and profiles all the same.
+  coverage-windows-report:
+    name: Coverage report (windows-x86_64)
+    needs: [coverage-windows-build, coverage-windows-run]
+    if: always() && needs.coverage-windows-build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-windows-x86_64-bin
+          path: bin
+
+      - name: Download profiles
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-windows-x86_64-prof
+          path: prof
+
+      - name: Report
+        run: testing/coverage/report.sh prof report bin/*
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-windows-x86_64
+          path: report/*
+          if-no-files-found: error
