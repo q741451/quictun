@@ -212,13 +212,17 @@ void QuicUdpSocketApi::ReadPacket(
 size_t QuicUdpSocketApi::ReadMultiplePackets(
     QuicUdpSocketFd fd, QuicUdpPacketInfoBitMask packet_info_interested,
     ReadPacketResults* results) {
+  // Stops at the first read that fails, whatever the reason: see the POSIX
+  // version's comment (quic_udp_socket_posix.inc). An error that recurs
+  // without consuming a datagram, such as WSAENETDOWN while an adapter
+  // resets, would otherwise keep the caller reading full batches forever.
   size_t num_packets = 0;
   for (ReadPacketResult& result : *results) {
     result.ok = false;
   }
   for (ReadPacketResult& result : *results) {
     ReadPacket(fd, packet_info_interested, &result);
-    if (!result.ok && WSAGetLastError() == WSAEWOULDBLOCK) {
+    if (!result.ok) {
       break;
     }
     ++num_packets;

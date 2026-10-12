@@ -483,14 +483,20 @@ size_t QuicUdpSocketApi::ReadMultiplePackets(
     return packets_read;
   }
 #else
+  // Stops at the first read that fails, whatever the reason, as recvmmsg()
+  // does on Linux and the IS_GRO loop above does. Stopping only at EAGAIN
+  // would count an error that recurs without consuming a packet as a packet
+  // read, so every call would return a full batch and QuicPacketReader's
+  // caller, which reads until a batch comes back short, would spin without
+  // returning to the event loop. Whatever is still queued -- after a
+  // truncated datagram, say -- is read on the next readable event.
   size_t num_packets = 0;
   for (ReadPacketResult& result : *results) {
     result.ok = false;
   }
   for (ReadPacketResult& result : *results) {
-    errno = 0;
     ReadPacket(fd, packet_info_interested, &result);
-    if (!result.ok && errno == EAGAIN) {
+    if (!result.ok) {
       break;
     }
     ++num_packets;
