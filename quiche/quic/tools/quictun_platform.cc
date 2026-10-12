@@ -18,6 +18,9 @@
 #if defined(__APPLE__)
 #include <sys/resource.h>
 #include <sys/sysctl.h>
+#include <sys/syslimits.h>
+
+#include <algorithm>
 #endif
 
 #include <string>
@@ -83,12 +86,20 @@ absl::Status IgnoreSigpipe() {
 #endif
 
 #if defined(__APPLE__)
-// Raises the soft limit on open files to the most the system allows. macOS
+// Sets the soft limit on open files to the most poll() can wait on. macOS
 // starts processes at 256, far below what a tunnel serving many connections
 // uses (one descriptor each), and running out makes accept() and connect()
 // fail. Go raises it the same way at startup (syscall/rlimit.go): the low
 // default exists for select()'s fixed-size fd_set, and quictun never calls
 // select().
+//
+// But never above OPEN_MAX (10240): XNU's poll() fails with EINVAL for more
+// descriptors than that, whatever the limit (bsd/kern/sys_generic.c), and
+// the event loop treats a failed poll() as fatal. At OPEN_MAX accept() fails
+// with EMFILE instead, which the client logs and rides out. Apple's
+// setrlimit(2) gives the same ceiling: "rlim_cur = min(OPEN_MAX, rlim_max)".
+// Go has no such cap because it waits with kqueue. A soft limit inherited
+// from the shell above OPEN_MAX is lowered to it for the same reason.
 absl::Status RaiseOpenFileLimit() {
   rlimit limit;
   if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
@@ -103,11 +114,11 @@ absl::Status RaiseOpenFileLimit() {
                    0) != 0) {
     return absl::ErrnoToStatus(errno, "sysctl(kern.maxfilesperproc) failed");
   }
-  rlim_t target = limit.rlim_max;
+  rlim_t target = std::min<rlim_t>(limit.rlim_max, OPEN_MAX);
   if (max_per_process > 0 && target > static_cast<rlim_t>(max_per_process)) {
     target = static_cast<rlim_t>(max_per_process);
   }
-  if (limit.rlim_cur >= target) {
+  if (limit.rlim_cur == target) {
     return absl::OkStatus();
   }
   limit.rlim_cur = target;
