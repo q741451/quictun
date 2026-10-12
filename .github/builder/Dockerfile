@@ -7,11 +7,11 @@
 # system -- make for musl; cmake, ninja and python3 for the LLVM runtimes,
 # and binutils' objdump for compiler-rt's configuration of crtbegin.o;
 # file, xz and curl in the scripts and CI steps; bash and coreutils under
-# Bazel's genrules -- which used to come from GitHub's runner image and
-# change whenever it did. The base is pinned by digest and the packages by
-# an archive snapshot, so a rebuild gives the same image: every job builds
-# it afresh rather than caching it. scripts/in-builder.sh runs commands in
-# it, as 115dav's does.
+# Bazel's genrules -- which would otherwise come from GitHub's runner image
+# and change whenever it does. The base is pinned by digest and the packages
+# by an archive snapshot, so a rebuild gives the same image: every job
+# builds it afresh rather than caching it. scripts/in-builder.sh runs
+# commands in it, as 115dav's does.
 
 # Ubuntu 24.04 LTS, the release ubuntu-latest ran when this file replaced
 # it. A tag can be repointed by its publisher; a digest is the content. To

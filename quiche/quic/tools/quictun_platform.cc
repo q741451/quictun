@@ -140,9 +140,9 @@ absl::Status InitQuictunPlatform() {
   // it is redirected to a file, flushing only when the buffer fills
   // (docs.microsoft.com/cpp/c-runtime-library/stream-i-o). abseil flushes
   // after WARNING and up only (absl/log/internal/globals.cc says the same),
-  // so INFO lines and the std::cerr startup banner reached a log file late,
-  // and the last of them never if the process was ended (CTRL_BREAK_EVENT
-  // and console close both end it in ExitProcess(), which does not flush).
+  // so INFO lines and the std::cerr startup banner would reach a log file
+  // late, and whatever is still buffered is lost when the process ends in
+  // ExitProcess(), which does not flush (CTRL_BREAK_EVENT, console close).
   if (setvbuf(stderr, nullptr, _IONBF, 0) != 0) {
     return absl::InternalError("setvbuf(stderr) failed");
   }
