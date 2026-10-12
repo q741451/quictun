@@ -5,8 +5,10 @@
 #include <winsock2.h>
 
 #include <cstddef>
+#include <string>
 
 #include "absl/status/status.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/io/socket.h"
 #include "quiche/quic/core/io/socket_internal.h"

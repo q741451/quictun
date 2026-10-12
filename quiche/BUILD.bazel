@@ -133,19 +133,22 @@ cc_library(
     #
     # linux_only_* (the GSO/sendmmsg batch writers and the socket utils they
     # sit on) only compile against Linux headers, so other OSes leave them
-    # out; quictun refuses the flags that would need them there.
+    # out; quictun refuses the flags that would need them there. The syscall
+    # wrapper is POSIX-only (<sys/socket.h>), so Windows leaves it out too.
     srcs = quiche_core_srcs + default_platform_impl_srcs + select({
         "@platforms//os:linux": linux_only_srcs,
         "//conditions:default": [],
-    }) + [
-        "quic/core/quic_syscall_wrapper.cc",
-    ],
+    }) + select({
+        "@platforms//os:windows": [],
+        "//conditions:default": ["quic/core/quic_syscall_wrapper.cc"],
+    }),
     hdrs = quiche_core_hdrs + default_platform_impl_hdrs + select({
         "@platforms//os:linux": linux_only_hdrs,
         "//conditions:default": [],
-    }) + [
-        "quic/core/quic_syscall_wrapper.h",
-    ],
+    }) + select({
+        "@platforms//os:windows": [],
+        "//conditions:default": ["quic/core/quic_syscall_wrapper.h"],
+    }),
     includes = ["common/platform/default"],
     deps = [
         ":quiche_flags_list",
@@ -374,8 +377,16 @@ test_suite_from_source_list(
 cc_library(
     name = "io_tool_support",
     # quic_syscall_wrapper is compiled into :quiche_core instead; see the
-    # comment on that target.
-    srcs = [s for s in io_tool_support_srcs if s != "quic/core/quic_syscall_wrapper.cc"],
+    # comment on that target. interactive_cli.cc is a terminal demo built on
+    # <termios.h>, which Windows lacks; nothing quictun links calls it.
+    srcs = select({
+        "@platforms//os:windows": [
+            s
+            for s in io_tool_support_srcs
+            if s not in ("quic/core/quic_syscall_wrapper.cc", "quic/tools/interactive_cli.cc")
+        ],
+        "//conditions:default": [s for s in io_tool_support_srcs if s != "quic/core/quic_syscall_wrapper.cc"],
+    }),
     hdrs = [h for h in io_tool_support_hdrs if h != "quic/core/quic_syscall_wrapper.h"],
     deps = [
         ":quiche_core",
@@ -707,6 +718,16 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
     ],
+    # Winsock, and the multimedia timer API InitQuictunPlatform() raises the
+    # timer period with (quictun_platform.cc), named the way abseil's own
+    # BUILD files add their Windows libraries.
+    linkopts = select({
+        "@platforms//os:windows": [
+            "-DEFAULTLIB:ws2_32.lib",
+            "-DEFAULTLIB:winmm.lib",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 cc_binary(

@@ -16,6 +16,7 @@ load(
     "@bazel_tools//tools/cpp:unix_cc_toolchain_config.bzl",
     "cc_toolchain_config",
 )
+load("//build/toolchain:compiler_flags.bzl", "COMPILE_FLAGS", "CXX_FLAGS", "LINK_FLAGS")
 load(":toolchain_paths.bzl", "MACOS_TARGETS", "SDK_PATH", "TOOLCHAIN_PREFIX")
 load(
     ":toolchain_flags.bzl",
@@ -104,10 +105,13 @@ def macos_cc_toolchain(arch, cpu, bazel_cpu, clang_builtin_includes, tool_paths)
         compile_flags = target_flags +
                         sysroot_flags() +
                         libcxx_compile_flags(arch) +
+                        COMPILE_FLAGS +
                         ["-faddrsig"],
+        cxx_flags = CXX_FLAGS,
         link_flags = target_flags +
                      sysroot_flags() +
-                     libcxx_link_flags(arch),
+                     libcxx_link_flags(arch) +
+                     LINK_FLAGS,
         link_libs = libcxx_link_libs(),
         archive_flags = [],
         unfiltered_compile_flags = ["-no-canonical-prefixes"],

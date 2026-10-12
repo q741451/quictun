@@ -1,9 +1,12 @@
 # Automatically detect host platform to pick config
 common --enable_platform_specific_config
 
-# Chromium builds at C++23 (use_cxx23=true as of chromium/src
-# build/config/c++/c++.gni), not C++20.
-build --cxxopt=-std=c++23
+# The compiler flags proper -- C++ standard, no RTTI/exceptions, visibility,
+# sections, PIC -- are in the toolchains, spelled for each one's compiler
+# driver (build/toolchain/compiler_flags.bzl for Linux and macOS,
+# build/toolchain/windows/compiler_flags.bzl for clang-cl). What stays here
+# reads the same to every clang driver.
+
 build --cxxopt=-Wno-nullability-completeness
 build --cxxopt=-Wno-deprecated-declarations
 
@@ -13,15 +16,6 @@ build --define absl=1
 # Don't fail on converting "0xff" to char
 build --copt=-Wno-narrowing
 
-# --- Match Chromium's default compiler config (build/config/compiler/BUILD.gn
-# + build/config/BUILDCONFIG.gn's default_compiler_configs), which is what
-# BoringSSL and QUICHE are actually built with inside Chromium. ---
-
-# no_rtti / no_exceptions: part of default_compiler_configs on every
-# platform, unless a sanitizer build re-enables RTTI.
-build --cxxopt=-fno-rtti
-build --cxxopt=-fno-exceptions
-
 # BoringSSL's own component_config in Chromium's
 # third_party/boringssl/BUILD.gn always defines OPENSSL_SMALL on the
 # library (smaller precomputed tables in things like RSA/DH, some CPU cost
@@ -29,56 +23,26 @@ build --cxxopt=-fno-exceptions
 # check this macro, so it's inert everywhere else.
 build --copt=-DOPENSSL_SMALL
 
-# The rest are is_posix defaults from default_compiler_configs, which covers
-# both Linux and macOS; the one GNU-linker-only flag is under build:linux.
-
-# crbug.com/32204
-build --copt=-fno-strict-aliasing
-
-# Position-independent code (is_linux/is_chromeos/is_android/is_fuchsia).
-# The --linkopt half is in the per-OS sections below, where on Linux it sits
-# just ahead of --gc-sections.
-build --copt=-fPIC
-
-# Hidden visibility by default (build/config/gcc:symbol_visibility_hidden),
-# applied to all is_posix targets.
-build --copt=-fvisibility=hidden
-build --cxxopt=-fvisibility-inlines-hidden
-
-# Put each function/global in its own section so unused ones can be
-# dropped at link time (common_optimize_on_cflags + --gc-sections). Only ELF
-# uses them, and clang ignores them for Mach-O; they stay in this common
-# section because a build:linux config is expanded ahead of these lines, so
-# moving them there would reorder every Linux compile command line (and
-# invalidate every cached action) for no change in output.
-build --copt=-ffunction-sections
-build --copt=-fdata-sections
-build --copt=-fno-unique-section-names
-
 # Chromium never uses the host's system ICU -- it always bundles its own,
 # on every platform, not just macOS. Match that instead of depending on
 # libicu-dev being installed on the build host.
 build --@com_google_googleurl//build_config:system_icu=0
 
-# --- Per host OS (--enable_platform_specific_config, line 2) ---
+# --- Toolchains, per OS ---
 # Linux artifacts are only ever built on Linux and macOS ones only on macOS
-# (Apple's SDK may not be used elsewhere), so the host OS is also the target
-# OS here.
+# (Apple's SDK may not be used elsewhere), so for those two the host OS is
+# also the target OS, and --enable_platform_specific_config (line 2) picks
+# the config. Windows is cross-built on Linux, so it is an explicit
+# --config=windows on top of build:linux, whose toolchains still build the
+# tools Bazel runs on the host.
 #
-# The toolchains are registered here rather than in MODULE.bazel so that a
-# Linux build never loads build/toolchain/macos and a macOS build never loads
-# build/toolchain: each loads a toolchain_paths.bzl that only exists after
-# that OS's setup script has run.
+# The toolchains are registered here rather than in MODULE.bazel so that no
+# build loads another OS's toolchain package: each loads a
+# toolchain_paths.bzl that only exists after that OS's setup script has run.
 
-# The linker half of the -ffunction-sections/-fdata-sections above. GNU-style
-# linkers only; ld64's equivalent, -dead_strip, is in
-# build/toolchain/macos/BUILD.bazel.
-build:linux --linkopt=-fPIC
-build:linux --linkopt=-Wl,--gc-sections
 build:linux --extra_toolchains=//build/toolchain:x64_cc_toolchain,//build/toolchain:x86_cc_toolchain,//build/toolchain:arm64_cc_toolchain,//build/toolchain:armv7_cc_toolchain,//build/toolchain:mipsel_cc_toolchain,//build/toolchain:riscv64_cc_toolchain
 
 build:macos --extra_toolchains=//build/toolchain/macos:arm64_cc_toolchain,//build/toolchain/macos:x64_cc_toolchain
-build:macos --linkopt=-fPIC
 # Bazel's macOS toolchain config defaults to archiving with Apple's libtool;
 # this one archives with the pinned llvm-ar instead.
 build:macos --features=-libtool
@@ -88,3 +52,22 @@ build:macos --host_features=-libtool
 # second -mmacosx-version-min from Xcode's defaults that could disagree.
 build:macos --features=-macos_minimum_os
 build:macos --host_features=-macos_minimum_os
+
+build:windows --extra_toolchains=//build/toolchain/windows:x64_cc_toolchain
+# The cpu rules_cc's Windows toolchain config is declared with. googleurl's
+# BUILD files tell Windows apart by it (config_setting on --cpu), and it
+# keeps Windows outputs in their own bazel-out directory.
+build:windows --cpu=x64_windows
+# Generating .def files to export a library's symbols is for building DLLs,
+# which this build never does, and the tool that does it runs only on a
+# Windows host. googletest asks for it on Windows.
+build:windows --features=no_windows_export_all_symbols
+# /MT: the static MSVC runtime, so the binaries need no runtime DLL.
+build:windows --features=static_link_msvcrt
+# rules_cc's -c opt size flags hard-code the aggressive /OPT:ICF; the
+# toolchain's own opt flags use /OPT:SAFEICF, as Linux uses --icf=safe (see
+# build/toolchain/windows/toolchain_def.bzl).
+build:windows --features=-smaller_binary
+# rules_cc's default /std:c++17; the toolchain's own CXX_FLAGS sets C++23
+# (build/toolchain/windows/compiler_flags.bzl), as Linux's and macOS's do.
+build:windows --features=-default_cpp_std

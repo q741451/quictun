@@ -384,3 +384,123 @@ jobs:
           name: quictun-macos-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
+
+  # Windows, cross-built on the Linux runners as Chromium cross-builds it:
+  # the same pinned clang driven as clang-cl/lld-link, a from-source static
+  # libc++ on the static MSVC runtime, and Microsoft's SDK and CRT fetched at
+  # pinned versions by xwin. See build/toolchain/setup_toolchain_windows.sh.
+  build-windows:
+    name: Build (windows-${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64
+            arch: x64
+            platform: windows_x64
+            machine: "x86-64"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The Linux x64 toolchain as well as the Windows one: it provides the
+      # clang-cl and lld-link, and builds the tools Bazel runs on the host.
+      - name: Restore toolchain (windows-${{ matrix.name }})
+        id: toolchain-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/toolchain/out
+          key: toolchain-windows-${{ matrix.name }}-${{ hashFiles('build/toolchain/setup_toolchain.sh', 'build/toolchain/setup_toolchain_windows.sh', 'build/toolchain/uapi/**') }}
+
+      - name: Set up pinned toolchain (windows-${{ matrix.name }})
+        run: |
+          set -e
+          bash build/toolchain/setup_toolchain.sh x64
+          bash build/toolchain/setup_toolchain_windows.sh ${{ matrix.arch }}
+
+      - name: Save toolchain (windows-${{ matrix.name }})
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/toolchain/out
+          key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
+
+      - name: Restore Bazel (windows-${{ matrix.name }})
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/bazel-windows-${{ matrix.name }}
+            ~/.cache/bazelisk
+          key: bazel-windows-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-${{ github.run_id }}
+          restore-keys: |
+            bazel-windows-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-
+            bazel-windows-${{ matrix.name }}-
+
+      - name: Install bazelisk
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bin/bazelisk" \
+            "https://github.com/bazelbuild/bazelisk/releases/download/$BAZELISK_VERSION/bazelisk-linux-amd64"
+          echo "$BAZELISK_LINUX_AMD64_SHA256  $RUNNER_TEMP/bin/bazelisk" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/bazelisk"
+          ln -sf bazelisk "$RUNNER_TEMP/bin/bazel"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "BAZELISK_HOME=$HOME/.cache/bazelisk" >> "$GITHUB_ENV"
+
+      # The Linux build's CI-only flags have no Windows counterpart to pass:
+      # x64 Windows requires unwind tables (.pdata/.xdata) of every function,
+      # so -fno-asynchronous-unwind-tables does not apply, and lld-link puts
+      # no symbol table in the image without /DEBUG, so there is nothing for
+      # -s to strip.
+      - name: Build
+        id: build
+        run: |
+          set -e
+          ./build/regen_quictun_build_timestamp.sh
+          bazel build -c opt --config=windows \
+            --disk_cache=$HOME/.cache/bazel-windows-${{ matrix.name }}/disk \
+            --repository_cache=$HOME/.cache/bazel-windows-${{ matrix.name }}/repo \
+            --platforms=//build/toolchain/windows:${{ matrix.platform }} \
+            $TARGETS
+
+      - name: Save Bazel (windows-${{ matrix.name }})
+        if: always() && steps.build.outcome != 'skipped'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cache/bazel-windows-${{ matrix.name }}
+            ~/.cache/bazelisk
+          key: bazel-windows-${{ matrix.name }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc', 'build/toolchain/*.bzl', 'build/toolchain/BUILD.bazel', 'build/toolchain/windows/*.bzl', 'build/toolchain/windows/BUILD.bazel') }}-${{ github.run_id }}
+
+      # The counterpart of Linux's "statically linked" check: the images may
+      # import only DLLs that ship with Windows itself, never a runtime one
+      # (VCRUNTIME*, MSVCP*, ucrtbase, api-ms-win-crt-*), which would mean
+      # /MT or the static libc++ did not take.
+      - name: Stage artifacts
+        run: |
+          set -e
+          READOBJ=build/toolchain/out/chromium-clang/bin/llvm-readobj
+          mkdir -p dist
+          for t in $TARGETS; do
+            name=${t#//quiche:}
+            cp "bazel-bin/quiche/$name.exe" "dist/${name}-windows-${{ matrix.name }}.exe"
+          done
+          for f in dist/*; do
+            file "$f"
+            file "$f" | grep -q 'PE32+ executable (console) ${{ matrix.machine }}' || { echo "::error::$f is not a ${{ matrix.name }} console executable"; exit 1; }
+            dlls=$($READOBJ --coff-imports "$f" | awk '/Name:/{print toupper($2)}' | sort -u)
+            echo "$dlls"
+            if echo "$dlls" | grep -E '^(VCRUNTIME|MSVCP|UCRTBASE|API-MS-WIN-CRT-|LIBC\+\+)'; then
+              echo "::error::$f depends on a runtime DLL"; exit 1
+            fi
+            ls -l "$f"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quictun-windows-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error

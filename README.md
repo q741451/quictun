@@ -3,7 +3,7 @@
 `quictun` tunnels raw TCP over QUIC transport -- no HTTP/3, no MASQUE, no
 framing of its own. Two small binaries, `quictun_server` and
 `quictun_client`, built on Google's [QUICHE](#quiche): fully static on
-Linux, and also built for [macOS](#macos).
+Linux, and also built for [macOS](#macos) and [Windows](#windows).
 
 ```
 quictun_server --listen=[::]:4433 --target=127.0.0.1:12948 --key='a real shared secret'
@@ -158,7 +158,8 @@ pinned, from-scratch toolchain (Chromium's pinned clang, plus a musl libc,
 a compiler-rt, and a libc++/libc++abi/libunwind all built from source by
 that same clang) so builds don't depend on the Ubuntu version running the
 build -- or on its libc at all. The same run builds macOS `arm64` and
-`x86_64` binaries (see [macOS](#macos)). Grab them from the *Artifacts*
+`x86_64` binaries (see [macOS](#macos)) and Windows `x86_64` ones (see
+[Windows](#windows)). Grab them from the *Artifacts*
 section of the corresponding run under the [Actions tab](../../actions);
 tagged versions are also published on the Releases page.
 
@@ -175,15 +176,45 @@ Differences from Linux:
 - `--udp_gso` (and so `--so_txtime`) and the client's `--transparent` need
   Linux; on macOS they are refused at startup rather than ignored. The
   server's `--transparent` works.
-- No `SO_REUSEPORT` on the server: macOS would let a second instance bind
-  the same port without spreading load across them, so a second
-  `quictun_server` on the same `--listen` port fails instead. Run one.
+- One server per port: macOS would let a second instance bind the same
+  port without spreading load across them, so `SO_REUSEPORT` is left off
+  and a second `quictun_server` on the same `--listen` port fails instead.
 - Binaries downloaded with a browser are quarantined by Gatekeeper; clear
   that once with `xattr -d com.apple.quarantine quictun_*-macos-*`.
 - To keep one running, use a launchd agent; a laptop that sleeps drops its
   tunnels like any other network connection.
 - macOS starts processes with a limit of 256 open files; both binaries raise
   it to the most the system allows at startup, since every tunnel holds one.
+- When the server goes away, the client logs `Error reading packet:
+  Connection refused` a few times, as the ICMP port unreachable reaches it;
+  Linux takes the same error without logging it. It changes nothing, and
+  the client reconnects once the server is back.
+
+## Windows
+
+`quictun_client-windows-x86_64.exe` and `quictun_server-windows-x86_64.exe`
+run on Windows 10 version 2004 (build 19041) or later, and Windows Server
+2022 or later, x64; on anything older they stop at startup with an error
+naming the version found. They are cross-built on Linux with the same pinned
+clang, against the static MSVC runtime and a static libc++, so they need no
+Visual C++ Redistributable: the only DLLs they load ship with Windows
+(`KERNEL32`, `WS2_32`, `ADVAPI32`, `WINMM`, `dbghelp`).
+
+Differences from Linux:
+
+- `--udp_gso` (and so `--so_txtime`) and the client's `--transparent` need
+  Linux; on Windows they are refused at startup rather than ignored. The
+  server's `--transparent` works.
+- One server per port: the listening socket is exclusive
+  (`SO_EXCLUSIVEADDRUSE`), so a second `quictun_server` on the same
+  `--listen` port fails instead.
+- Windows Defender Firewall may ask the first time `quictun_server`
+  listens; on a machine nobody is in front of, add an inbound UDP rule for
+  the `--listen` port instead.
+- A laptop that sleeps drops its tunnels like any other network connection.
+- Windows 10 2004 is the floor because `WSAPoll()`, which the event loop
+  sleeps in, only reports a failed outgoing connect from that release on;
+  before it, a `quictun_server` whose `--target` is down would never notice.
 
 ## Building from source
 
@@ -250,6 +281,25 @@ the same LLVM commit as Linux, into the same `build/toolchain/out/`. For an
 Intel binary, also run `setup_toolchain_macos.sh x64` and build with
 `--platforms=//build/toolchain/macos:macos_x64`; arm64 stays set up either
 way, since it is what Bazel builds its host-side tools with.
+
+### For Windows
+
+Windows binaries are cross-built on Linux, after the Linux `x64` setup above:
+
+```
+bash build/toolchain/setup_toolchain.sh x64
+bash build/toolchain/setup_toolchain_windows.sh x64
+./build/regen_quictun_build_timestamp.sh
+bazel build -c opt --config=windows --platforms=//build/toolchain/windows:windows_x64 //quiche:quictun_client //quiche:quictun_server
+```
+
+`setup_toolchain_windows.sh` downloads Microsoft's C runtime and Windows SDK
+through a pinned [xwin](https://github.com/Jake-Shadle/xwin), which accepts
+Microsoft's license for them on your behalf -- read it before running the
+script. It checks what it unpacked against a recorded hash, then builds
+libc++ for Windows from the same LLVM commit, into the same
+`build/toolchain/out/`. The binaries come out as
+`bazel-bin/quiche/quictun_client.exe` and `quictun_server.exe`.
 
 ---
 

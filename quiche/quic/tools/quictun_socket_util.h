@@ -22,9 +22,11 @@ namespace quic {
 // being bound is IPv6.
 absl::Status SetIpv6OnlyDisabled(SocketFd fd);
 
-// Sets SO_REUSEADDR and SO_REUSEPORT on `fd`. Used on the client's --local
-// TCP listener so a restart can rebind while its previous connections are
-// still in TIME_WAIT. Off Linux, SO_REUSEADDR only: see the .cc file.
+// Sets SO_REUSEADDR and SO_REUSEPORT on `fd`: the client's --local TCP
+// listener can then rebind after a restart while its previous connections
+// are still in TIME_WAIT, and quictun_server processes can share one UDP
+// port. Off Linux, SO_REUSEADDR only, and on Windows SO_EXCLUSIVEADDRUSE
+// instead: see the .cc file.
 absl::Status SetReuseAddrAndPort(SocketFd fd);
 
 // Creates a non-blocking UDP socket for `address_for_family`'s address

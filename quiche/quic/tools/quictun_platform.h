@@ -15,6 +15,8 @@ namespace quic {
 // Called first thing in main(), before any socket exists. Per OS:
 //   Linux    SIGPIPE ignored
 //   macOS    SIGPIPE ignored; the open file limit raised
+//   Windows  Winsock started; the Windows version checked; the system timer
+//            at its finest period
 // An error means quictun cannot run correctly on this system, and the
 // binaries exit on it.
 absl::Status InitQuictunPlatform();

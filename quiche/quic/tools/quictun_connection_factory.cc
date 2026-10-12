@@ -12,8 +12,12 @@
 #include <optional>
 #include <string>
 
+#if defined(_WIN32)
+#include <winsock2.h>
+#else
 #include <netinet/in.h>
 #include <sys/socket.h>
+#endif
 
 // Kernel UAPI headers are a glibc-sysroot convenience, not something a libc
 // has to ship: musl deliberately provides none of <linux/*>, so this build's

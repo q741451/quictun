@@ -19,6 +19,7 @@ load(
     "@bazel_tools//tools/cpp:unix_cc_toolchain_config.bzl",
     "cc_toolchain_config",
 )
+load(":compiler_flags.bzl", "COMPILE_FLAGS", "CXX_FLAGS", "LINK_FLAGS")
 load(":toolchain_paths.bzl", "ARCH_TARGET_FLAGS", "MUSL_TARGETS", "TOOLCHAIN_PREFIX")
 load(
     ":toolchain_flags.bzl",
@@ -121,10 +122,16 @@ def musl_cc_toolchain(arch, cpu, bazel_cpu, clang_builtin_includes, tool_paths):
         tool_paths = tool_paths,
         compile_flags = target_flags +
                         sysroot_flags(arch) +
-                        libcxx_compile_flags(arch),
+                        libcxx_compile_flags(arch) +
+                        COMPILE_FLAGS,
+        cxx_flags = CXX_FLAGS,
+        # --gc-sections on every link, the linker half of COMPILE_FLAGS'
+        # -ffunction-sections; _OPT_LINK_FLAGS repeats it for -c opt.
         link_flags = target_flags +
                      sysroot_flags(arch) +
-                     libcxx_link_flags(arch),
+                     libcxx_link_flags(arch) +
+                     LINK_FLAGS +
+                     ["-Wl,--gc-sections"],
         link_libs = libcxx_link_libs(),
         archive_flags = [],
         unfiltered_compile_flags = ["-no-canonical-prefixes"],

@@ -1,0 +1,52 @@
+# The Windows counterpart of build/toolchain/BUILD.bazel: Chromium's pinned
+# clang, driven as clang-cl and lld-link, and a from-source static libc++ on
+# the static MSVC runtime, with Microsoft's SDK and CRT (fetched by xwin) in
+# place of the musl sysroot. See setup_toolchain_windows.sh for what is
+# pinned to what, toolchain_def.bzl for the toolchain, compiler_flags.bzl for
+# its compiler flags and toolchain_flags.bzl for the SDK and libc++ ones.
+#
+# A separate package, like build/toolchain/macos, because it loads a
+# toolchain_paths.bzl that only setup_toolchain_windows.sh writes. Windows is
+# cross-built on Linux, so its toolchain is registered by an explicit
+# --config=windows (.bazelrc) rather than by host OS: a plain Linux build
+# never loads this package.
+
+load(":toolchain_def.bzl", "windows_cc_toolchain")
+load(":toolchain_paths.bzl", "CLANG_RESOURCE_DIR", "TOOLCHAIN_PREFIX")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(name = "empty")
+
+CLANG_BIN = TOOLCHAIN_PREFIX + "/chromium-clang/bin"
+
+LLVM_TOOL_PATHS = {
+    "cl": CLANG_BIN + "/clang-cl",
+    "link": CLANG_BIN + "/lld-link",
+    "lib": TOOLCHAIN_PREFIX + "/windows-bin/llvm-lib",
+    "ml": CLANG_BIN + "/llvm-ml",
+}
+
+# clang's own resource-dir headers -- identical for every target, since it's
+# one clang binary for all of them.
+CLANG_BUILTIN_INCLUDES = [
+    CLANG_RESOURCE_DIR + "/include",
+]
+
+# One line per architecture, as in build/toolchain/BUILD.bazel: this repo's
+# name for it (which keys WINDOWS_TARGETS, the --target table that
+# setup_toolchain_windows.sh writes), cc_toolchain_config's `cpu`, the
+# @platforms//cpu: constraint, and lld-link's /MACHINE.
+[
+    windows_cc_toolchain(
+        arch = arch,
+        cpu = cpu,
+        bazel_cpu = bazel_cpu,
+        machine = machine,
+        clang_builtin_includes = CLANG_BUILTIN_INCLUDES,
+        tool_paths = LLVM_TOOL_PATHS,
+    )
+    for (arch, cpu, bazel_cpu, machine) in [
+        ("x64", "x64_windows", "x86_64", "X64"),
+    ]
+]

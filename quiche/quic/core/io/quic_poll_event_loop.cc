@@ -43,14 +43,26 @@ namespace {
 
 using PollMask = decltype(::pollfd().events);
 
+#if defined(_WIN32)
+// WSAPoll()'s POLLIN is POLLRDNORM | POLLRDBAND, and POLLRDBAND reports a TCP
+// urgent byte, which recv() without MSG_OOB never consumes: asking for POLLIN
+// would let one urgent byte from a peer wake the loop forever. POLLRDNORM is
+// normal data alone -- what POLLIN means on Linux, and all Chromium waits for
+// (FD_READ, never FD_OOB, in net/socket/tcp_socket_win.cc). The urgent byte
+// is skipped by recv(), as on Linux.
+constexpr PollMask kPollReadable = POLLRDNORM;
+#else
+constexpr PollMask kPollReadable = POLLIN;
+#endif
+
 PollMask GetPollMask(QuicSocketEventMask event_mask) {
-  return ((event_mask & kSocketEventReadable) ? POLLIN : 0) |
+  return ((event_mask & kSocketEventReadable) ? kPollReadable : 0) |
          ((event_mask & kSocketEventWritable) ? POLLOUT : 0) |
          ((event_mask & kSocketEventError) ? POLLERR : 0);
 }
 
 QuicSocketEventMask GetEventMask(PollMask poll_mask) {
-  return ((poll_mask & POLLIN) ? kSocketEventReadable : 0) |
+  return ((poll_mask & kPollReadable) ? kSocketEventReadable : 0) |
          ((poll_mask & POLLOUT) ? kSocketEventWritable : 0) |
          ((poll_mask & POLLERR) ? kSocketEventError : 0);
 }
@@ -164,15 +176,18 @@ int QuicPollEventLoop::PollWithRetries(absl::Span<pollfd> fds,
     poll_result =
         PollSyscall(fds.data(), fds.size(), static_cast<int>(timeout_ms));
 
+#if !defined(_WIN32)
     // Nothing is dispatched after a failed poll(), and nothing about the next
     // call would differ, so the loop would spin without a trace. The ways it
     // can fail besides EINTR (EFAULT, EINVAL, ENOMEM) are a bug or a system
-    // out of memory; neither is something to carry on through.
+    // out of memory; neither is something to carry on through. PollSyscall()
+    // fails loudly itself on Windows, where the error is not in errno.
     if (poll_result < 0 && errno != EINTR) {
       const int error = errno;
       QUICHE_LOG(FATAL) << "poll() failed on " << fds.size()
                         << " sockets: " << strerror(error);
     }
+#endif
     // Stop if there are events or a non-EINTR error.
     bool done = poll_result > 0 || (poll_result < 0 && errno != EINTR);
     if (done) {
@@ -236,14 +251,21 @@ void QuicPollEventLoop::ProcessIoEvents(QuicTime start_time,
   has_artificial_events_pending_ = false;
 
   if (poll_result > 0 && ready_list.empty()) {
-    // poll() returned, but only with conditions nobody was waiting for, such
-    // as an unsubscribed POLLERR (6990cb05d's 100% CPU). Such a condition
-    // stays until something consumes it or the socket is closed, so the next
-    // poll() would return at once too and the loop spin. Wait 1ms first
-    // instead: whoever is waiting on the socket is still woken by its own
-    // event, at most 1ms late, and no core is pinned meanwhile. Logged at
-    // ERROR, the lowest level shown by default.
+    // poll() returned, but only with conditions nobody was waiting for: an
+    // unsubscribed POLLERR (6990cb05d's 100% CPU), or WSAPoll()'s POLLHUP on
+    // a socket whose reader has already seen EOF (see DispatchIoEvent()).
+    // Such a condition stays until something consumes it or the socket is
+    // closed, so the next poll() would return at once too and the loop spin.
+    // Wait 1ms first instead: whoever is waiting on the socket is still woken
+    // by its own event, at most 1ms late, and no core is pinned meanwhile.
+    // Logged at ERROR, the lowest level shown by default, except for the one
+    // case that is expected: WSAPoll()'s POLLHUP alone.
     for (i = 0; i < polled_count; i++) {
+#if defined(_WIN32)
+      if (pollfds[i].revents == POLLHUP) {
+        continue;
+      }
+#endif
       if (pollfds[i].revents != 0) {
         QUICHE_LOG_EVERY_N_SEC(ERROR, 60)
             << "poll() reported only unrequested events (fd " << pollfds[i].fd
@@ -270,7 +292,19 @@ void QuicPollEventLoop::DispatchIoEvent(std::vector<ReadyListEntry>& ready_list,
   Registration& registration = *it->second;
 
   mask |= GetPollMask(registration.artificially_notify_at_next_iteration);
-#if !defined(__linux__)
+#if defined(_WIN32)
+  // WSAPoll() reports POLLHUP as soon as the peer has shut down its sending
+  // side, and keeps reporting it, requested or not, until the socket is
+  // closed. Linux reports that as readable (EOF), and so do wepoll and libuv
+  // on Windows (AFD_POLL_DISCONNECT -> EPOLLIN | EPOLLRDHUP), so it wakes the
+  // reader only. Waking the writer too, as below, would have it send into a
+  // full buffer, get WSAEWOULDBLOCK and be woken again at once. A refused
+  // connect() still reaches its waiter: since Windows 10 2004, the oldest
+  // quictun runs on, it comes with POLLERR and POLLWRNORM as well.
+  if (mask & POLLHUP) {
+    mask |= kPollReadable;
+  }
+#elif !defined(__linux__)
   // A hang-up wakes everything that is waiting on the socket, as libevent's
   // poll backend (poll.c) and Chromium's epoll pump do: each callback then
   // reads, writes or collects its connect result and gets the real error.
@@ -332,7 +366,26 @@ void QuicPollEventLoop::WakeUp() {
 
 int QuicPollEventLoop::PollSyscall(pollfd* fds, size_t nfds, int timeout) {
 #if defined(_WIN32)
-  return WSAPoll(fds, nfds, timeout);
+  // WSAPoll() accepts only POLLRDNORM, POLLRDBAND, POLLWRNORM and POLLPRI in
+  // `events` and fails the whole call with WSAEINVAL on anything else; error
+  // conditions are always reported in `revents` without being asked for
+  // (Microsoft's WSAPoll documentation). POSIX likewise ignores POLLERR in
+  // `events`, so dropping it here changes nothing that poll() would report.
+  // nginx's ngx_win32_poll_module.c requests only POLLIN/POLLOUT for the
+  // same reason.
+  for (size_t i = 0; i < nfds; ++i) {
+    fds[i].events &= ~POLLERR;
+  }
+  int result = WSAPoll(fds, static_cast<ULONG>(nfds), timeout);
+  // Winsock reports its errors through WSAGetLastError(), not errno, and has
+  // no EINTR to retry on, so the caller's errno check cannot see a failure:
+  // it would dispatch nothing and poll again at once, forever. Fail loudly
+  // instead, as nginx does (ngx_win32_poll_module.c: "WSAPoll() failed").
+  if (result == SOCKET_ERROR) {
+    QUICHE_LOG(FATAL) << "WSAPoll() failed with error " << WSAGetLastError()
+                      << " on " << nfds << " sockets";
+  }
+  return result;
 #else
   return ::poll(fds, nfds, timeout);
 #endif  // defined(_WIN32)

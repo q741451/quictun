@@ -4,8 +4,16 @@
 
 #include "quiche/quic/tools/quictun_platform.h"
 
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <windows.h>
+#include <timeapi.h>
+
+#include "absl/strings/str_cat.h"
+#else
 #include <cerrno>
 #include <csignal>
+#endif
 #if defined(__APPLE__)
 #include <sys/resource.h>
 #include <sys/sysctl.h>
@@ -17,6 +25,39 @@ namespace quic {
 
 namespace {
 
+#if defined(_WIN32)
+// Windows 10 2004 (build 19041), the first whose WSAPoll() reports a
+// non-blocking connect() that failed; quictun_server's connect to --target
+// depends on that. setup_toolchain_windows.sh's WINDOWS_MIN_VERSION says the
+// same for the image.
+constexpr unsigned long kMinWindowsBuild = 19041;
+
+absl::Status CheckWindowsVersion() {
+  // RtlGetVersion rather than GetVersionEx, which reports an older Windows
+  // than the real one to a program without a compatibility manifest --
+  // msquic determines the version the same way (platform_winuser.c).
+  using RtlGetVersionFn = LONG(WINAPI*)(RTL_OSVERSIONINFOW*);
+  RTL_OSVERSIONINFOW version = {};
+  version.dwOSVersionInfoSize = sizeof(version);
+  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  auto rtl_get_version =
+      ntdll == nullptr ? nullptr
+                       : reinterpret_cast<RtlGetVersionFn>(
+                             GetProcAddress(ntdll, "RtlGetVersion"));
+  if (rtl_get_version == nullptr || rtl_get_version(&version) != 0) {
+    return absl::InternalError("Cannot determine the Windows version");
+  }
+  if (version.dwMajorVersion < 10 ||
+      (version.dwMajorVersion == 10 &&
+       version.dwBuildNumber < kMinWindowsBuild)) {
+    return absl::FailedPreconditionError(absl::StrCat(
+        "Windows 10 2004 (build ", kMinWindowsBuild,
+        ") or later is required; this is ", version.dwMajorVersion, ".",
+        version.dwMinorVersion, " build ", version.dwBuildNumber));
+  }
+  return absl::OkStatus();
+}
+#else
 absl::Status IgnoreSigpipe() {
   // quic::socket_api::Send() (quic/core/io/socket.cc) is a bare ::send()
   // with no MSG_NOSIGNAL, so writing to a tunneled TCP socket -- the
@@ -26,12 +67,14 @@ absl::Status IgnoreSigpipe() {
   // disposition, that kills the whole process instantly with no log line
   // and no crash report, instead of the EPIPE status that should have just
   // closed that one tunnel (QuictunTunnel::SendComplete() already handles
-  // a failed send correctly).
+  // a failed send correctly). Windows has no SIGPIPE: such a send fails
+  // with WSAECONNRESET.
   if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
     return absl::ErrnoToStatus(errno, "signal(SIGPIPE) failed");
   }
   return absl::OkStatus();
 }
+#endif
 
 #if defined(__APPLE__)
 // Raises the soft limit on open files to the most the system allows. macOS
@@ -71,7 +114,33 @@ absl::Status RaiseOpenFileLimit() {
 
 }  // namespace
 
-#if defined(__APPLE__)
+#if defined(_WIN32)
+absl::Status InitQuictunPlatform() {
+  // Winsock must be started before any socket call; QUICHE leaves that to
+  // the program, as msquic does in its own datapath setup.
+  WSADATA wsa_data;
+  if (int error = WSAStartup(MAKEWORD(2, 2), &wsa_data); error != 0) {
+    return absl::InternalError(absl::StrCat("WSAStartup() failed: ", error));
+  }
+  if (absl::Status status = CheckWindowsVersion(); !status.ok()) {
+    return status;
+  }
+  // The event loop sleeps in WSAPoll(), whose timeout is rounded to the
+  // system timer's period, 15.6ms by default: pacing deadlines a few ms
+  // out would then be missed by up to that much, and packets go out in
+  // bursts. Raised to the finest period the timer supports, as msquic does
+  // (timeGetDevCaps + timeBeginPeriod, platform_winuser.c); since Windows
+  // 10 2004 the setting only affects this process.
+  TIMECAPS caps;
+  if (MMRESULT r = timeGetDevCaps(&caps, sizeof(caps)); r != TIMERR_NOERROR) {
+    return absl::InternalError(absl::StrCat("timeGetDevCaps() failed: ", r));
+  }
+  if (MMRESULT r = timeBeginPeriod(caps.wPeriodMin); r != TIMERR_NOERROR) {
+    return absl::InternalError(absl::StrCat("timeBeginPeriod() failed: ", r));
+  }
+  return absl::OkStatus();
+}
+#elif defined(__APPLE__)
 absl::Status InitQuictunPlatform() {
   if (absl::Status status = IgnoreSigpipe(); !status.ok()) {
     return status;
