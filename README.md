@@ -184,7 +184,9 @@ Differences from Linux:
 - To keep one running, use a launchd agent; a laptop that sleeps drops its
   tunnels like any other network connection.
 - macOS starts processes with a limit of 256 open files; both binaries raise
-  it to the most the system allows at startup, since every tunnel holds one.
+  it at startup, since every tunnel holds one, to the most `poll()` accepts
+  there (10240) or the system allows, whichever is lower. A client
+  past that stops accepting for 500ms at a time rather than failing.
 - When the server goes away, the client logs `Error reading packet:
   Connection refused` a few times, as the ICMP port unreachable reaches it;
   Linux takes the same error without logging it. It changes nothing, and
@@ -198,7 +200,7 @@ run on Windows 10 version 2004 (build 19041) or later, and Windows Server
 naming the version found. They are cross-built on Linux with the same pinned
 clang, against the static MSVC runtime and a static libc++, so they need no
 Visual C++ Redistributable: the only DLLs they load ship with Windows
-(`KERNEL32`, `WS2_32`, `ADVAPI32`, `WINMM`, `dbghelp`).
+(`KERNEL32`, `WS2_32`, `ADVAPI32`, `SHELL32`, `WINMM`, `dbghelp`).
 
 Differences from Linux:
 

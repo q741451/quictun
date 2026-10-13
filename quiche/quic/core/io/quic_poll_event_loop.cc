@@ -380,7 +380,7 @@ int QuicPollEventLoop::PollSyscall(pollfd* fds, size_t nfds, int timeout) {
   // Winsock reports its errors through WSAGetLastError(), not errno, and has
   // no EINTR to retry on, so the caller's errno check cannot see a failure:
   // it would dispatch nothing and poll again at once, forever. Fail loudly
-  // instead, as nginx does (ngx_win32_poll_module.c: "WSAPoll() failed").
+  // instead, as the poll() branch does; nginx's loop logs the same failure.
   if (result == SOCKET_ERROR) {
     QUICHE_LOG(FATAL) << "WSAPoll() failed with error " << WSAGetLastError()
                       << " on " << nfds << " sockets";
