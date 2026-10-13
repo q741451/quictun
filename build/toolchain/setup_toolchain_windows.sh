@@ -39,10 +39,10 @@ FILE_PREFIX_MAP="/clang:-ffile-prefix-map=$BUILD_ROOT/="
 
 # --- Pins ---
 # Shared with Linux, read from setup_toolchain.sh's own assignments.
-eval "$(grep -E '^(LLVM_COMMIT|LLVM_SRC_SHA256)=' \
+eval "$(grep -E '^LLVM_COMMIT=' \
   "$REPO_ROOT/build/toolchain/setup_toolchain.sh")"
-if [ -z "${LLVM_COMMIT:-}" ] || [ -z "${LLVM_SRC_SHA256:-}" ]; then
-  echo "Could not read the LLVM pins from setup_toolchain.sh" >&2
+if [ -z "${LLVM_COMMIT:-}" ]; then
+  echo "Could not read LLVM_COMMIT from setup_toolchain.sh" >&2
   exit 1
 fi
 # xwin, the tool that fetches and lays out the SDK and CRT.
@@ -194,7 +194,6 @@ if [ ! -d "$SRC" ]; then
   TARBALL="$SRC_ROOT/llvm-$LLVM_COMMIT.tar.gz"
   curl -fsSL --retry 3 -o "$TARBALL" \
     "https://github.com/llvm/llvm-project/archive/${LLVM_COMMIT}.tar.gz"
-  echo "$LLVM_SRC_SHA256  $TARBALL" | sha256sum -c -
   tar -xzf "$TARBALL" -C "$SRC_ROOT" \
     "llvm-project-$LLVM_COMMIT/compiler-rt" \
     "llvm-project-$LLVM_COMMIT/libcxx" \

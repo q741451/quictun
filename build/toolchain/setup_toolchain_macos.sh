@@ -8,7 +8,7 @@
 # The SDK is pinned by version below and refused if it is anything else.
 #
 # What is shared with setup_toolchain.sh is read out of it rather than
-# repeated: CLANG_PACKAGE_VERSION, LLVM_COMMIT and LLVM_SRC_SHA256 exist in
+# repeated: CLANG_PACKAGE_VERSION and LLVM_COMMIT exist in
 # exactly one place, so the Linux and macOS binaries cannot drift onto
 # different compilers.
 #
@@ -37,10 +37,9 @@ FILE_PREFIX_MAP="-ffile-prefix-map=$BUILD_ROOT/="
 
 # --- Pins ---
 # Shared with Linux, read from setup_toolchain.sh's own assignments.
-eval "$(grep -E '^(CLANG_PACKAGE_VERSION|LLVM_COMMIT|LLVM_SRC_SHA256)=' \
+eval "$(grep -E '^(CLANG_PACKAGE_VERSION|LLVM_COMMIT)=' \
   "$REPO_ROOT/build/toolchain/setup_toolchain.sh")"
-if [ -z "${CLANG_PACKAGE_VERSION:-}" ] || [ -z "${LLVM_COMMIT:-}" ] ||
-   [ -z "${LLVM_SRC_SHA256:-}" ]; then
+if [ -z "${CLANG_PACKAGE_VERSION:-}" ] || [ -z "${LLVM_COMMIT:-}" ]; then
   echo "Could not read the clang/LLVM pins from setup_toolchain.sh" >&2
   exit 1
 fi
@@ -130,7 +129,6 @@ if [ ! -d "$SRC" ]; then
   TARBALL="$SRC_ROOT/llvm-$LLVM_COMMIT.tar.gz"
   curl -fsSL --retry 3 -o "$TARBALL" \
     "https://github.com/llvm/llvm-project/archive/${LLVM_COMMIT}.tar.gz"
-  echo "$LLVM_SRC_SHA256  $TARBALL" | shasum -a 256 -c -
   tar -xzf "$TARBALL" -C "$SRC_ROOT" \
     "llvm-project-$LLVM_COMMIT/libcxx" \
     "llvm-project-$LLVM_COMMIT/libcxxabi" \

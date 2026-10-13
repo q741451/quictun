@@ -75,12 +75,14 @@ FILE_PREFIX_MAP="-ffile-prefix-map=$BUILD_ROOT/="
 # (CLANG_REVISION/CLANG_SUB_REVISION) as of 2026-06-16.
 CLANG_PACKAGE_VERSION=llvmorg-23-init-19482-g53d18800-2
 LLVM_COMMIT=53d18800eda3b7407e53366f27ca78e922c6e0db
-# Checksums of the clang package (Linux_x64) and of GitHub's source archive
-# of LLVM_COMMIT, both from repeated downloads that matched; they change
-# together with the two lines above. setup_toolchain_macos.sh reads
-# LLVM_SRC_SHA256 from here too.
+# Checksum of the clang package (Linux_x64), from repeated downloads that
+# matched; it changes together with the two lines above. The LLVM source
+# archive has none: GitHub generates it on demand, and its bytes change
+# without the commit changing (git archive expands .git_archival.txt's
+# describe-name, whose abbreviation grows with the repository), so a checksum
+# of it fails on a download that is the same source. LLVM_COMMIT is a full
+# commit hash and names the content.
 CLANG_PACKAGE_SHA256=94940b8da1c3e7fec9020a75cfc4e852922a4d163dab8957e691a36ae5d49f0b
-LLVM_SRC_SHA256=c8cab6605e82e2024c78a5c868032a68e18a00c54fe9fd9b94a00497bd2ea0e9
 # musl release. The checksum is the one computed from the tarball actually
 # downloaded here and cross-checked against a second, independent mirror --
 # not copied from upstream's site, which isn't reachable from here at all
@@ -504,7 +506,6 @@ if [ ! -d "$SRC" ]; then
   TARBALL="$SRC_ROOT/llvm-$LLVM_COMMIT.tar.gz"
   curl -fsSL --retry 3 -o "$TARBALL" \
     "https://github.com/llvm/llvm-project/archive/${LLVM_COMMIT}.tar.gz"
-  echo "$LLVM_SRC_SHA256  $TARBALL" | sha256sum -c -
   tar -xzf "$TARBALL" -C "$SRC_ROOT" \
       "llvm-project-$LLVM_COMMIT/compiler-rt" \
       "llvm-project-$LLVM_COMMIT/libcxx" \
