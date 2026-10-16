@@ -230,8 +230,7 @@ absl::StatusOr<std::optional<QuictunRunAs>> ResolveQuictunUser(
   if (user.empty()) {
     return std::nullopt;
   }
-  // A number is a uid, anything else a name, as shadowsocks-libev's run_as()
-  // reads -a (utils.c).
+  // A number is a uid, anything else a name.
   uint64_t uid = 0;
   const bool numeric = absl::SimpleAtoi(user, &uid);
   if (numeric && uid >= UINT32_MAX) {  // UINT32_MAX is (uid_t)-1.
@@ -240,7 +239,7 @@ absl::StatusOr<std::optional<QuictunRunAs>> ResolveQuictunUser(
   }
   // getpwnam_r() and getpwuid_r() rather than getpwnam() and getpwuid(),
   // which return a pointer into a static buffer; retried with a larger
-  // buffer on ERANGE, up to the same 16 KiB cap as shadowsocks-libev.
+  // buffer on ERANGE, as getpwnam_r(3) advises, up to a 16 KiB cap.
   passwd entry;
   passwd* found = nullptr;
   std::vector<char> buffer(1024);

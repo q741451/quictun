@@ -157,12 +157,12 @@ traffic on the same socket.
 sudo quictun_server --listen=[::]:443 --target=127.0.0.1:12948 --key='a real shared secret' --user=quictun
 ```
 
-`--user` (on both binaries; Linux and macOS) is shadowsocks-libev's `-a`: the
-process starts as root, binds its listening sockets, then switches to the
-user -- a name or a numeric uid -- and exits with an error if it cannot. That
-is the one thing quictun needs root for, a port below 1024 such as UDP 443;
-everything after it, including the client opening a new UDP socket to
-reconnect, needs no privilege at all, and the process keeps no capability. A
+With `--user` (on both binaries; Linux and macOS) the process starts as root,
+binds its listening sockets, then switches to the user -- a name or a numeric
+uid -- and exits with an error if it cannot. Binding is the one thing quictun
+needs root for, a port below 1024 such as UDP 443; everything after it,
+including the client opening a new UDP socket to reconnect, needs no
+privilege at all, and the process keeps no capability. A
 user that does not exist, or a process that is not root and not already that
 user, stops it before anything is bound. Without root, the usual way to the
 same end is for the service manager to start the process as that user, on a
