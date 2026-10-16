@@ -8,6 +8,7 @@ is where they differ from it.
 | Script | Does |
 | --- | --- |
 | `smoke_test.py <dir>` | Runs the `quictun_server-*`/`quictun_client-*` binaries in `<dir>` on loopback through the cases that differ between the three systems or once pinned a core (half-close, urgent data, resets, a response tail after the target closes, running out of file descriptors, a server that goes away). Fails on broken data, and on either process using more than 20% of a core after a case. |
+| `smoke_test.py <dir>`, as root | On Linux and macOS, run as root it runs only the `--user` cases, which need root: both binaries bind below 1024, switch to `nobody`, and carry a tunnel, including across a server that goes away and returns. |
 | `poll_probe.py` | Prints what `poll()` (`WSAPoll()` on Windows) and `select()` report in those same cases, without quictun involved. Asserts nothing; compare it with Linux's output. |
 
 In CI they are off by default. To run them, start the *Build* workflow by

@@ -40,6 +40,17 @@ once pinned a core:
   server gone / restarted  ICMP port unreachable on the client's UDP socket,
                            then recovery
   client restarted         rebinding --local while old connections linger
+  --user errors            the flag stops quictun, before it listens, when the
+                           user is unknown or needs root it lacks (Windows:
+                           always), and is a no-op for the user already running
+
+Run as root (not Windows), it runs only the --user cases, which need root:
+
+  --user drop              both binaries bind below 1024, then run as the user:
+                           ids and capabilities, a tunnel through them, a
+                           server that goes away and returns -- the client
+                           opens a new UDP socket, as that user -- and
+                           --user=root, which changes nothing
 
 Exits non-zero if any check failed. Server and client logs are kept in a
 temporary directory, printed at the end; their E/F lines are shown inline.
@@ -184,23 +195,25 @@ class Harness:
         self.procs.append((proc, log))
         return proc
 
-    def start_server(self, udp_port, target_port, log_name):
+    def start_server(self, udp_port, target_port, log_name, extra=()):
         return self.start([self.bin.server, f"--listen=127.0.0.1:{udp_port}",
-                           f"--target=127.0.0.1:{target_port}", KEY], log_name)
+                           f"--target=127.0.0.1:{target_port}", KEY, *extra],
+                          log_name)
 
-    def start_client(self, local_port, udp_port, log_name, nofile=None):
+    def start_client(self, local_port, udp_port, log_name, nofile=None, extra=()):
         return self.start([self.bin.client, f"--local=127.0.0.1:{local_port}",
-                           f"--remote=127.0.0.1:{udp_port}", KEY], log_name,
-                          nofile=nofile)
+                           f"--remote=127.0.0.1:{udp_port}", KEY, *extra],
+                          log_name, nofile=nofile)
 
-    def pair(self, target_port, client_nofile=None):
-        """A fresh server and client; returns (server, client, local port,
-        udp port, client log)."""
+    def pair(self, target_port, client_nofile=None, extra=()):
+        """A fresh server and client, both given `extra` flags; returns
+        (server, client, local port, udp port, client log)."""
         n = self.pairs
         self.pairs += 1
         udp, local = UDP_BASE + n, LOCAL_BASE + n
-        server = self.start_server(udp, target_port, f"server{n}.log")
-        client = self.start_client(local, udp, f"client{n}.log", client_nofile)
+        server = self.start_server(udp, target_port, f"server{n}.log", extra)
+        client = self.start_client(local, udp, f"client{n}.log", client_nofile,
+                                   extra)
         time.sleep(2)
         return server, client, local, udp, os.path.join(self.log_dir, f"client{n}.log")
 
@@ -639,6 +652,143 @@ def case_server_gone_then_client_restarted(h):
     h.stop(server, client)
 
 
+def exit_status(args):
+    """Runs `args` to its end; returns (exit status or None if it kept
+    running, its output)."""
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True)
+    try:
+        out, _ = proc.communicate(timeout=15)
+        return proc.returncode, out
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, _ = proc.communicate()
+        return None, out
+
+
+def case_user_errors(h):
+    # Each binary, given a --user it cannot honour, must stop with a message
+    # before it listens -- and never run on as the wrong user.
+    b = h.bin
+    argv = {"server": [b.server, "--listen=127.0.0.1:24150",
+                       f"--target=127.0.0.1:{ECHO_PORT}", KEY],
+            "client": [b.client, "--local=127.0.0.1:24250",
+                       "--remote=127.0.0.1:24150", KEY]}
+    if WINDOWS:
+        wrong = [("any --user", "a-user", "only available on Linux and macOS")]
+    else:
+        import pwd
+        me = pwd.getpwuid(os.getuid()).pw_name
+        wrong = [("an unknown user", "no_such_user_x", "no such user"),
+                 ("a uid beyond range", "4294967295", "not a valid uid"),
+                 ("a uid with no passwd entry", "54321", "no such user")]
+        try:
+            other = pwd.getpwnam("nobody")
+            if other.pw_uid != os.getuid():
+                wrong.append(("a user to switch to, without root", "nobody", "needs root"))
+        except KeyError:
+            pass
+    for name, bin_args in argv.items():
+        for what, user, message in wrong:
+            status, out = exit_status(bin_args + [f"--user={user}"])
+            check(status == 1 and message in out and "listening" not in out,
+                  f"{name} given {what} exits with status 1 and says '{message}' "
+                  f"(status {status})")
+    if WINDOWS:
+        return
+    # The user already running the process is the one a service manager
+    # starts it as: nothing to switch, and everything works as before.
+    for user in (me, str(os.getuid())):
+        server, client, local, udp, _ = h.pair(ECHO_PORT, extra=(f"--user={user}",))
+        check(roundtrip(local, b"as the user it already runs as"),
+              f"--user={user}, the user already running: tunnels")
+        check(server.poll() is None and client.poll() is None,
+              f"--user={user}: both still running")
+        h.stop(server, client)
+
+
+def process_ids(pid):
+    """(uid, gid, supplementary groups or None, effective capabilities or
+    None) of a running process; only Linux can say the last two."""
+    if sys.platform == "linux":
+        fields = {}
+        for line in open(f"/proc/{pid}/status"):
+            key, _, value = line.partition(":")
+            fields[key] = value.split()
+        return (int(fields["Uid"][1]), int(fields["Gid"][1]),
+                [int(g) for g in fields["Groups"]], int(fields["CapEff"][0], 16))
+    out = subprocess.run(["ps", "-o", "uid=,gid=", "-p", str(pid)],
+                         capture_output=True, text=True).stdout.split()
+    # macOS prints nobody's -2 as it is; the kernel's uid_t is unsigned.
+    return int(out[0]) % 2**32, int(out[1]) % 2**32, None, None
+
+
+def udp_socket_owners(remote_port):
+    """uids owning the UDP sockets connected to loopback port `remote_port`
+    (Linux only: /proc/net/udp)."""
+    owners = set()
+    want = f"{remote_port:04X}"
+    for line in open("/proc/net/udp").read().splitlines()[1:]:
+        f = line.split()
+        if f[2].split(":")[1] == want and f[2].split(":")[0] != "00000000":
+            owners.add(int(f[7]))
+    return owners
+
+
+def case_user_drop(h):
+    # Needs root, so only runs as root. Both binaries listen below 1024 -- a
+    # port only root may bind -- and are then switched to nobody.
+    import pwd
+    nobody = pwd.getpwnam("nobody")
+    uid, gid = nobody.pw_uid % 2**32, nobody.pw_gid % 2**32
+    udp, local = 453, 454
+    args = ("--user=nobody", "--idle_timeout_seconds=3")
+    server = h.start_server(udp, ECHO_PORT, "drop_server.log", args)
+    # By number this time, to cover that spelling too.
+    client = h.start_client(local, udp, "drop_client.log",
+                            extra=(f"--user={nobody.pw_uid}", "--idle_timeout_seconds=3"))
+    time.sleep(2)
+    for name, proc in (("server", server), ("client", client)):
+        check(proc.poll() is None, f"{name} is running after switching to nobody")
+        if proc.poll() is None:
+            got = process_ids(proc.pid)
+            check(got[:2] == (uid, gid), f"{name} runs as nobody (uid, gid {got[:2]})")
+            if got[2] is not None:
+                check(0 not in got[2], f"{name} has no supplementary group 0 ({got[2]})")
+                check(got[3] == 0, f"{name} has no capability ({got[3]:#x})")
+        log = open(os.path.join(h.log_dir, f"drop_{name}.log")).read()
+        check("running as 'nobody'" in log, f"{name} says which user it runs as")
+    check(roundtrip(local, os.urandom(1 << 20)), "a tunnel through the two, 1 MiB")
+    check_no_spin("both running as nobody", [server, client])
+
+    # The client's UDP socket is replaced when it reconnects, which a
+    # process that dropped root has to manage on its own.
+    h.stop(server)
+    time.sleep(6)  # past --idle_timeout_seconds, so the client sees it gone
+    server = h.start_server(udp, ECHO_PORT, "drop_server_again.log", args)
+    time.sleep(2)
+    ok = False
+    for _ in range(6):
+        if roundtrip(local, b"after the server returned"):
+            ok = True
+            break
+        time.sleep(5)
+    check(ok, "the client tunnels again after the server returns")
+    check(client.poll() is None, "the client is still running")
+    if sys.platform == "linux":
+        owners = udp_socket_owners(udp)
+        check(owners == {uid}, f"the client's UDP socket now belongs to nobody "
+                               f"(owners {sorted(owners)})")
+    h.stop(server, client)
+
+    # Nothing to switch to: still root, and everything works.
+    server, client, local, _, _ = h.pair(ECHO_PORT, extra=("--user=root",))
+    check(process_ids(server.pid)[:2] == (0, 0) and process_ids(client.pid)[:2] == (0, 0),
+          "--user=root leaves both running as root")
+    check(roundtrip(local, b"as root"), "--user=root: tunnels")
+    h.stop(server, client)
+
+
 def main():
     binaries = Binaries(sys.argv[1] if len(sys.argv) > 1 else ".")
     h = Harness(binaries, tempfile.mkdtemp(prefix="quictun-smoke-"))
@@ -651,23 +801,29 @@ def main():
     serve_forever(ECHO_PORT, echo)
     serve_forever(TAIL_PORT, send_tail_then_close)
 
-    cases = [
-        case_idle_and_traffic,
-        case_refused_target,
-        case_local_half_close,
-        case_backpressure_recovers,
-        case_urgent_byte,
-        case_local_reset,
-        case_response_tail,
-        case_many_connections,
-        case_dual_stack,
-        case_many_udp_sockets,
-        case_non_ascii_key,
-        case_large_socket_buffer,
-    ]
-    if not WINDOWS:  # Windows has no per-process descriptor limit to lower
-        cases.append(case_out_of_descriptors)
-    cases.append(case_server_gone_then_client_restarted)
+    if not WINDOWS and os.geteuid() == 0:
+        # Run as root only for the cases that need it: the others test what a
+        # process without privilege does, and gain nothing from root.
+        cases = [case_user_drop]
+    else:
+        cases = [
+            case_idle_and_traffic,
+            case_refused_target,
+            case_local_half_close,
+            case_backpressure_recovers,
+            case_urgent_byte,
+            case_local_reset,
+            case_response_tail,
+            case_many_connections,
+            case_dual_stack,
+            case_many_udp_sockets,
+            case_non_ascii_key,
+            case_large_socket_buffer,
+            case_user_errors,
+        ]
+        if not WINDOWS:  # Windows has no per-process descriptor limit to lower
+            cases.append(case_out_of_descriptors)
+        cases.append(case_server_gone_then_client_restarted)
     for case in cases:
         try:
             case(h)

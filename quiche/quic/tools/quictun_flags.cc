@@ -32,6 +32,19 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "identical value.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    std::string, user, "",
+    "Run as this user (a name or a numeric uid) once the sockets are bound: "
+    "its primary group and supplementary groups replace root's. Binding is "
+    "the one thing quictun needs root for, a port below 1024 -- what is done "
+    "after that, reconnecting included, needs no privilege. Needs root, "
+    "unless the process already runs as that user; the user must be in "
+    "/etc/passwd. Unset, the process keeps the user it started as. Sockets "
+    "made before the switch (the listening ones, and the client's first UDP "
+    "sockets) stay owned by root; later ones, and every connection to the "
+    "target, belong to the user, which is what iptables/nftables owner "
+    "matches see. Refused on Windows.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
     std::string, congestion_control, "cubic",
     "Congestion control algorithm for this endpoint's own send direction: "
     "one of cubic, bbr, bbr2, bbr3.");
@@ -186,6 +199,7 @@ namespace quic {
 QuictunTuningOptions GetQuictunTuningOptionsFromFlags() {
   QuictunTuningOptions options;
   options.psk = quiche::GetQuicheCommandLineFlag(FLAGS_key);
+  options.user = quiche::GetQuicheCommandLineFlag(FLAGS_user);
   options.congestion_control =
       quiche::GetQuicheCommandLineFlag(FLAGS_congestion_control);
   options.max_congestion_window_bytes =
@@ -292,6 +306,7 @@ void PrintQuictunStartupBanner(
   std::vector<QuictunConfigLine> lines = binary_specific_config;
   lines.push_back(
       {"key", absl::StrCat("<redacted, ", options.psk.size(), " bytes>")});
+  lines.push_back({"user", options.user.empty() ? "(unchanged)" : options.user});
   lines.push_back({"congestion_control", options.congestion_control});
   lines.push_back({"max_congestion_window_kb",
                     absl::StrCat(options.max_congestion_window_bytes / 1024)});

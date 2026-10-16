@@ -586,3 +586,12 @@ jobs:
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" testing/smoke/smoke_test.py bin
+
+      # Run as root, smoke_test.py runs only the --user cases, which bind
+      # below 1024 and switch to nobody. Windows has no user to switch to; the
+      # step above checks that it refuses the flag.
+      - name: Smoke test --user (as root)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sudo "$(command -v python3)" testing/smoke/smoke_test.py bin

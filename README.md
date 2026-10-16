@@ -86,6 +86,7 @@ quictun_server  (built 2026/08/06 20:14:23)
   max_new_connections_per_event_loop  = 100
   max_concurrent_connections          = 5000
   key                                 = <redacted, 20 bytes>
+  user                                = (unchanged)
   congestion_control                  = bbr2
   max_congestion_window_kb            = 2851
   udp_gso                             = false
@@ -110,6 +111,7 @@ Every flag below can also be listed at runtime with `--helpfull`.
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--key` | *(required)* | Shared secret checked as an application-layer preamble at the start of every tunnel. The two endpoints must be configured with the identical value. |
+| `--user` | *(unset)* | Run as this user -- a name or a numeric uid -- once the sockets are bound, with its primary and supplementary groups instead of root's. See [Running as a dedicated user](#running-as-a-dedicated-user). Needs root, unless the process already runs as that user; the user must be in `/etc/passwd`. Unset, the process keeps the user it started as. Refused on Windows. |
 | `--congestion_control` | `cubic` | `cubic`, `bbr`, `bbr2`, or `bbr3`. Applies independently to *this endpoint's own send direction* -- client and server each pick their own, and the two need not match. An unrecognized value falls back to `cubic` with a logged warning rather than failing to start. |
 | `--max_congestion_window_kb` | `2851` | Upper bound on this endpoint's send-direction congestion window, in KiB. BBR sizes the window to the path but never above this, so raise it on high-bandwidth-delay paths where the default (QUICHE's 2000-packet cap) limits throughput when there is no loss; under loss the receive-window flags are the separate lever. The sent-packet tracking limit is scaled to match automatically. |
 | `--udp_gso` | `false` | Send through UDP GSO: consecutive packets to the same peer leave in one `sendmsg` instead of one each. Needs Linux 4.18+; refused at startup on any other OS. |
@@ -148,6 +150,36 @@ Every flag below can also be listed at runtime with `--helpfull`.
 All address flags accept `host:port` or `[ipv6-literal]:port`; DNS names are
 not supported (IP literals only). `[::]` (IPv6 wildcard) also accepts IPv4
 traffic on the same socket.
+
+## Running as a dedicated user
+
+```
+sudo quictun_server --listen=[::]:443 --target=127.0.0.1:12948 --key='a real shared secret' --user=quictun
+```
+
+`--user` (on both binaries; Linux and macOS) is shadowsocks-libev's `-a`: the
+process starts as root, binds its listening sockets, then switches to the
+user -- a name or a numeric uid -- and exits with an error if it cannot. That
+is the one thing quictun needs root for, a port below 1024 such as UDP 443;
+everything after it, including the client opening a new UDP socket to
+reconnect, needs no privilege at all, and the process keeps no capability. A
+user that does not exist, or a process that is not root and not already that
+user, stops it before anything is bound. Without root, the usual way to the
+same end is for the service manager to start the process as that user, on a
+port of 1024 or above (`procd_set_param user` on OpenWrt, `User=` in
+systemd); `--user` is for when it must start as root.
+
+Which sockets belong to whom matters if the user is what a firewall rule
+matches (iptables `-m owner --uid-owner`, nftables `meta skuid`), for
+instance to give each instance its own route out:
+
+- sockets made before the switch stay owned by root: the server's UDP
+  listener, the client's TCP listener, and a client UDP socket no tunnel has
+  used yet. The client replaces an idle UDP socket before its next tunnel
+  uses it, so the ones carrying traffic belong to the user;
+- sockets made afterwards belong to the user: the server's connection to
+  `--target` (or to each tunnel's destination, with `--transparent`), and the
+  connections `quictun_client` accepts.
 
 ## Getting binaries
 

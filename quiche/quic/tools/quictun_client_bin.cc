@@ -161,6 +161,13 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 #endif
+  // Before anything is bound, so that a mistyped user stops it here.
+  absl::StatusOr<std::optional<quic::QuictunRunAs>> run_as =
+      quic::ResolveQuictunUser(options.user);
+  if (!run_as.ok()) {
+    std::cerr << run_as.status() << std::endl;
+    return 1;
+  }
   quic::ApplyQuictunCongestionTuning(options);
   options.zero_rtt = quiche::GetQuicheCommandLineFlag(FLAGS_zero_rtt);
   options.udp_socket = quiche::GetQuicheCommandLineFlag(FLAGS_udp_socket);
@@ -190,6 +197,11 @@ int main(int argc, char* argv[]) {
   absl::Status status = driver.Start();
   if (!status.ok()) {
     std::cerr << "Failed to start quictun_client: " << status << std::endl;
+    return 1;
+  }
+  if (absl::Status dropped = quic::DropToQuictunUser(*run_as); !dropped.ok()) {
+    std::cerr << "Failed to switch to --user=" << options.user << ": "
+              << dropped << std::endl;
     return 1;
   }
 

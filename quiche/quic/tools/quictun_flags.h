@@ -33,6 +33,10 @@ struct QuictunTuningOptions {
   // quictun_server_connection.cc). Must match on both ends.
   std::string psk;
 
+  // --user: the account to run as once the sockets are bound. Empty keeps
+  // the user the process started as. See quictun_platform.h.
+  std::string user;
+
   // Whether to attempt 0-RTT resumption for new QUIC connections. See
   // quictun_client_driver.h for where this is actually consumed.
   // Client-only, and set by quictun_client_bin.cc rather than by

@@ -14,6 +14,10 @@
 
 #include "absl/strings/str_cat.h"
 #else
+#include <grp.h>
+#include <pwd.h>
+#include <unistd.h>
+
 #include <cerrno>
 #include <csignal>
 #endif
@@ -25,12 +29,18 @@
 #include <algorithm>
 #endif
 
+#include <cstdint>
+#include <iostream>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 
 namespace quic {
 
@@ -213,6 +223,110 @@ absl::Status InitQuictunPlatform() { return IgnoreSigpipe(); }
 absl::StatusOr<std::vector<std::string>> QuictunCommandLine(int argc,
                                                             char* argv[]) {
   return std::vector<std::string>(argv, argv + argc);
+}
+
+absl::StatusOr<std::optional<QuictunRunAs>> ResolveQuictunUser(
+    absl::string_view user) {
+  if (user.empty()) {
+    return std::nullopt;
+  }
+  // A number is a uid, anything else a name, as shadowsocks-libev's run_as()
+  // reads -a (utils.c).
+  uint64_t uid = 0;
+  const bool numeric = absl::SimpleAtoi(user, &uid);
+  if (numeric && uid >= UINT32_MAX) {  // UINT32_MAX is (uid_t)-1.
+    return absl::InvalidArgumentError(
+        absl::StrCat("--user=", user, ": not a valid uid"));
+  }
+  // getpwnam_r() and getpwuid_r() rather than getpwnam() and getpwuid(),
+  // which return a pointer into a static buffer; retried with a larger
+  // buffer on ERANGE, up to the same 16 KiB cap as shadowsocks-libev.
+  passwd entry;
+  passwd* found = nullptr;
+  std::vector<char> buffer(1024);
+  const std::string name(user);
+  for (;;) {
+    const int error =
+        numeric ? getpwuid_r(static_cast<uid_t>(uid), &entry, buffer.data(),
+                             buffer.size(), &found)
+                : getpwnam_r(name.c_str(), &entry, buffer.data(),
+                             buffer.size(), &found);
+    if (error == ERANGE && buffer.size() < 16 * 1024) {
+      buffer.resize(buffer.size() * 2);
+      continue;
+    }
+    if (error != 0) {
+      return absl::ErrnoToStatus(error,
+                                 absl::StrCat("--user=", user, ": lookup failed"));
+    }
+    break;
+  }
+  if (found == nullptr) {
+    return absl::NotFoundError(
+        absl::StrCat("--user=", user, ": no such user in the passwd database"));
+  }
+  QuictunRunAs run_as{entry.pw_name, static_cast<uint32_t>(entry.pw_uid),
+                      static_cast<uint32_t>(entry.pw_gid)};
+  if (geteuid() == entry.pw_uid) {
+    return std::nullopt;
+  }
+  if (geteuid() != 0) {
+    return absl::FailedPreconditionError(absl::StrCat(
+        "--user=", user, " needs root to switch to; this process runs as uid ",
+        geteuid()));
+  }
+  return run_as;
+}
+
+absl::Status DropToQuictunUser(const std::optional<QuictunRunAs>& run_as) {
+  if (!run_as.has_value()) {
+    return absl::OkStatus();
+  }
+  const uid_t uid = static_cast<uid_t>(run_as->uid);
+  const gid_t gid = static_cast<gid_t>(run_as->gid);
+  // Groups first, then gid, then uid: once the uid has changed the process
+  // can no longer change its groups. The supplementary groups are replaced
+  // by the account's own, because skipping that keeps root's (the bug QEMU's
+  // -runas had); initgroups() is what dnsmasq and OpenSSH use for it too.
+  if (initgroups(run_as->name.c_str(), gid) != 0) {
+    return absl::ErrnoToStatus(errno, "initgroups() failed");
+  }
+  if (setgid(gid) != 0) {
+    return absl::ErrnoToStatus(errno, "setgid() failed");
+  }
+  if (setuid(uid) != 0) {
+    return absl::ErrnoToStatus(errno, "setuid() failed");
+  }
+  // Checked rather than assumed: a process that can still become root has
+  // not dropped anything.
+  if (getuid() != uid || geteuid() != uid || getgid() != gid ||
+      getegid() != gid) {
+    return absl::InternalError("the user or group id did not change");
+  }
+  if (gid != 0 && setgid(0) == 0) {
+    return absl::InternalError("the process can still regain group 0");
+  }
+  if (uid != 0 && setuid(0) == 0) {
+    return absl::InternalError("the process can still regain root");
+  }
+  std::cerr << "quictun running as '" << run_as->name << "' (uid " << uid
+            << ", gid " << gid << ")" << std::endl;
+  return absl::OkStatus();
+}
+#else
+absl::StatusOr<std::optional<QuictunRunAs>> ResolveQuictunUser(
+    absl::string_view user) {
+  if (!user.empty()) {
+    return absl::FailedPreconditionError(
+        "--user is only available on Linux and macOS");
+  }
+  return std::nullopt;
+}
+
+absl::Status DropToQuictunUser(const std::optional<QuictunRunAs>& run_as) {
+  return run_as.has_value()
+             ? absl::InternalError("--user is only available on Linux and macOS")
+             : absl::OkStatus();
 }
 #endif
 
